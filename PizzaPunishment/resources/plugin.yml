@@ -1,0 +1,154 @@
+name: PizzaPunishment
+main: me.pizzasmp.punishdrop.PunishDropPlugin
+version: 1.0.0
+api-version: "1.21"
+author: FolksyPizza
+description: ExampleSMP punishment stack with presets, Ban IDs, history, and admin GUIs.
+commands:
+  punish:
+    description: Punish a player using a preset category or custom duration and reason.
+    usage: /punish <player> <category|duration|reason...> [duration]
+    permission: pizzasmp.punish
+  ban:
+    description: Apply a ban using a preset category or a custom duration and reason.
+    usage: /ban <player> <category|duration|reason...> [duration]
+    permission: pizzasmp.ban
+  permban:
+    description: Permanently ban a player with a preset or custom reason.
+    usage: /permban <player> <category|reason...>
+    permission: pizzasmp.ban
+  unban:
+    description: Unban a player, IP, or Ban ID.
+    usage: /unban <player|ip|id>
+    permission: pizzasmp.unban
+  unpunish:
+    description: Alias of /unban.
+    usage: /unpunish <player|ip|id>
+    permission: pizzasmp.unban
+  forgive:
+    description: Alias of /unban.
+    usage: /forgive <player|ip|id>
+    permission: pizzasmp.unban
+  idunban:
+    description: Unban a punishment record directly by Ban ID.
+    usage: /idunban <ban-id>
+    permission: pizzasmp.unban
+  ipban:
+    description: IP-ban a player or raw IP using a preset or custom duration and reason.
+    usage: /ipban <player|ip> <category|duration|reason...> [duration]
+    permission: pizzasmp.ipban
+  ippermban:
+    description: Permanently IP-ban a player or raw IP.
+    usage: /ippermban <player|ip> <category|reason...>
+    permission: pizzasmp.ipban
+  kick:
+    description: Kick an online player with a preset or custom reason.
+    usage: /kick <player> <category|reason...>
+    permission: pizzasmp.kick
+  mute:
+    description: Mute a player with a preset or custom duration and reason.
+    usage: /mute <player> <category|duration|reason...> [duration]
+    permission: pizzasmp.mute
+  unmute:
+    description: Unmute a player or Ban ID.
+    usage: /unmute <player|id>
+    permission: pizzasmp.unmute
+  history:
+    description: View punishment history for a player, IP, or Ban ID.
+    usage: /history <player|ip|id> [page]
+    permission: pizzasmp.history
+  bancheck:
+    description: Open the active bans GUI or check punishment history.
+    usage: /bancheck [player|ban-id]
+    permission: pizzasmp.bancheck
+  searchid:
+    description: Search the local punishment store by Ban ID.
+    usage: /searchid <id>
+    permission: pizzasmp.history
+  bans:
+    description: Open the ExampleSMP moderation GUI.
+    usage: /bans [page]
+    permission: pizzasmp.bans
+  moderation:
+    description: Alias of /bans.
+    usage: /moderation
+    permission: pizzasmp.bans
+  listbans:
+    description: Show active local bans in the GUI or console.
+    usage: /listbans [page]
+    permission: pizzasmp.listbans
+  listmutes:
+    description: Show active local mutes in the GUI or console.
+    usage: /listmutes [page]
+    permission: pizzasmp.listmutes
+  clearbans:
+    description: Clear all active local bans with confirmation.
+    usage: /clearbans [confirm]
+    permission: pizzasmp.clearbans
+  clearmutes:
+    description: Clear all active local mutes with confirmation.
+    usage: /clearmutes [confirm]
+    permission: pizzasmp.clearmutes
+  offend:
+    description: Issue a cheating offense (ban + strike). 3 strikes => 365d ban.
+    usage: /offend <player> [reason...]
+    aliases: [offense]
+    permission: pizzasmp.admin.offend
+  offenses:
+    description: View a player's cheating offenses or top offenders.
+    usage: /offenses [player]
+    aliases: [strikes]
+    permission: pizzasmp.staff.offenses
+  unoffend:
+    description: Revoke a cheating strike (default 1, or "all" to clear).
+    usage: /unoffend <player> [count|all]
+    permission: pizzasmp.admin.offend
+permissions:
+  pizzasmp.punish:
+    description: Use /punish command and preset moderation actions.
+    default: op
+  pizzasmp.ban:
+    description: Use /ban and /permban.
+    default: op
+  pizzasmp.unban:
+    description: Use /unban, /unpunish, /forgive, and /idunban.
+    default: op
+  pizzasmp.ipban:
+    description: Use /ipban and /ippermban.
+    default: op
+  pizzasmp.kick:
+    description: Use /kick.
+    default: op
+  pizzasmp.mute:
+    description: Use /mute.
+    default: op
+  pizzasmp.unmute:
+    description: Use /unmute.
+    default: op
+  pizzasmp.history:
+    description: Use /history and /searchid.
+    default: op
+  pizzasmp.bancheck:
+    description: Use /bancheck command.
+    default: op
+  pizzasmp.bans:
+    description: Use /bans and /moderation.
+    default: op
+  pizzasmp.listbans:
+    description: Use /listbans command.
+    default: op
+  pizzasmp.listmutes:
+    description: Use /listmutes command.
+    default: op
+  pizzasmp.clearbans:
+    description: Use /clearbans command.
+    default: op
+  pizzasmp.clearmutes:
+    description: Use /clearmutes command.
+    default: op
+  pizzasmp.admin.offend:
+    description: Issue and revoke cheating offenses (/offend, /unoffend).
+    default: op
+  pizzasmp.staff.offenses:
+    description: View cheating offense counts and history (/offenses).
+    default: op

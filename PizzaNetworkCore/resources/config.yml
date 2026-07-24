@@ -1,0 +1,54 @@
+sync:
+  # ALPHA: cross-server player sync + limbo maintenance. Off by default.
+  # A single standalone server does not need this; the economy uses the database below regardless.
+  enabled: false
+  server-name: auto
+  database:
+    host: 127.0.0.1
+    port: 3306
+    name: smpcore
+    user: smpcore
+    password: changeme
+    parameters: "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true"
+  session:
+    lease-seconds: 45
+    heartbeat-ticks: 200
+  reconnect:
+    enabled: true
+    lobby-server-name: lobby
+    excluded-servers:
+      - maintenance
+    bypass-permission: ""
+    delay-ticks: 20
+    min-offline-seconds: 4
+  location:
+    restore-on-join: true
+    teleport-delay-ticks: 5
+  debug:
+    log-join-state: false
+    log-pending-actions: false
+maintenance_music:
+  enabled: true
+  sound: MUSIC_DISC_MELLOHI
+  interval_seconds: 177
+  volume: 0.6
+  pitch: 1.0
+  debug_log: false
+maintenance_queue:
+  debug_log: false
+  return_batch_size: 2
+  return_drain_interval_ticks: 20
+router:
+  debug_log: false
+combat:
+  debug_log: false
+chat_debug:
+  log_bridge_payloads: false
+hud:
+  sidebar_enabled: false
+  force_ascii_icons: false
+chat:
+  intercept_async_chat: false
+  global_chat_enabled: false
+  cross_server_msg_enabled: true
+  cross_server_team_chat_enabled: true

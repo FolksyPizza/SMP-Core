@@ -1,0 +1,216 @@
+name: PizzaNetworkCore
+version: 1.0.0
+main: dev.pizzasmp.networkcore.PizzaNetworkCore
+api-version: '1.21'
+folia-supported: true
+authors: [FolksyPizza]
+description: ExampleSMP core UX plugin (join/quit suppression, guide/settings/stats GUIs)
+libraries:
+  - org.mariadb.jdbc:mariadb-java-client:3.5.4
+  - com.zaxxer:HikariCP:5.1.0
+commands:
+  settings:
+    usage: /settings
+  stats:
+    usage: /stats [player]
+  shop:
+    usage: /shop
+  sell:
+    usage: /sell [all|reload]
+  ah:
+    usage: /ah
+    aliases: [auction]
+  orders:
+    usage: /orders
+    aliases: [order]
+  baltop:
+    usage: /baltop
+  leaderboard:
+    usage: /leaderboard [category]
+    aliases: [leaderboards]
+  bounty:
+    usage: /bounty [player] [amount]
+    aliases: [bounties]
+  queuetest:
+    usage: /queuetest
+    description: Force-enqueue yourself to test the join queue (admin).
+  vdthrottle:
+    usage: /vdthrottle [player|set <n>|reset]
+    description: View/control the view-distance throttle (admin).
+  nv:
+    usage: /nv [player]
+    description: Toggle infinite night vision (same state as the /settings toggle).
+    aliases: [nightvision]
+  manage:
+    usage: /manage
+    description: Backend management console (dev + granted admins).
+  tpauto:
+    usage: /tpauto
+    description: Toggle auto-accepting incoming TPA requests (same state as /settings).
+  discord:
+    usage: /discord
+  homes:
+    usage: /homes
+  kill:
+    usage: /kill
+  admin:
+    usage: /admin
+    description: In-game server admin console.
+    permission: pizzasmp.admin.console
+  maintenancemotd:
+    usage: /maintenancemotd <text>
+    description: Set the maintenance server-list MOTD.
+    aliases: [setmaintenancemotd, maintmotd]
+    permission: pizzasmp.admin.console
+  limbomaint:
+    usage: /limbomaint <start|stop|status>
+    description: Full-stop limbo maintenance (transfer players to limbo, restart SMP).
+    aliases: [limbo]
+    permission: pizzasmp.admin.console
+  branding:
+    usage: /branding [status] | /branding set <profile>
+    description: Switch the active server brand profile.
+    permission: pizzasmp.admin.console
+  worth:
+    usage: /worth [item]
+  sellmulti:
+    usage: /sellmulti
+  team:
+    usage: /team [create|invite|accept|decline|kick|leave|promote|demote|transfer|disband|sethome|home|info|chat|settings|gui]
+    aliases: [teams]
+  friend:
+    usage: /friend [add|accept|deny|remove|list|requests]
+    aliases: [friends]
+  follow:
+    usage: /follow <player>
+  unfollow:
+    usage: /unfollow <player>
+  sethome:
+    usage: /sethome [name]
+  delhome:
+    usage: /delhome [name]
+  home:
+    usage: /home [name]
+    description: Open the homes GUI or teleport to a named home.
+  rtp:
+    usage: /rtp [east|nether|end]
+    description: Random teleport.
+  tpa:
+    usage: /tpa <player>
+  tpahere:
+    usage: /tpahere <player>
+  tpacancel:
+    usage: /tpacancel
+  tpaaccept:
+    usage: /tpaaccept [player]
+    aliases: [tpaccept]
+  tpadeny:
+    usage: /tpadeny [player]
+    aliases: [tpdeny]
+  ping:
+    usage: /ping
+  sus:
+    usage: /sus
+    aliases: [suspicious]
+  viewdistance:
+    usage: /viewdistance <distance>
+  diagnostics:
+    usage: /diagnostics
+  shards:
+    usage: /shards give <player> <amount>
+  reset:
+    usage: /reset <deaths|kills|playtime|money> <player>
+  pizzasusflag:
+    usage: /pizzasusflag <player> <checkName> <vl>
+  txlog:
+    usage: /txlog [player] [page]
+  pizzadebug:
+    usage: /pizzadebug hud
+  admindelhome:
+    usage: /admindelhome <player> <home>
+permissions:
+  pizzasmp.manage:
+    description: Access the backend management console (/manage). Dev + granted admins.
+    default: false
+  pizzasmp.manage.grant:
+    description: Grant/revoke /manage access to other staff (dev only).
+    default: false
+  pizzasmp.admin.console:
+    description: Open the in-game server admin console (/admin).
+    default: op
+  pizzasmp.settings.fastauction:
+    default: op
+  pizzasmp.sell.reload:
+    default: op
+  pizzasmp.sync.reconnect.bypass:
+    default: false
+  pizzasmp.use.shop:
+    default: true
+  pizzasmp.use.ah:
+    default: true
+  pizzasmp.use.orders:
+    default: true
+  pizzasmp.use.afk:
+    default: true
+  pizzasmp.use.settings:
+    default: true
+  pizzasmp.use.stats:
+    default: true
+  pizzasmp.use.rtp:
+    default: true
+  pizzasmp.rtp.use:
+    default: true
+  pizzasmp.rank.pizzaplus:
+    default: false
+  pizzasmp.homes.open:
+    default: true
+  pizzasmp.homes.limit.2:
+    default: true
+  pizzasmp.homes.limit.5:
+    default: false
+  pizzasmp.homes.delete:
+    default: true
+  pizzasmp.teamhome.set:
+    default: false
+  pizzasmp.use.discord:
+    default: true
+  pizzasmp.shop.admin.reload:
+    default: op
+  pizzasmp.shop.admin.edit:
+    default: op
+  pizzasmp.rtp.cooldown.priority:
+    default: false
+  pizzasmp.teleport.delay.bypass:
+    default: op
+  pizzasmp.chat.global:
+    default: true
+  pizzasmp.chat.msg:
+    default: true
+  pizzasmp.chat.team:
+    default: true
+  pizzasmp.staff.gtp:
+    default: op
+  pizzasmp.admin.eco:
+    default: op
+  pizzasmp.admin.debug:
+    default: op
+  pizzasmp.admin.commands:
+    default: op
+  pizzasmp.admin.shards:
+    default: op
+  pizzasmp.admin.reset:
+    default: op
+  pizzasmp.admin.viewdistance:
+    default: op
+  pizzasmp.admin.diagnostics:
+    default: op
+  pizzasmp.gamemode.flight.bypass:
+    default: op
+  pizzasmp.spawnedit:
+    default: op
+  pizzasmp.pl.view:
+    default: op
+  pizzasmp.plugins.view:
+    default: op
+  pizzasmp.admin.homes:
+    default: op

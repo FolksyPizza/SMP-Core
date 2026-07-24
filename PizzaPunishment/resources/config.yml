@@ -1,0 +1,169 @@
+flight-owner-whitelist:
+  - FolksyPizza
+confirm-window-seconds: 30
+punishment-categories:
+  cheating:
+    action: BAN
+    duration: 30d
+    reason: Cheating or Hacked Client
+    aliases: [hack, hacks, hacker, hacking, cheats]
+  movement-mods:
+    action: BAN
+    duration: 30d
+    reason: Movement Mod
+    aliases: [movement, movementmod, speed, flight, timer]
+  inventory-mods:
+    action: BAN
+    duration: 30d
+    reason: Inventory Mod
+    aliases: [inventorymod, inventory, invmod, cheststealer]
+  health-indicators:
+    action: BAN
+    duration: 30d
+    reason: Health Indicators
+    aliases: [healthindicators, health, hearts]
+  radar:
+    action: BAN
+    duration: 30d
+    reason: Radar
+    aliases: [tracers]
+  freecam:
+    action: BAN
+    duration: 30d
+    reason: Freecam
+    aliases: [freecammod]
+  esp:
+    action: BAN
+    duration: 30d
+    reason: ESP
+    aliases: [wallhack]
+  auto-totem:
+    action: BAN
+    duration: 30d
+    reason: AutoTotem
+    aliases: [autototem, auto_totem, totem]
+  auto-place:
+    action: BAN
+    duration: 30d
+    reason: Auto Place or Easy Place
+    aliases: [autoplace, easyplace, scaffold]
+  macros:
+    action: BAN
+    duration: 30d
+    reason: Macros, Scripts, Auto Clicker, or Mouse Tweaks
+    aliases: [macro, scripts, script, autoclicker, mouse, scroller]
+  crafting-mods:
+    action: BAN
+    duration: 30d
+    reason: Crafting Modification
+    aliases: [craftingmod, crafting, craftingmods]
+  bug-abuse:
+    action: BAN
+    duration: 14d
+    reason: Bug or Glitch Abuse
+    aliases: [bugabuse, bug, glitch, abusebugs]
+  attempted-dupe:
+    action: BAN
+    duration: 30d
+    reason: Attempted Item Duplication
+    aliases: [attempteddupe, attemptdupe, dupeattempt]
+  dupe:
+    action: BAN
+    duration: perm
+    reason: Item Duplication
+    aliases: [duplicating, duplicate]
+  irl-trading:
+    action: BAN
+    duration: perm
+    reason: IRL Trading
+    aliases: [irltrading, irltrade, irlt]
+  external-gambling:
+    action: BAN
+    duration: 30d
+    reason: External Gambling
+    aliases: [gambling, externalgambling]
+  cross-server-trading:
+    action: BAN
+    duration: 30d
+    reason: Cross-Server Trading
+    aliases: [crossservertrading, crossservertrade]
+  staff-impersonation:
+    action: BAN
+    duration: 30d
+    reason: Staff Impersonation
+    aliases: [staffimpersonation, impersonation, fake_staff]
+  alt-abuse:
+    action: BAN
+    duration: 14d
+    reason: Using More Than 5 Accounts
+    aliases: [accountabuse, alts, altlimit, accounts]
+  seed-abuse:
+    action: BAN
+    duration: 30d
+    reason: Finding or Using the Seed
+    aliases: [seedabuse, seed, xrayseed]
+  teaming-with-hackers:
+    action: BAN
+    duration: 14d
+    reason: Teaming With Hackers
+    aliases: [teamingwithhackers, teaming, hackers]
+  bot:
+    action: IP_BAN
+    duration: 30d
+    reason: Bot or Automated Account
+    aliases: [botting, automated]
+  harassment:
+    action: MUTE
+    duration: 14d
+    reason: Harassment
+    aliases: [harass]
+  bullying:
+    action: MUTE
+    duration: 14d
+    reason: Bullying
+    aliases: [bully]
+  spam:
+    action: MUTE
+    duration: 7d
+    reason: Spam
+    aliases: [spamming]
+  advertising:
+    action: MUTE
+    duration: 14d
+    reason: Advertising or Promotion
+    aliases: [ad, promo, promotion]
+  discrimination:
+    action: BAN
+    duration: 30d
+    reason: Discrimination or Hate Speech
+    aliases: [hate, hatespeech, racism, slurs]
+  death-threats:
+    action: IP_BAN
+    duration: perm
+    reason: Death Threats
+    aliases: [deaththreats, threats, threat]
+  doxxing:
+    action: IP_BAN
+    duration: perm
+    reason: Sharing Private Information
+    aliases: [privateinfo, dox]
+  ban-evasion:
+    action: IP_BAN
+    duration: perm
+    reason: Ban Evasion
+    aliases: [banevasion, evade, evadeban]
+  voice-chat-spam:
+    action: MUTE
+    duration: 7d
+    reason: Voice Chat Spam
+    aliases: [voicechatspam, voicespam, vcspam]
+  forum-spam:
+    action: MUTE
+    duration: 3d
+    reason: Low-Quality or Spam Forum Posts
+    aliases: [forumspam, forum, forumposts]
+  chat-violation:
+    action: MUTE
+    duration: 7d
+    reason: Chat Rule Violation
+    aliases: [chatviolation, chat, chatrule]

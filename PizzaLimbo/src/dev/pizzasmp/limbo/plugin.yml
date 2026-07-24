@@ -1,0 +1,8 @@
+name: PizzaLimbo
+version: 0.1.0
+main: dev.pizzasmp.limbo.PizzaLimbo
+api-version: '1.21'
+author: FolksyPizza
+description: Holds transferred players during SMP maintenance, renders/freezes them, and auto-returns them.
+libraries:
+  - org.mariadb.jdbc:mariadb-java-client:3.5.4

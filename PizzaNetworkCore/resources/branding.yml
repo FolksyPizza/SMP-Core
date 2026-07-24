@@ -1,0 +1,61 @@
+# ============================================================================
+#  PizzaNetworkCore — Server Branding
+# ============================================================================
+#  Brand profiles let you re-theme the whole server without touching the
+#  plugins, world, database, or internal/command names (those never change).
+#  Only the player-facing DISPLAY NAME and COLORS differ between profiles.
+#
+#  TO REBRAND:
+#    1. Copy the example profile below, give it a new key, and edit the name,
+#       colors, region, tagline, Discord, and tier labels.
+#    2. Set  active:  to your profile key (or run /branding set <key>).
+#    3. Restart the server.
+#  Everything re-themes at boot: scoreboard, tab, chat prefixes, menus, GUIs,
+#  dialogs, MOTD, join messages, and the server icon. The setup script writes
+#  a profile here for you if you prefer a guided flow.
+#
+#  HOW COLORS ARE USED:
+#    Messages use the literal token  &#00BFFF  as the "primary" colour marker.
+#    At runtime that token is rewritten to the ACTIVE profile's primary colour,
+#    so the same code restyles for any brand. Other role colours are applied
+#    where the UI references them (info/success/danger/...).
+#    Hex values are WITHOUT the leading '#'.
+# ============================================================================
+
+active: example
+
+profiles:
+
+  # Example profile. Copy this, rename the key, and make it your own.
+  example:
+    display: "ExampleSMP"          # full name shown in HUD title, MOTD, messages
+    short:   "Example"             # short form for tight spaces
+    region:  "NA-East"             # region label
+    tagline: "Survival"            # game-mode / subtitle line
+    discord: "discord.gg/example"
+    server_icon: "server-icon.png"     # file in server root (read at boot)
+    tiers:
+      plus:     "Example+"         # display label for the pizza+ subscription tier
+      plusplus: "Example++"        # display label for the pizza++ subscription tier
+    colors:
+      primary: "00BFFF"          # accent: headers, links, the &#00BFFF token
+      info:    "00BFFF"          # informational text
+      success: "55FF55"          # success / positive
+      warning: "FFAA00"          # caution
+      danger:  "FF5555"          # errors / blocked actions
+      muted:   "AAAAAA"          # secondary / grey text
+      text:    "FFFFFF"          # default body text
+    # Server-list MOTD. {region} is substituted. Proxy uses minimessage; backend uses legacy.
+    motd:
+      minimessage: "<aqua>ExampleSMP <gray>{region}"
+      legacy: "§\n§cꜱᴜʀᴠɪᴠᴀʟ\n§bExampleSMP §7{region}"
+    # LuckPerms rank prefix colours (hex, no #). 'keep' = leave the group untouched.
+    # apply-branding.sh recolours the leading colour of each group's prefix via lp.
+    ranks:
+      owner:    "00BFFF"
+      co-owner: "00BFFF"
+      sradmin:  "FF5555"
+      admin:    "FF5555"
+      srmod:    "55FF55"
+      mod:      "55FF55"
+      dev:      "keep"           # dev stays its own colour

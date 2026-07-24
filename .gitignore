@@ -1,0 +1,20 @@
+# Build output
+**/bin/
+**/bin2/
+**/build/
+**/target/
+**/out/
+*.class
+
+# Built plugin jars are published on GitHub Releases, not committed to the tree.
+# Delete this line if you would rather commit jars directly.
+*.jar
+dist/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+.idea/
+.vscode/
