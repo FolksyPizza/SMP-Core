@@ -19,6 +19,8 @@ A rough sense of the size:
 
 It is not a tidy textbook codebase. PizzaNetworkCore especially is one big plugin that carries a lot, because that is how it grew over time. I have kept it as readable as I could, and the parts that matter carry comments.
 
+A note on the history. I built this privately over those couple of years and only recently decided to open it up and track it in public. That is why the repository starts as a single commit with the whole codebase already in place, rather than years of granular history. From here on, changes are tracked normally, one commit at a time, and issues are used to plan and follow work.
+
 ## Plugins
 
 | Plugin | Version | What it does |
