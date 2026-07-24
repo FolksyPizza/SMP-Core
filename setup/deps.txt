@@ -1,0 +1,28 @@
+# Prerequisite third-party plugins for the SMP-Core suite.
+# Format:  Name | URL-or-MANUAL | note
+# setup-server.sh downloads each into plugins/ (skips ones already present).
+# URL=MANUAL means the license/host doesn't allow auto-download — fetch it yourself.
+# Verify versions against DISTRIBUTION.md; official sources only.
+
+LuckPerms       | AUTO | MIT — latest build auto-resolved from metadata.luckperms.net (pinned build #s 404 over time)
+Vault           | https://github.com/MilkBowl/Vault/releases/download/1.7.3/Vault.jar          | LGPLv3
+PlaceholderAPI  | https://github.com/PlaceholderAPI/PlaceholderAPI/releases/download/2.12.3/PlaceholderAPI-2.12.3.jar | GPLv3
+ProtocolLib     | https://github.com/dmulloy2/ProtocolLib/releases/download/5.4.0/ProtocolLib.jar | GPLv2
+ViaVersion      | MANUAL | GPLv3 — Hangar/GitHub: ViaVersion 5.9.1
+ViaBackwards    | MANUAL | GPLv3 — Hangar/GitHub: ViaBackwards 5.9.1
+EssentialsX     | MANUAL | GPLv3 — https://essentialsx.net/downloads.html (Essentials + EssentialsXChat)
+GrimAC          | MANUAL | GPLv3 — https://grim.ac / GitHub releases 2.3.74
+DeluxeMenus     | MANUAL | GPLv3 — https://www.spigotmc.org/resources/deluxemenus.11734/
+LibertyBans     | MANUAL | AGPLv3 — https://github.com/A248/LibertyBans/releases
+Maintenance     | MANUAL | GPLv3 — https://github.com/kennytv/Maintenance/releases
+Chunky          | MANUAL | GPLv3 — https://www.spigotmc.org/resources/chunky.81534/
+TAB             | MANUAL | verify license — https://github.com/NEZNAMY/TAB/releases (5.5.0)
+floodgate-spigot| MANUAL | MIT — https://geysermc.org/download (backend Floodgate)
+# Proxy-side (install on Velocity, not the SMP): Geyser-Velocity + floodgate-velocity (MIT)
+
+# --- proprietary / unknown-license: NOT redistributable, install manually ---
+IllegalStack    | MANUAL | unknown — SpigotMC resource; anti-dupe/anti-crash
+AntiSeedCracker | MANUAL | unknown — SpigotMC resource
+MyCommand       | MANUAL | free SpigotMC resource (no OSS license)
+aAmethyst       | MANUAL | pikzstudios — amethyst tools plugin
+EnderchestExpander | MANUAL | verify authorship before use

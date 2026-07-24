@@ -1,0 +1,81 @@
+shop:
+  categories:
+    blocks:
+      title: "§9§lExampleSMP §8» §fShop: Blocks"
+      icon: "BRICKS"
+      slot: 10
+      items:
+        - key: "stone"
+          material: "STONE"
+          amount: 64
+          slot: 10
+          buy: 80.0
+          sell: 40.0
+        - key: "oak_log"
+          material: "OAK_LOG"
+          amount: 64
+          slot: 11
+          buy: 120.0
+          sell: 60.0
+    food:
+      title: "§9§lExampleSMP §8» §fShop: Food"
+      icon: "COOKED_BEEF"
+      slot: 12
+      items:
+        - key: "steak"
+          material: "COOKED_BEEF"
+          amount: 16
+          slot: 10
+          buy: 64.0
+          sell: 24.0
+        - key: "golden_carrot"
+          material: "GOLDEN_CARROT"
+          amount: 16
+          slot: 11
+          buy: 96.0
+          sell: 36.0
+    tools:
+      title: "§9§lExampleSMP §8» §fShop: Tools"
+      icon: "DIAMOND_PICKAXE"
+      slot: 14
+      items:
+        - key: "diamond_pickaxe"
+          material: "DIAMOND_PICKAXE"
+          amount: 1
+          slot: 10
+          buy: 1250.0
+          sell: 450.0
+    combat:
+      title: "§9§lExampleSMP §8» §fShop: Combat"
+      icon: "DIAMOND_SWORD"
+      slot: 16
+      items:
+        - key: "diamond_sword"
+          material: "DIAMOND_SWORD"
+          amount: 1
+          slot: 10
+          buy: 1000.0
+          sell: 350.0
+        - key: "arrow"
+          material: "ARROW"
+          amount: 32
+          slot: 11
+          buy: 120.0
+          sell: 48.0
+    misc:
+      title: "§9§lExampleSMP §8» §fShop: Misc"
+      icon: "ENDER_PEARL"
+      slot: 28
+      items:
+        - key: "ender_pearl"
+          material: "ENDER_PEARL"
+          amount: 16
+          slot: 10
+          buy: 320.0
+          sell: 120.0
+        - key: "obsidian"
+          material: "OBSIDIAN"
+          amount: 16
+          slot: 11
+          buy: 240.0
+          sell: 96.0

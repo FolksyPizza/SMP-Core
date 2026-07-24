@@ -1,0 +1,109 @@
+# PizzaRuleGuard
+# Small, alert-first heuristics for cheat-only rules that are hard to cover with one off-the-shelf anticheat.
+# Keep these values conservative; this plugin is intended to complement GrimAC, not replace it.
+
+alerts:
+  # Staff with this permission node receive in-game alerts.
+  permission: pizzaruleguard.alerts
+  # Also print alerts to the server console.
+  console: true
+  # Default cooldown between alerts for the same player/check pair.
+  default-cooldown-ms: 8000
+  # Per-check cooldown overrides.
+  cooldowns:
+    inventory-move: 10000
+    scaffold: 8000
+    autoclicker: 12000
+    mining: 18000
+    crafting: 4000
+    dupe: 15000
+
+logging:
+  # Append alerts and punishments to plugins/PizzaRuleGuard/offenses.log.
+  offense-log: true
+
+checks:
+  inventory-move:
+    enabled: true
+    # Count inventory clicks that happen very shortly after a meaningful move packet.
+    # This is only a heuristic for obvious inventory-move assistance, not a claim of perfect detection.
+    move-window-ms: 160
+    minimum-horizontal-distance: 0.28
+    alert-threshold: 4
+    counter-reset-ms: 12000
+
+  scaffold:
+    enabled: true
+    # Watch for repeated below-feet / airborne bridge placements in a short burst.
+    # GrimAC already covers a lot here; this layer is only for extra staff visibility.
+    window-ms: 1400
+    horizontal-reach-threshold: 1.15
+    min-pitch-degrees: 55.0
+    alert-threshold: 7
+    punish-threshold: 11
+    # Leave false unless staff are happy with the alert quality.
+    cancel-at-high-confidence: false
+
+  autoclicker:
+    enabled: true
+    # Combat-hit samples only. This is intentionally alert-first with a high-confidence punish threshold.
+    sample-window-ms: 3000
+    minimum-samples: 12
+    alert-cps: 15.0
+    alert-max-stddev-ms: 8.0
+    punish-cps: 18.5
+    punish-max-stddev-ms: 4.5
+
+  mining:
+    enabled: true
+    # Low-confidence alerting for Xray-like mining paths.
+    # This only watches valuable ores that were not naturally exposed to open air/liquid.
+    # It is staff-visibility only; no automatic punishments are issued here.
+    window-ms: 600000
+    alert-threshold: 6
+    # Count an ore as "hidden" when this many or fewer faces are exposed to air, cave air, void air, water, or lava.
+    max-exposed-faces: 1
+    watched-blocks:
+      - diamond_ore
+      - deepslate_diamond_ore
+      - emerald_ore
+      - deepslate_emerald_ore
+      - ancient_debris
+
+  crafting:
+    enabled: true
+    # Reject impossible craft results or ingredient stacks that exceed normal stack limits.
+    # This is aimed at modified crafting behavior, not normal custom recipes managed by the server.
+
+  dupe:
+    enabled: true
+    # Periodically scan player inventories and key inventory interactions for impossible stack sizes.
+    # This is not a full dupe detector; it is a defensive logging/sanitizing layer for obvious bad states.
+    periodic-scan-ticks: 1200
+    counter-reset-ms: 300000
+    remove-illegal-stacks: true
+
+punishments:
+  scaffold:
+    enabled: false
+    cooldown-ms: 900000
+    # Example: kick %player% &cScaffold-like placement pattern detected
+    command: ""
+
+  autoclicker:
+    enabled: false
+    cooldown-ms: 1800000
+    # Example: libertybans ban %player% 3d &cAuto-clicker detected [%detail%]
+    command: ""
+
+account-limit-hook:
+  # This plugin does not guess player identity on its own.
+  # Only turn this on if the server already has a trustworthy account-linking backend.
+  enabled: false
+  # Supported value right now is "none". Leave it that way unless a real adapter is added later.
+  backend: none
+  # Policy target only; no enforcement occurs while backend = none.
+  max-accounts-per-identity: 5
+  # Placeholder values for a future adapter.
+  service-name: ""
+  notes: "Extension point only. No live enforcement without an account-linking backend."

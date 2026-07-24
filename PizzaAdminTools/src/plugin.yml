@@ -1,0 +1,163 @@
+name: PizzaAdminTools
+version: 1.1.0
+main: dev.pizzasmp.admin.PizzaAdminTools
+api-version: '1.21'
+commands:
+  gtp:
+    description: Teleport to another player's SetHome home.
+    usage: /gtp <player> [home-name|home-index]
+    permission: pizzasmp.gtp
+  homes:
+    description: Open the ExampleSMP homes GUI.
+    usage: /homes
+    permission: pizzasmp.homes
+  menu:
+    description: Open the ExampleSMP main menu.
+    usage: /menu
+    permission: pizzasmp.menu
+  guide:
+    description: Open the ExampleSMP guide menu.
+    usage: /guide
+    permission: pizzasmp.guide
+  freeze:
+    description: Freeze a player in place.
+    usage: /freeze <player>
+    permission: pizzasmp.freeze
+  unfreeze:
+    description: Unfreeze a player.
+    usage: /unfreeze <player>
+    permission: pizzasmp.unfreeze
+  transfer:
+    description: Transfer yourself or another player to another server endpoint.
+    usage: /transfer <destination|host:port|host port>
+    permission: pizzasmp.transfer
+  transfermaintenance:
+    description: Internal helper command for maintenance transfer workflow.
+    usage: /transfermaintenance <on|off|status>
+    permission: pizzasmp.transfer.maintenance
+  pizzaadmintools:
+    description: PizzaAdminTools help and command hub.
+    usage: /pizzaadmintools [help]
+    aliases:
+      - pizzaadmin
+  pizzateams:
+    description: PizzaTeams command hub.
+    usage: /pizzateams [help]
+  pizzamenus:
+    description: PizzaMenus command hub.
+    usage: /pizzamenus [help]
+  pizzahome:
+    description: PizzaHome command hub.
+    usage: /pizzahome [help]
+  pizzabans:
+    description: PizzaBans command hub.
+    usage: /pizzabans [help]
+  pizzaplugins:
+    description: Show ExampleSMP plugin stack.
+    usage: /pizzaplugins
+    permission: pizzasmp.pluginadmin
+  # /sus and /suspicious are handled by PizzaNetworkCore — keeping it registered here would cause a conflict
+  # /nv and /nightvision are handled by PizzaNetworkCore (same state as the /settings
+  # Night Vision toggle) — keeping them registered here would conflict, like /sus.
+  stash:
+    description: Spawn a small randomized survival camp where you are looking.
+    usage: /stash
+    aliases: [spawnstash]
+    permission: pizzasmp.admin.stash
+  spawnstash:
+    description: Spawn a small randomized survival camp where you are looking.
+    usage: /spawnstash
+    aliases: [stash]
+    permission: pizzasmp.admin.stash
+  pizzaplus:
+    description: Manage Pizza+/Pizza++ subscriptions (30-day default, renewable, monthly shard stipends).
+    usage: /pizzaplus <give|revoke|check|extend> <player> [plus|plusplus] [days|Nmo] | /pizzaplus list [plus|plusplus]
+    permission: pizzasmp.admin.pizzaplus
+  perks:
+    description: Show Pizza+ perks (available to all players).
+    usage: /perks
+    permission: pizzasmp.perks
+  atrack:
+    description: Spectator-track a player in 3rd person.
+    usage: /atrack [player]
+    permission: pizzasmp.admin.track
+  servermaint:
+    description: Frozen-in-place maintenance (players stay connected but can't move).
+    usage: /servermaint <start [reason]|end|status>
+    permission: pizzasmp.maintenance.admin
+  sfmode:
+    description: Toggle staff mode (hide and disable staff commands for yourself).
+    usage: /sfmode
+  gmcbypass:
+    description: Console-only — grant a one-time creative-mode bypass to a player.
+    usage: /gmcbypass <player>
+permissions:
+  pizzasmp.gtp:
+    description: Use /gtp to teleport to player homes.
+    default: op
+  pizzasmp.homes:
+    description: Use /homes GUI command.
+    default: true
+  pizzasmp.homes.9:
+    description: Pizza+ home limit (9 homes).
+    default: false
+  pizzasmp.homes.27:
+    description: Pizza++ home limit (27 homes).
+    default: false
+  pizzasmp.menu:
+    description: Use /menu command.
+    default: true
+  pizzasmp.guide:
+    description: Use /guide command.
+    default: true
+  pizzasmp.freeze:
+    description: Use /freeze command.
+    default: op
+  pizzasmp.unfreeze:
+    description: Use /unfreeze command.
+    default: op
+  pizzasmp.transfer:
+    description: Use /transfer for self transfers.
+    default: op
+  pizzasmp.transfer.others:
+    description: Use /transfer to move other players.
+    default: op
+  pizzasmp.transfer.maintenance:
+    description: Use /transfermaintenance helper command.
+    default: op
+  pizzasmp.maintenance.stay:
+    description: Exempt from automatic maintenance transfer and join kick.
+    default: false
+  pizzasmp.maintenance.admin:
+    description: Start/end frozen-in-place maintenance and stay unfrozen during it.
+    default: op
+  pizzasmp.combat.bypass:
+    description: Bypass combat restrictions on /rtp and /home(s).
+    default: op
+  pizzasmp.pluginadmin:
+    description: Access plugin/admin utility commands and branded plugin list.
+    default: op
+  pizzasmp.sus:
+    description: Use /sus to view recent Grim suspects.
+    default: op
+  pizzasmp.nv:
+    description: Use /nv to toggle night vision.
+    default: op
+  pizzasmp.nv.others:
+    description: Use /nv <player> to toggle night vision on others.
+    default: op
+  pizzasmp.admin.stash:
+    description: Use /stash and /spawnstash to spawn a randomized survival camp.
+    default: op
+  pizzasmp.admin.pizzaplus:
+    description: Manage the Pizza+ LuckPerms group.
+    default: op
+  pizzasmp.perks:
+    description: Use /perks to view Pizza+ perks.
+    default: true
+  pizzasmp.admin.track:
+    description: Use /atrack to spectator-track players.
+    default: op
+  pizzasmp.maintenance.motd:
+    description: Use /maintenance motd to set the maintenance MOTD.
+    default: op

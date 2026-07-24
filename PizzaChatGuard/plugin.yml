@@ -1,0 +1,36 @@
+name: PizzaChatGuard
+main: dev.pizzasmp.chat.PizzaChatGuard
+version: 2.0.0
+authors:
+  - FolksyPizza
+api-version: 1.21
+description: "False-positive-resistant chat filter: slurs, advertising, spam, caps."
+softdepend:
+  - PunishDrop
+  - LibertyBans
+commands:
+  clearwarnings:
+    description: "Clear PizzaChatGuard warning count for a player."
+    usage: "/clearwarnings <player>"
+    aliases:
+      - clearwarn
+      - clearwarns
+    permission: pizzasmp.chatguard.clearwarnings
+  pizzachatguard:
+    description: "PizzaChatGuard help / reload."
+    usage: "/pizzachatguard [reload]"
+    aliases:
+      - pcg
+permissions:
+  pizzasmp.chatguard.clearwarnings:
+    description: "Clear PizzaChatGuard warnings and reload config."
+    default: op
+  pizzasmp.chatguard.bypass:
+    description: "Bypass the chat filter entirely (must be explicitly granted; even staff are filtered by default)."
+    default: false
+  pizzasmp.chatguard.links:
+    description: "May post links / IPs (bypasses the advertising filter only). Grant to staff groups."
+    default: false
+  pizzasmp.chatguard.manage:
+    description: "Manage the ChatGuard link whitelist and the owner/dev guard toggle."
+    default: op

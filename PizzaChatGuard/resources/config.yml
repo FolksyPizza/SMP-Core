@@ -1,0 +1,172 @@
+# PizzaChatGuard — false-positive-resistant chat filter
+enabled: true
+
+# Spam controls
+rate-limit-ms: 250          # minimum ms between a player's messages
+duplicate-window-ms: 3000   # block identical message repeated within this window
+
+# Caps filter (only triggers on longer messages that are mostly uppercase)
+caps-min-length: 8          # only check messages with at least this many letters
+caps-threshold: 0.7         # >=70% uppercase = caps violation
+
+block-advertising: true     # block IPs and domain names (server advertising)
+
+# Slurs / hate speech — matched as WHOLE WORDS after leet-speak normalization.
+# Keep this list specific. Word-boundary matching means these never match inside
+# innocent words. (Add entries lowercase; leet variants are handled automatically.)
+slur-words:
+  - nigger
+  - niggers
+  - nigga
+  - niggas
+  - nig
+  - niga
+  - nigaa
+  - nga
+  - ngr
+  - faggot
+  - faggots
+  - fag
+  - fags
+  - faggit
+  - retard
+  - retarded
+  - retards
+  - tard
+  - tranny
+  - trannie
+  - kike
+  - kikes
+  - spic
+  - spics
+  - chink
+  - chinks
+  - coon
+  - coons
+  - wetback
+  - beaner
+  - gook
+  - dyke
+  - homo
+  - queer
+
+# Soft-blocked words — exact whole-word match (with leet normalization). Common profanity.
+blocked-words:
+  - kys
+  - kyss
+  - fuck
+  - fuk
+  - fuc
+  - fck
+  - fucker
+  - fucking
+  - fuckin
+  - fuckyou
+  - fuckoff
+  - motherfucker
+  - mf
+  - stfu
+  - shit
+  - shitt
+  - shyt
+  - bullshit
+  - bitch
+  - bitches
+  - biatch
+  - cunt
+  - cunts
+  - whore
+  - whores
+  - hoe
+  - hoes
+  - slut
+  - sluts
+  - dick
+  - dicks
+  - cock
+  - cocks
+  - pussy
+  - pussies
+  - asshole
+  - assholes
+  - ass
+  - asses
+  - bastard
+  - dickhead
+  - jackass
+  - wanker
+  - twat
+  - prick
+  - bollocks
+  - rape
+  - raped
+  - rapist
+  - pedo
+  - pedophile
+  - paedo
+  - molest
+  - molester
+  - gay
+  - gays
+  - lesbian
+  - simp
+  - damn
+  - bitchass
+
+# Safe words: legitimate words that CONTAIN a banned fragment. Checked first and
+# never flagged. This is the primary false-positive guard.
+safe-words:
+  - class
+  - classic
+  - grass
+  - grasses
+  - pass
+  - passed
+  - password
+  - assassin
+  - assassins
+  - assassinate
+  - bass
+  - brass
+  - glass
+  - mass
+  - massive
+  - compass
+  - embassy
+  - assemble
+  - assembly
+  - assign
+  - assist
+  - associate
+  - assume
+  - assure
+  - asset
+  - assorted
+  - assortment
+  - lass
+  - molasses
+  - potassium
+  - harass
+  - canvass
+  - scunthorpe
+  - cockpit
+  - cocktail
+  - peacock
+  - hancock
+  - specialist
+  - therapist
+  - manuscript
+  - skyscraper
+
+# ---------------------------------------------------------------------------
+# Storage backend (PizzaCommon). 'yaml' = strikes.yml file (single server).
+# 'mysql' = shared DB so chat strikes sync across a multi-region network.
+# One-shot import of existing strikes.yml runs automatically on first mysql boot.
+storage:
+  backend: yaml
+  database:
+    host: 127.0.0.1
+    port: 3306
+    name: smpcore
+    user: smpcore
+    password: ""
