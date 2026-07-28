@@ -4,7 +4,7 @@ SMP-Core is a plugin suite for a survival Minecraft server on Paper. I run a ser
 
 It is fully open source under the MIT license. You can use it, change it, and ship it in commercial projects. The only ask is that you keep the license file.
 
-A full list of commands is in [COMMANDS.md](COMMANDS.md).
+A full list of commands is in [COMMANDS.md](COMMANDS.md). What I want to build next is in [UPCOMING.md](UPCOMING.md).
 
 ## About
 
