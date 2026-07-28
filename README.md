@@ -15,6 +15,8 @@ A full list of commands is in [COMMANDS.md](COMMANDS.md).
 
 A note on the history. I built this privately over those couple of years and only recently decided to open it up and track it in public. That is why the repository starts as a single commit with the whole codebase already in place, rather than years of granular history. From here on, changes are tracked normally, one commit at a time, and issues are used to plan and follow work.
 
+One honest note. I lost the source for part of PizzaNetworkCore at some point and had to recover it by decompiling an old build, then rewrite it back into normal code. A few spots still look like they came out of a decompiler, mostly some awkward labeled loops, and I clean those up as I touch them. It all builds and runs fine, it is just not pretty yet in those corners.
+
 ## Plugins
 
 | Plugin | Version | What it does |
@@ -25,7 +27,7 @@ A note on the history. I built this privately over those couple of years and onl
 | PizzaPunishment | 1.0.0 | Punishment system with bans, mutes, strike tracking, and death-drop mechanics. |
 | PizzaRuleGuard | 1.0.0 | Rule enforcement and anti-abuse guard. |
 | PizzaLimbo | 0.1.0 | A lightweight limbo backend that holds players during maintenance when you run behind a Velocity proxy. |
-| PizzaCommon | 1.0.0 | Shared storage library (YAML or MySQL) that the other plugins build on. Shaded into their jars. |
+| PizzaCommon | 1.0.0 | Shared storage library (YAML or MySQL). Currently used by PizzaChatGuard and shaded into it; the plan is to migrate the other plugins onto it over time. |
 
 ## Status
 
@@ -51,7 +53,7 @@ The core plugin does more per tick than a stock server, so give it real CPU and 
 
 There are two ways to run it.
 
-Standalone jars is the simplest path. Download the jars from the Releases page, drop them into your server's `plugins` folder, and start Paper once to generate the config files. Every plugin is configured from plain YAML, so you can rebrand and tune everything without any extra tooling. See Customizing below.
+The simplest path is the standalone jars. Download them from the Releases page, drop them into your server's `plugins` folder, and start Paper once to generate the config files. Every plugin is configured from plain YAML, so you can rebrand and tune everything without any extra tooling. See Customizing below.
 
 Guided setup is `setup/setup-server.sh`, an interactive installer that downloads Paper, fetches the third-party plugins these depend on, and writes a full brand profile for you (name, colors, MOTD, Discord, ranks). Re-run it any time to rebrand. It does not touch worlds or player data.
 
