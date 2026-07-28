@@ -3,96 +3,6 @@
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Released under the MIT License (see LICENSE). Provided AS IS, without warranty.
  */
-/*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  com.comphenix.protocol.PacketType
- *  com.comphenix.protocol.PacketType$Play$Server
- *  com.comphenix.protocol.ProtocolLibrary
- *  com.comphenix.protocol.events.PacketAdapter
- *  com.comphenix.protocol.events.PacketContainer
- *  com.comphenix.protocol.events.PacketEvent
- *  com.comphenix.protocol.events.PacketListener
- *  com.destroystokyo.paper.event.server.AsyncTabCompleteEvent
- *  io.papermc.paper.event.player.AsyncChatEvent
- *  io.papermc.paper.threadedregions.scheduler.ScheduledTask
- *  net.kyori.adventure.text.Component
- *  net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
- *  net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
- *  net.milkbowl.vault.chat.Chat
- *  net.milkbowl.vault.economy.Economy
- *  net.milkbowl.vault.economy.EconomyResponse
- *  org.bukkit.Bukkit
- *  org.bukkit.Difficulty
- *  org.bukkit.GameRule
- *  org.bukkit.Location
- *  org.bukkit.Material
- *  org.bukkit.NamespacedKey
- *  org.bukkit.OfflinePlayer
- *  org.bukkit.Sound
- *  org.bukkit.World
- *  org.bukkit.attribute.Attribute
- *  org.bukkit.attribute.AttributeInstance
- *  org.bukkit.block.Block
- *  org.bukkit.block.data.BlockData
- *  org.bukkit.block.data.Waterlogged
- *  org.bukkit.command.Command
- *  org.bukkit.command.CommandExecutor
- *  org.bukkit.command.CommandSender
- *  org.bukkit.command.PluginCommand
- *  org.bukkit.command.TabCompleter
- *  org.bukkit.configuration.ConfigurationSection
- *  org.bukkit.configuration.file.FileConfiguration
- *  org.bukkit.configuration.file.YamlConfiguration
- *  org.bukkit.enchantments.Enchantment
- *  org.bukkit.entity.Entity
- *  org.bukkit.entity.ExperienceOrb
- *  org.bukkit.entity.HumanEntity
- *  org.bukkit.entity.Player
- *  org.bukkit.entity.Projectile
- *  org.bukkit.event.EventHandler
- *  org.bukkit.event.EventPriority
- *  org.bukkit.event.Listener
- *  org.bukkit.event.block.BlockBreakEvent
- *  org.bukkit.event.block.BlockPlaceEvent
- *  org.bukkit.event.entity.EntityDamageByEntityEvent
- *  org.bukkit.event.entity.EntityDeathEvent
- *  org.bukkit.event.entity.PlayerDeathEvent
- *  org.bukkit.event.inventory.ClickType
- *  org.bukkit.event.inventory.InventoryClickEvent
- *  org.bukkit.event.inventory.InventoryCloseEvent
- *  org.bukkit.event.inventory.InventoryDragEvent
- *  org.bukkit.event.player.PlayerCommandPreprocessEvent
- *  org.bukkit.event.player.PlayerGameModeChangeEvent
- *  org.bukkit.event.player.PlayerJoinEvent
- *  org.bukkit.event.player.PlayerMoveEvent
- *  org.bukkit.event.player.PlayerPortalEvent
- *  org.bukkit.event.player.PlayerQuitEvent
- *  org.bukkit.event.server.TabCompleteEvent
- *  org.bukkit.inventory.Inventory
- *  org.bukkit.inventory.InventoryHolder
- *  org.bukkit.inventory.ItemStack
- *  org.bukkit.inventory.meta.ArmorMeta
- *  org.bukkit.inventory.meta.ItemMeta
- *  org.bukkit.inventory.meta.PotionMeta
- *  org.bukkit.inventory.meta.trim.ArmorTrim
- *  org.bukkit.inventory.meta.trim.TrimMaterial
- *  org.bukkit.inventory.meta.trim.TrimPattern
- *  org.bukkit.persistence.PersistentDataType
- *  org.bukkit.plugin.Plugin
- *  org.bukkit.plugin.RegisteredServiceProvider
- *  org.bukkit.plugin.java.JavaPlugin
- *  org.bukkit.potion.PotionEffectType
- *  org.bukkit.potion.PotionType
- *  org.bukkit.scoreboard.DisplaySlot
- *  org.bukkit.scoreboard.Objective
- *  org.bukkit.scoreboard.Scoreboard
- *  org.bukkit.scoreboard.Team
- *  org.bukkit.util.NumberConversions
- *  org.bukkit.util.io.BukkitObjectInputStream
- *  org.bukkit.util.io.BukkitObjectOutputStream
- */
 package dev.pizzasmp.networkcore;
 
 import com.comphenix.protocol.PacketType;
@@ -443,6 +353,9 @@ TabCompleter {
     private static final long VD_RECOVER_DELAY_MS = 120_000L;
     private final java.util.Set<UUID> combatLoggedPending = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.Random ecoRandom = new java.util.Random();
+    // In-memory accumulator for high-frequency player stats (blocks/kills/deaths/mobs). Flushed
+    // in batches every 30s + on quit + on disable, instead of one DB upsert per block.
+    private final java.util.concurrent.ConcurrentHashMap<UUID, java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder>> pendingLongStats = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<UUID, Long> tpaCooldowns = new ConcurrentHashMap<UUID, Long>();
     private final Map<UUID, TPARequest> pendingTpaRequests = new ConcurrentHashMap<UUID, TPARequest>();
     private final Map<UUID, Long> tpaRequestExpiry = new ConcurrentHashMap<UUID, Long>();
@@ -558,6 +471,7 @@ TabCompleter {
             this.maintenanceQueueManager = null;
         }
         this.startDbHealthCheck();
+        Bukkit.getScheduler().runTaskTimerAsynchronously((Plugin)this, this::flushPendingLongStats, 600L, 600L);
         Bukkit.getPluginManager().registerEvents((Listener)this, (Plugin)this);
         this.registerCommand("guide", this);
         this.registerCommand("settings", this);
@@ -634,6 +548,7 @@ TabCompleter {
     }
 
     public void onDisable() {
+        this.flushPendingLongStats();
         this.shuttingDown = true;
         // Limbo sync safety net: on ANY shutdown (plain stop, crash-stop, /admin restart — not just the
         // /limbomaint flow), snapshot every online player's location + inventory + ender chest so the
@@ -942,6 +857,7 @@ TabCompleter {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
+        this.runAsyncTask(() -> this.flushPendingLongStatsFor(e.getPlayer().getUniqueId()));
         long elapsed;
         e.quitMessage(null);
         UUID uuid = e.getPlayer().getUniqueId();
@@ -1337,7 +1253,7 @@ TabCompleter {
             return;
         }
         this.lastActivityTime.put(player.getUniqueId(), System.currentTimeMillis());
-        this.runAsyncTask(() -> this.incrementLongStat(player.getUniqueId(), "blocks_placed", 1L));
+        this.incrementLongStat(player.getUniqueId(), "blocks_placed", 1L);
     }
 
     @EventHandler(ignoreCancelled=true)
@@ -1347,7 +1263,7 @@ TabCompleter {
             return;
         }
         this.lastActivityTime.put(player.getUniqueId(), System.currentTimeMillis());
-        this.runAsyncTask(() -> this.incrementLongStat(player.getUniqueId(), "blocks_broken", 1L));
+        this.incrementLongStat(player.getUniqueId(), "blocks_broken", 1L);
     }
 
     @EventHandler(ignoreCancelled=true)
@@ -5148,30 +5064,27 @@ TabCompleter {
         });
     }
 
-    /*
-     * Exception decompiling
-     */
+    // Legacy team-home persistence. Teams are retired (see TEAMS_DISABLED); this remains for data
+    // compatibility with old rows but is not reachable in normal play. Reconstructed after the
+    // original source for this method was lost, matching the schema used by loadTeamHome/clearTeamHome.
     private boolean setTeamHome(UUID uuid, Location location) {
-        /*
-         * This method has failed to decompile.  When submitting a bug report, please provide this stack trace, and (if you hold appropriate legal rights) the relevant class file.
-         * 
-         * org.benf.cfr.reader.util.ConfusedCFRException: Tried to end blocks [14[TRYBLOCK]], but top level block is 36[DOLOOP]
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement.processEndingBlocks(Op04StructuredStatement.java:435)
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement.buildNestedBlocks(Op04StructuredStatement.java:484)
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op03SimpleStatement.createInitialStructuredBlock(Op03SimpleStatement.java:736)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysisInner(CodeAnalyser.java:850)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysisOrWrapFail(CodeAnalyser.java:278)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysis(CodeAnalyser.java:201)
-         *     at org.benf.cfr.reader.entities.attributes.AttributeCode.analyse(AttributeCode.java:94)
-         *     at org.benf.cfr.reader.entities.Method.analyse(Method.java:531)
-         *     at org.benf.cfr.reader.entities.ClassFile.analyseMid(ClassFile.java:1055)
-         *     at org.benf.cfr.reader.entities.ClassFile.analyseTop(ClassFile.java:942)
-         *     at org.benf.cfr.reader.Driver.doJarVersionTypes(Driver.java:257)
-         *     at org.benf.cfr.reader.Driver.doJar(Driver.java:139)
-         *     at org.benf.cfr.reader.CfrDriverImpl.analyse(CfrDriverImpl.java:76)
-         *     at org.benf.cfr.reader.Main.main(Main.java:54)
-         */
-        throw new IllegalStateException("Decompilation failed");
+        String sql = "UPDATE teams t JOIN team_members tm ON tm.team_id = t.id "
+            + "SET t.home_world=?, t.home_x=?, t.home_y=?, t.home_z=?, t.home_yaw=?, t.home_pitch=? "
+            + "WHERE tm.member_uuid=?";
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, location.getWorld().getName());
+            ps.setDouble(2, location.getX());
+            ps.setDouble(3, location.getY());
+            ps.setDouble(4, location.getZ());
+            ps.setFloat(5, location.getYaw());
+            ps.setFloat(6, location.getPitch());
+            ps.setString(7, uuid.toString());
+            return ps.executeUpdate() > 0;
+        } catch (SQLException ex) {
+            this.getLogger().warning("[teamhome] setTeamHome failed: " + ex.getMessage());
+            return false;
+        }
     }
 
     private void clearTeamHome(UUID uuid) {
@@ -14850,15 +14763,55 @@ TabCompleter {
         if (uuid == null || column == null || amount == 0L) {
             return;
         }
-        String sql = "INSERT INTO player_stats (uuid, " + column + ") VALUES (?, ?) ON DUPLICATE KEY UPDATE " + column + " = " + column + " + VALUES(" + column + "), updated_at=CURRENT_TIMESTAMP";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);){
-            ps.setString(1, uuid.toString());
-            ps.setLong(2, amount);
-            ps.executeUpdate();
+        this.pendingLongStats
+            .computeIfAbsent(uuid, k -> new java.util.concurrent.ConcurrentHashMap<>())
+            .computeIfAbsent(column, k -> new java.util.concurrent.atomic.LongAdder())
+            .add(amount);
+    }
+
+    // Write one player's accumulated deltas on an existing connection. Column names are code
+    // constants (kills/deaths/blocks_placed/blocks_broken/mobs_killed), never user input.
+    private void writeStatDeltas(Connection conn, UUID uuid, java.util.Map<String, java.util.concurrent.atomic.LongAdder> cols) throws java.sql.SQLException {
+        for (java.util.Map.Entry<String, java.util.concurrent.atomic.LongAdder> e : cols.entrySet()) {
+            long delta = e.getValue().sum();
+            if (delta == 0L) continue;
+            String col = e.getKey();
+            String sql = "INSERT INTO player_stats (uuid, " + col + ") VALUES (?, ?) ON DUPLICATE KEY UPDATE " + col + " = " + col + " + VALUES(" + col + "), updated_at=CURRENT_TIMESTAMP";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, uuid.toString());
+                ps.setLong(2, delta);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    // Flush all accumulated stat deltas in one connection (30s timer + onDisable).
+    private void flushPendingLongStats() {
+        if (this.pendingLongStats.isEmpty()) {
+            return;
+        }
+        try (Connection conn = this.openSyncConnection()) {
+            for (UUID uuid : new java.util.ArrayList<>(this.pendingLongStats.keySet())) {
+                java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder> cols = this.pendingLongStats.remove(uuid);
+                if (cols != null) this.writeStatDeltas(conn, uuid, cols);
+            }
         }
         catch (Exception ex) {
-            this.getLogger().warning("Failed incrementing stat " + column + ": " + ex.getMessage());
+            this.getLogger().warning("Failed flushing player stats: " + ex.getMessage());
+        }
+    }
+
+    // Flush a single player's accumulated stats (on quit).
+    private void flushPendingLongStatsFor(UUID uuid) {
+        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder> cols = this.pendingLongStats.remove(uuid);
+        if (cols == null || cols.isEmpty()) {
+            return;
+        }
+        try (Connection conn = this.openSyncConnection()) {
+            this.writeStatDeltas(conn, uuid, cols);
+        }
+        catch (Exception ex) {
+            this.getLogger().warning("Failed flushing player stats: " + ex.getMessage());
         }
     }
 

@@ -2,9 +2,10 @@ name: PizzaNetworkCore
 version: 1.0.0
 main: dev.pizzasmp.networkcore.PizzaNetworkCore
 api-version: '1.21'
-folia-supported: true
+folia-supported: false
 authors: [FolksyPizza]
-description: ExampleSMP core UX plugin (join/quit suppression, guide/settings/stats GUIs)
+description: Core survival plugin. Economy (auction house, player orders, shop, sellable items), homes, teleports, a follow/friends system, settings menus, leaderboards, and the scoreboard HUD.
+softdepend: [Vault, PlaceholderAPI, ProtocolLib, LuckPerms, Essentials]
 libraries:
   - org.mariadb.jdbc:mariadb-java-client:3.5.4
   - com.zaxxer:HikariCP:5.1.0

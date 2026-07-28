@@ -1,23 +1,7 @@
 /*
- * Decompiled with CFR 0.152.
- * 
- * Could not load the following classes:
- *  io.papermc.paper.threadedregions.scheduler.ScheduledTask
- *  org.bukkit.Bukkit
- *  org.bukkit.GameMode
- *  org.bukkit.Location
- *  org.bukkit.Statistic
- *  org.bukkit.Statistic$Type
- *  org.bukkit.World
- *  org.bukkit.attribute.Attribute
- *  org.bukkit.configuration.file.FileConfiguration
- *  org.bukkit.entity.Player
- *  org.bukkit.inventory.ItemStack
- *  org.bukkit.plugin.Plugin
- *  org.bukkit.plugin.java.JavaPlugin
- *  org.bukkit.scheduler.BukkitTask
- *  org.bukkit.util.io.BukkitObjectInputStream
- *  org.bukkit.util.io.BukkitObjectOutputStream
+ * PlayerSyncManager is part of the SMP-Core plugin suite.
+ * Copyright (c) 2025-2026 William W. (FolksyPizza).
+ * Released under the MIT License (see LICENSE). Provided AS IS, without warranty.
  */
 package dev.pizzasmp.networkcore;
 
