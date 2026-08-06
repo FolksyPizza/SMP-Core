@@ -25,6 +25,7 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/sethome [name]` | Set a home at your location. |
 | `/delhome [name]` | Delete a home. |
 | `/rtp [east\|nether\|end]` | Random teleport. |
+| `/rtpq` (`/rtpqueue`) | Queue for a gear-matched RTP duel: get teleported to a random spot with a matched opponent. |
 | `/tpa <player>` | Ask to teleport to a player. |
 | `/tpahere <player>` | Ask a player to teleport to you. |
 | `/tpaaccept [player]` (`/tpaccept`) | Accept a teleport request. |

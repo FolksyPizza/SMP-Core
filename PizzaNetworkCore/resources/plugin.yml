@@ -96,6 +96,10 @@ commands:
   rtp:
     usage: /rtp [east|nether|end]
     description: Random teleport.
+  rtpq:
+    usage: /rtpq
+    description: Queue for a gear-matched RTP duel.
+    aliases: [rtpqueue]
   tpa:
     usage: /tpa <player>
   tpahere:

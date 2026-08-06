@@ -1,0 +1,10 @@
+{
+  "id": "pizzaproxyguard",
+  "name": "PizzaProxyGuard",
+  "version": "1.0.0",
+  "description": "Denies new joins while the backend is down and routes moderation kicks/bans to a disconnect instead of the limbo fallback, while preserving the maintenance hold.",
+  "authors": [
+    "FolksyPizza"
+  ],
+  "main": "dev.pizzasmp.proxyguard.PizzaProxyGuard"
+}
