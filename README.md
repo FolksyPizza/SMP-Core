@@ -27,6 +27,7 @@ One honest note. I lost the source for part of PizzaNetworkCore at some point an
 | PizzaPunishment | 1.0.0 | Punishment system with bans, mutes, strike tracking, and death-drop mechanics. |
 | PizzaRuleGuard | 1.0.0 | Rule enforcement and anti-abuse guard. |
 | PizzaLimbo | 0.1.0 | A lightweight limbo backend that holds players during maintenance when you run behind a Velocity proxy. |
+| PizzaProxyGuard | 1.0.0 | A small Velocity proxy plugin: denies new joins while the backend is down (with a maintenance message) and turns moderation kicks/bans into a clean disconnect instead of dropping the player into the limbo fallback. |
 | PizzaCommon | 1.0.0 | Shared storage library (YAML or MySQL). Currently used by PizzaChatGuard and shaded into it; the plan is to migrate the other plugins onto it over time. |
 
 ## Status

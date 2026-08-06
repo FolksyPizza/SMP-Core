@@ -281,6 +281,13 @@ TabCompleter {
     private final Map<UUID, Long> combatTaggedUntil = new ConcurrentHashMap<UUID, Long>();
     private final Map<UUID, TaskHandle> combatActionbarTasks = new ConcurrentHashMap<UUID, TaskHandle>();
     private final Set<UUID> activeRtpSearches = ConcurrentHashMap.newKeySet();
+    // Vanilla pearls: a player's thrown pearls are captured + removed on logout and re-spawned on login.
+    private final Map<UUID, List<StoredPearl>> loggedOutPearls = new ConcurrentHashMap<UUID, List<StoredPearl>>();
+    // RTP Queue (duels): players searching for a gear-matched opponent.
+    private final Map<UUID, RtpQueueEntry> rtpDuelQueue = new ConcurrentHashMap<UUID, RtpQueueEntry>();
+    private static final Sound[] RTPQ_DISCS = new Sound[] {
+        Sound.MUSIC_DISC_MELLOHI, Sound.MUSIC_DISC_STAL, Sound.MUSIC_DISC_PIGSTEP, Sound.MUSIC_DISC_CAT
+    };
     private final Map<UUID, UUID> localReplyTargets = new ConcurrentHashMap<UUID, UUID>();
     private final Map<UUID, Boolean> teamChatModeCache = new ConcurrentHashMap<UUID, Boolean>();
     private final Map<UUID, Long> muteCacheExpiry = new ConcurrentHashMap<UUID, Long>();
@@ -531,6 +538,7 @@ TabCompleter {
         Bukkit.getScheduler().runTaskTimer((Plugin)this, this::runAmethystExpirySweep, 1200L, 1200L);
         // TPS-reactive view distance throttle: check every 30s (600 ticks)
         Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickVdThrottle, 600L, 600L);
+        Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickRtpDuelQueue, 40L, 20L);
         // Queue admit timer: admit 1 queued player every N ticks (default 60 = 3s)
         Bukkit.getScheduler().runTaskTimer((Plugin)this, () -> { if (this.isQueueEnabled() && !this.joinQueue.isEmpty()) this.admitNextPlayer(); }, 100L, 60L);
         // Adaptive autosave: every 3 min while players are online, every 10 min when empty
@@ -809,6 +817,7 @@ TabCompleter {
             this.playerSyncManager.handleJoin(e.getPlayer());
         }
         this.clearUnexpectedJoinInvisibility(e.getPlayer());
+        this.restorePearlsOnJoin(e.getPlayer());
         // Follow broadcast: followers see this player join.
         this.notifyFollowers(e.getPlayer().getUniqueId(), e.getPlayer().getName(), "joined.", false);
         this.refreshTabName(e.getPlayer());
@@ -845,6 +854,39 @@ TabCompleter {
         }
     }
 
+    private void capturePearlsOnQuit(Player player) {
+        UUID pid = player.getUniqueId();
+        List<StoredPearl> stored = new java.util.ArrayList<StoredPearl>();
+        for (World w : Bukkit.getWorlds()) {
+            for (org.bukkit.entity.EnderPearl pearl : w.getEntitiesByClass(org.bukkit.entity.EnderPearl.class)) {
+                if (pearl.getShooter() instanceof Player sp && sp.getUniqueId().equals(pid)) {
+                    Location l = pearl.getLocation();
+                    stored.add(new StoredPearl(w.getUID(), l.getX(), l.getY(), l.getZ(), pearl.getVelocity().clone()));
+                    pearl.remove();
+                }
+            }
+        }
+        if (!stored.isEmpty()) this.loggedOutPearls.put(pid, stored);
+    }
+
+    private void restorePearlsOnJoin(Player player) {
+        UUID pid = player.getUniqueId();
+        List<StoredPearl> stored = this.loggedOutPearls.remove(pid);
+        if (stored == null || stored.isEmpty()) return;
+        this.runPlayerTaskLater(player, () -> {
+            if (!player.isOnline()) return;
+            for (StoredPearl sp : stored) {
+                World w = Bukkit.getWorld(sp.worldId);
+                if (w == null) continue;
+                Location loc = new Location(w, sp.x, sp.y, sp.z);
+                w.spawn(loc, org.bukkit.entity.EnderPearl.class, pearl -> {
+                    pearl.setShooter(player);
+                    pearl.setVelocity(sp.velocity);
+                });
+            }
+        }, 10L);
+    }
+
     private void clearUnexpectedJoinInvisibility(Player player) {
         this.runOnPlayerThread(player, () -> {
             if (!player.isOnline() || !player.hasPotionEffect(PotionEffectType.INVISIBILITY)) {
@@ -874,6 +916,8 @@ TabCompleter {
         }
         this.cancelPendingTeleport(e.getPlayer(), false);
         this.cancelPendingRtp(uuid);
+        this.cancelRtpQueue(uuid, null);   // disconnect cancels the duel search
+        this.capturePearlsOnQuit(e.getPlayer());
         this.mutualFriendsCache.remove(uuid);   // locator-bar friends-only cache
         this.rtpCooldowns.remove(uuid);
         this.clearCombatTag(uuid);
@@ -1126,6 +1170,7 @@ TabCompleter {
         e.deathMessage(null);
         Player victim = e.getPlayer();
         this.clearCombatTag(victim.getUniqueId());
+        this.cancelRtpQueue(victim.getUniqueId(), null);   // dying cancels the duel search
         this.runAsyncTask(() -> this.incrementLongStat(victim.getUniqueId(), "deaths", 1L));
         this.refreshSidebarSoon(victim);
         // Follow broadcast: people who follow the victim see their death.
@@ -1856,7 +1901,9 @@ TabCompleter {
             // Allow staff to take items from offline player snapshots
             return;
         }
-        if (e.getClickedInventory() != null && e.getRawSlot() >= 0 && e.getRawSlot() < e.getView().getTopInventory().getSize() && e.getCurrentItem() != null && e.getCurrentItem().getType() != Material.AIR && e.getWhoClicked() instanceof Player) {
+        if (e.getClickedInventory() != null && e.getRawSlot() >= 0 && e.getRawSlot() < e.getView().getTopInventory().getSize()
+                && e.getView().getTopInventory().getHolder() == null
+                && e.getCurrentItem() != null && e.getCurrentItem().getType() != Material.AIR && e.getWhoClicked() instanceof Player) {
             ((Player)e.getWhoClicked()).playSound(e.getWhoClicked().getLocation(), Sound.UI_BUTTON_CLICK, 0.45f, 1.0f);
         }
         if (TITLE_AH.equals(title)) {
@@ -2434,9 +2481,16 @@ TabCompleter {
             default -> { return; }
         }
         Location loc = e.getLocation();
+        boolean isPhantom = e.getEntityType() == org.bukkit.entity.EntityType.PHANTOM;
         for (Player nearby : loc.getWorld().getPlayers()) {
             if (nearby.getLocation().distanceSquared(loc) > 128 * 128) continue;
-            if (this.isSettingEnabledCached(nearby.getUniqueId(), "disable_mob_spawns")) {
+            if (isPhantom) {
+                // Phantoms are opt-in per player: default OFF means no phantoms spawn near them.
+                if (!this.isSettingEnabledCached(nearby.getUniqueId(), "phantom_spawns")) {
+                    e.setCancelled(true);
+                    return;
+                }
+            } else if (this.isSettingEnabledCached(nearby.getUniqueId(), "disable_mob_spawns")) {
                 e.setCancelled(true);
                 return;
             }
@@ -3109,6 +3163,11 @@ TabCompleter {
             }
             case "rtp": {
                 this.handleRtpCommand(p, args);
+                break;
+            }
+            case "rtpq":
+            case "rtpqueue": {
+                this.handleRtpQueueCommand(p, args);
                 break;
             }
             case "nv":
@@ -5261,10 +5320,9 @@ TabCompleter {
             return;
         }
         UUID uuid = player.getUniqueId();
-        if (this.pendingRtpTeleports.containsKey(uuid) || this.activeRtpSearches.contains(uuid)) {
-            player.sendActionBar(Component.text("\u00a7cRTP already in progress."));
-            return;
-        }
+        // Using /rtp while queued for a duel cancels the duel search; re-running RTP before the
+        // teleport lands just starts another search (no "already in progress" denial).
+        this.cancelRtpQueue(uuid, null);
         if (!bypassChecks && !this.canUseRtpNow(player)) {
             long remaining = this.getRtpCooldownRemainingMillis(player);
             long remainingSeconds = Math.max(1L, (long)Math.ceil((double)remaining / 1000.0));
@@ -5309,7 +5367,6 @@ TabCompleter {
             borderRadius = Math.max(256.0, world.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
         }
         this.activeRtpSearches.add(uuid);
-        player.sendActionBar(this.legacyColorize("&#00BFFFFinding a safe location\u2026"));
         RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ,
             Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius,
             Math.max(16, this.settings.getInt("rtp.search-attempts", 120)), player.getLocation().getYaw());
@@ -5346,6 +5403,195 @@ TabCompleter {
             pending.destination = target;
             this.pendingRtpTeleports.put(uuid, pending);
             this.tickRtpCountdown(uuid);
+        }));
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onDeathDestroyPearls(PlayerDeathEvent e) {
+        Player p = e.getPlayer();
+        if (!this.isSettingEnabledCached(p.getUniqueId(), "pearls_destroy_on_death")) return;
+        UUID pid = p.getUniqueId();
+        for (World w : Bukkit.getWorlds()) {
+            for (org.bukkit.entity.EnderPearl pearl : w.getEntitiesByClass(org.bukkit.entity.EnderPearl.class)) {
+                if (pearl.getShooter() instanceof Player sp && sp.getUniqueId().equals(pid)) pearl.remove();
+            }
+        }
+    }
+
+    // ===== RTP Queue (duels / matchmaking) =====
+    private void handleRtpQueueCommand(Player player, String[] args) {
+        UUID uuid = player.getUniqueId();
+        // No manual cancel: a queued player stays in until matched, timed out, or death/disconnect/combat.
+        if (this.rtpDuelQueue.containsKey(uuid)) {
+            player.sendActionBar(Component.text("§7Already searching for an opponent…"));
+            return;
+        }
+        if (this.isCombatTagged(player)) {
+            player.sendActionBar(Component.text("§cYou are in combat! Cannot queue."));
+            return;
+        }
+        if (this.maintenanceQueueManager != null && this.maintenanceQueueManager.isServerUnderMaintenance("survival")) {
+            player.sendActionBar(Component.text("§cSurvival is under maintenance. Try again later."));
+            return;
+        }
+        if (!this.useDialogUi(player)) { this.enqueueRtpDuel(player); return; }
+        ActionButton no = this.dialogButton(Component.text("No", NamedTextColor.RED), null, 120, q -> q.closeDialog());
+        ActionButton yes = this.dialogButton(Component.text("Yes", NamedTextColor.GREEN), null, 120,
+            pl -> this.runOnPlayerThread(pl, () -> this.enqueueRtpDuel(pl)));
+        Dialog dialog = this.buildDialog(Component.text("RTP Queue", DIALOG_BRAND),
+            List.of(DialogBody.plainMessage(Component.text(
+                "Are you sure you want to randomly teleport with another player?", NamedTextColor.GRAY))),
+            List.of(), DialogType.confirmation(no, yes));
+        player.showDialog(dialog);
+    }
+
+    private void enqueueRtpDuel(Player player) {
+        UUID uuid = player.getUniqueId();
+        if (this.rtpDuelQueue.containsKey(uuid)) return;
+        Sound disc = RTPQ_DISCS[ThreadLocalRandom.current().nextInt(RTPQ_DISCS.length)];
+        this.rtpDuelQueue.put(uuid, new RtpQueueEntry(this.computeGearScore(player), System.currentTimeMillis(), disc));
+        player.playSound(player.getLocation(), disc, org.bukkit.SoundCategory.RECORDS, 0.6f, 1.0f);
+        player.sendActionBar(this.legacyColorize("&#00BFFFSearching for opponent…"));
+    }
+
+    private void cancelRtpQueue(UUID uuid, String messageOrNull) {
+        RtpQueueEntry entry = this.rtpDuelQueue.remove(uuid);
+        if (entry == null) return;
+        Player p = Bukkit.getPlayer(uuid);
+        if (p != null && p.isOnline()) {
+            try { p.stopSound(entry.disc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) {}
+            if (messageOrNull != null) p.sendActionBar(this.legacyColorize(messageOrNull));
+        }
+    }
+
+    private void tickRtpDuelQueue() {
+        if (this.rtpDuelQueue.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        long timeoutMs = Math.max(15L, this.settings.getLong("rtpq.timeout-seconds", 30L)) * 1000L;
+        List<UUID> ready = new java.util.ArrayList<UUID>();
+        for (Map.Entry<UUID, RtpQueueEntry> me : this.rtpDuelQueue.entrySet()) {
+            Player p = Bukkit.getPlayer(me.getKey());
+            if (p == null || !p.isOnline()) { this.rtpDuelQueue.remove(me.getKey()); continue; }
+            if (now - me.getValue().enqueuedAt >= timeoutMs) {
+                this.cancelRtpQueue(me.getKey(), "§7No opponent found. Try /rtpq again.");
+                continue;
+            }
+            p.sendActionBar(this.legacyColorize("&#00BFFFSearching for opponent…"));
+            ready.add(me.getKey());
+        }
+        ready.sort((a, b) -> Integer.compare(this.rtpDuelQueue.get(a).gearScore, this.rtpDuelQueue.get(b).gearScore));
+        for (int i = 0; i + 1 < ready.size(); i += 2) {
+            UUID a = ready.get(i), b = ready.get(i + 1);
+            RtpQueueEntry ea = this.rtpDuelQueue.get(a), eb = this.rtpDuelQueue.get(b);
+            if (ea == null || eb == null) continue;
+            int gap = Math.abs(ea.gearScore - eb.gearScore);
+            int band = Math.max(this.duelBand(ea, now), this.duelBand(eb, now));
+            if (gap <= band) this.startRtpDuelMatch(a, b);
+        }
+    }
+
+    private int duelBand(RtpQueueEntry e, long now) {
+        long secs = Math.max(0L, (now - e.enqueuedAt) / 1000L);
+        return 8 + (int)(secs * 4L);
+    }
+
+    private int computeGearScore(Player player) {
+        int score = 0;
+        org.bukkit.inventory.PlayerInventory inv = player.getInventory();
+        for (ItemStack piece : inv.getArmorContents()) score += this.materialTier(piece) + this.enchantLevels(piece);
+        ItemStack hand = inv.getItemInMainHand();
+        score += this.materialTier(hand) + this.enchantLevels(hand);
+        return score;
+    }
+
+    private int materialTier(ItemStack item) {
+        if (item == null) return 0;
+        String n = item.getType().name();
+        if (n.startsWith("NETHERITE_")) return 8;
+        if (n.startsWith("DIAMOND_")) return 6;
+        if (n.startsWith("IRON_")) return 4;
+        if (n.startsWith("GOLDEN_") || n.startsWith("CHAINMAIL_")) return 2;
+        if (n.startsWith("LEATHER_") || n.startsWith("STONE_") || n.startsWith("WOODEN_")) return 1;
+        return 0;
+    }
+
+    private int enchantLevels(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return 0;
+        int total = 0;
+        for (int lvl : item.getEnchantments().values()) total += lvl;
+        return total;
+    }
+
+    private void startRtpDuelMatch(UUID a, UUID b) {
+        RtpQueueEntry ea = this.rtpDuelQueue.remove(a);
+        RtpQueueEntry eb = this.rtpDuelQueue.remove(b);
+        Player pa = Bukkit.getPlayer(a);
+        Player pb = Bukkit.getPlayer(b);
+        if (pa == null || !pa.isOnline() || pb == null || !pb.isOnline()) {
+            if (pa != null && pa.isOnline() && ea != null) this.rtpDuelQueue.put(a, ea);
+            if (pb != null && pb.isOnline() && eb != null) this.rtpDuelQueue.put(b, eb);
+            return;
+        }
+        if (ea != null) { try { pa.stopSound(ea.disc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) {} }
+        if (eb != null) { try { pb.stopSound(eb.disc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) {} }
+        pa.sendActionBar(this.legacyColorize("&#00BFFFOpponent found! Teleporting…"));
+        pb.sendActionBar(this.legacyColorize("&#00BFFFOpponent found! Teleporting…"));
+        this.beginDuelSearch(a, b);
+    }
+
+    private void beginDuelSearch(UUID a, UUID b) {
+        World world = Bukkit.getWorld("world");
+        if (world == null && !Bukkit.getWorlds().isEmpty()) world = Bukkit.getWorlds().getFirst();
+        if (world == null) return;
+        double borderRadius = 5000.0, centerX = 0.0, centerZ = 0.0;
+        if (world.getWorldBorder() != null) {
+            centerX = world.getWorldBorder().getCenter().getX();
+            centerZ = world.getWorldBorder().getCenter().getZ();
+            borderRadius = Math.max(256.0, world.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
+        }
+        Player pa = Bukkit.getPlayer(a);
+        float yaw = pa != null ? pa.getLocation().getYaw() : 0.0f;
+        RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ,
+            Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius,
+            Math.max(16, this.settings.getInt("rtp.search-attempts", 120)), yaw);
+        this.duelSearchAttempt(a, b, plan, 0);
+    }
+
+    private void duelSearchAttempt(UUID a, UUID b, RtpSearchPlan plan, int attempt) {
+        Player pa = Bukkit.getPlayer(a), pb = Bukkit.getPlayer(b);
+        if (pa == null || !pa.isOnline() || pb == null || !pb.isOnline()) return;
+        if (attempt >= plan.maxAttempts) {
+            pa.sendActionBar(Component.text("§cCouldn't find a duel spot — try /rtpq again."));
+            pb.sendActionBar(Component.text("§cCouldn't find a duel spot — try /rtpq again."));
+            return;
+        }
+        World world = Bukkit.getWorld(plan.worldName);
+        if (world == null) return;
+        double angle = ThreadLocalRandom.current().nextDouble(0.0, Math.PI * 2);
+        double radius = plan.minRadius >= plan.maxRadius ? plan.maxRadius : ThreadLocalRandom.current().nextDouble(plan.minRadius, plan.maxRadius);
+        int x = NumberConversions.floor(plan.centerX + Math.cos(angle) * radius);
+        int z = NumberConversions.floor(plan.centerZ + Math.sin(angle) * radius);
+        world.getChunkAtAsync(x >> 4, z >> 4, true).thenAccept(chunk -> this.runOnPlayerThread(pa, () -> {
+            Player la = Bukkit.getPlayer(a), lb = Bukkit.getPlayer(b);
+            if (la == null || !la.isOnline() || lb == null || !lb.isOnline()) return;
+            Location target = this.findSafeRtpLocation(world, x, z, plan.yaw);
+            if (target == null) {
+                this.runAsyncTask(() -> this.duelSearchAttempt(a, b, plan, attempt + 1));
+                return;
+            }
+            this.teleportDuelist(la, target);
+            this.teleportDuelist(lb, target);
+        }));
+    }
+
+    private void teleportDuelist(Player p, Location target) {
+        p.teleportAsync(target).thenAccept(ok -> this.runOnPlayerThread(p, () -> {
+            if (!ok || !p.isOnline()) return;
+            this.resetFallAfterTeleport(p);
+            p.sendActionBar(Component.text("§7Fight! Your opponent is here."));
+            if (this.isSettingEnabledCached(p.getUniqueId(), "music_sound_notifications")) {
+                p.playSound(p.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 1.2f);
+            }
         }));
     }
 
@@ -8063,7 +8309,6 @@ TabCompleter {
             borderRadius = Math.max(256.0, world.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
         }
         RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ, Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius, Math.max(8, this.settings.getInt("rtp.search-attempts", 96)), player.getLocation().getYaw());
-        player.sendActionBar(this.legacyColorize("&#00BFFFSearching for a safe location…"));
         this.searchRtpLocation(player.getUniqueId(), plan, 0);
     }
 
@@ -8156,6 +8401,7 @@ TabCompleter {
         this.scheduleCombatActionbar(player.getUniqueId());
         // Cancel pending teleports when entering combat (damage alone doesn't cancel; combat does)
         if (!wasInCombat) {
+            this.cancelRtpQueue(player.getUniqueId(), "§cDuel search cancelled — you entered combat");
             UUID uuid = player.getUniqueId();
             if (this.pendingTeleports.containsKey(uuid) || this.pendingRtpTeleports.containsKey(uuid) || this.pendingHomeTeleports.containsKey(uuid)) {
                 this.cancelPendingTeleport(player, true);
@@ -8459,24 +8705,10 @@ TabCompleter {
     }
 
     private long getRtpCooldownMillis(Player player) {
-        // owner/dev/sradmin: 5s | staff (mod/srmod/admin/co-owner): 10s | pizza++: 8s | pizza+: 15s | default: 25s
-        if (player.hasPermission("group.dev") || player.hasPermission("group.owner")
-                || player.hasPermission("group.sradmin")) {
-            return 5000L;
-        }
-        if (player.hasPermission("group.mod") || player.hasPermission("group.srmod")
-                || player.hasPermission("group.admin") || player.hasPermission("group.co-owner")
-                || player.hasPermission("group.staff")) {
-            return 10000L;
-        }
-        if (this.isPizzaPlusPlus(player)) {
-            return 8000L;
-        }
-        if (player.hasPermission("group.pizza+") || player.hasPermission("group.pizzaplus")
-                || player.hasPermission("group.donutplus")) {
-            return 15000L;
-        }
-        return 25000L;
+        // Cooldown is configurable (rtp.cooldown-seconds, default 0 = none); a 250ms anti-spam floor
+        // always applies. Server owners can raise the config value to add a real RTP cooldown.
+        long cfg = this.settings.getLong("rtp.cooldown-seconds", 0L) * 1000L;
+        return Math.max(250L, cfg);
     }
 
     private boolean canUseRtpNow(Player player) {
@@ -9221,7 +9453,9 @@ TabCompleter {
             new SettingsEntry("quick_auction_sell", "Auction Quick Sell", false),
             new SettingsEntry("auction_overflow", "Auction Overflow", false),
             new SettingsEntry("search_spell_check", "Search Spell Check", false),
-            new SettingsEntry("disable_mob_spawns", "Mob Spawns", true),
+            new SettingsEntry("disable_mob_spawns", "Disable Mob Spawns", false),
+            new SettingsEntry("phantom_spawns", "Phantom Spawns", false),
+            new SettingsEntry("pearls_destroy_on_death", "Pearls Destroy on Death", false),
             new SettingsEntry("staff_mode_bypass", "Staff Mode Bypass", false),
             new SettingsEntry("night_vision", "Night Vision", false))));
 
@@ -11384,6 +11618,8 @@ TabCompleter {
             if (!def.key.equals(key)) continue;
             return def.defaultValue;
         }
+        // Dialog-only settings not in the inventory grid; default OFF (opt-in).
+        if (key.equals("phantom_spawns") || key.equals("pearls_destroy_on_death")) return false;
         return true;
     }
 
@@ -11698,11 +11934,9 @@ TabCompleter {
         int cap = this.marketSlotCap(player);
         this.renderOwnOrdersEntries(inv, orders, 1);
         int n = Math.min(orders.size(), 45);
-        this.fillMarketSlots(inv, n, cap, "orders_new_slot", "\u00a77Empty Order Slot", "\u00a7fClick to create an order");
-        if (pendingDeliveries > 0) {
-            inv.setItem(47, this.namedWithLore(Material.CHEST, "\u00a7aClaim deliveries \u00a7f(" + pendingDeliveries + ")", "orders_my_claim_all", List.of("\u00a77Items ready to collect")));
-        }
-        inv.setItem(49, this.namedWithLore(Material.HOPPER, "\u00a7aFilter: \u00a7f" + state.filter, "orders_my_filter", List.of("\u00a77Click to change")));
+        this.fillMarketSlots(inv, n, cap, "orders_new_slot", "§7Empty Order Slot", "§fClick to create an order");
+        // Claiming deliveries is done from an order's own detail page, not this overview grid.
+        inv.setItem(49, this.namedWithLore(Material.HOPPER, "§aFilter: §f" + state.filter, "orders_my_filter", List.of("§7Click to change")));
         inv.setItem(50, this.namedWithLore(Material.ARROW, "\u00a7aBack to Orders", "orders_main", List.of()));
         player.openInventory(inv);
     }
@@ -11784,7 +12018,8 @@ TabCompleter {
         }
         OrderBuilderState s = this.orderBuilderState.computeIfAbsent(player.getUniqueId(), k -> new OrderBuilderState());
         if (s.material == null || !s.material.isItem()) {
-            this.openOrderItemPickerDialog(player);
+            // Inventory picker renders REAL item icons (dialog buttons can only show text/glyphs).
+            this.openOrderItemPicker(player);
         } else if (s.amount <= 0L) {
             this.requestTextInput(player, TextInputMode.ORDER_AMOUNT, "Type order amount in chat (supports 1k/1m/1b).");
         } else if (s.unitPrice <= 0.0) {
@@ -13331,34 +13566,45 @@ TabCompleter {
                     return;
                 }
                 Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_ORDERS_DELIVERIES);
-                int startIdx = Math.max(0, (state.deliveriesPage - 1) * 45);
-                int endIdx = Math.min(deliveries.size(), startIdx + 45);
-                for (int i = startIdx; i < endIdx; i++) {
-                    OrderDeliveryEntry delivery = deliveries.get(i);
+                // Expand each delivery into one-stack-per-slot units (blocks -> 64, pearls -> 16,
+                // totems -> 1). Clicking any unit claims that whole delivery.
+                List<ItemStack> units = new java.util.ArrayList<ItemStack>();
+                for (OrderDeliveryEntry delivery : deliveries) {
                     if (delivery.item() == null) continue;
-                    ItemStack stack = delivery.item().clone();
-                    // One slot per delivery \u2014 display one stack, full amount shown in lore
-                    stack.setAmount(Math.max(1, Math.min(delivery.amount(), stack.getMaxStackSize())));
-                    ItemMeta meta = stack.getItemMeta();
-                    meta.setDisplayName("\u00a7a" + this.humanName(delivery.item().getType()));
-                    meta.setLore(List.of(
-                        "\u00a77Amount: \u00a7f" + String.format("%,d", delivery.amount()) + "x",
-                        "\u00a77Delivered by: \u00a7f" + delivery.fulfillerName(),
-                        "\u00a77Paid out: \u00a7f$" + this.fmtMoney(delivery.payout()),
-                        "\u00a77Time: \u00a7f" + this.shortAge(delivery.createdAtMs()),
-                        "\u00a7aClick to claim"
-                    ));
-                    if (this.uiActionKey != null) {
-                        meta.getPersistentDataContainer().set(this.uiActionKey, PersistentDataType.STRING, "orders_claim_delivery:" + delivery.id());
+                    Material mat = delivery.item().getType();
+                    int max = Math.max(1, delivery.item().getMaxStackSize());
+                    long remaining = Math.max(1L, delivery.amount());
+                    while (remaining > 0 && units.size() < 450) {
+                        int amt = (int)Math.min((long)max, remaining);
+                        ItemStack unit = delivery.item().clone();
+                        unit.setAmount(amt);
+                        ItemMeta meta = unit.getItemMeta();
+                        meta.setDisplayName("§a" + this.humanName(mat));
+                        meta.setLore(List.of(
+                            "§7This delivery: §f" + String.format("%,d", delivery.amount()) + "x total",
+                            "§7Delivered by: §f" + delivery.fulfillerName(),
+                            "§7Paid out: §f$" + this.fmtMoney(delivery.payout()),
+                            "§7Time: §f" + this.shortAge(delivery.createdAtMs()),
+                            "§aClick to claim this delivery"
+                        ));
+                        if (this.uiActionKey != null) {
+                            meta.getPersistentDataContainer().set(this.uiActionKey, PersistentDataType.STRING, "orders_claim_delivery:" + delivery.id());
+                        }
+                        unit.setItemMeta(meta);
+                        units.add(unit);
+                        remaining -= amt;
                     }
-                    stack.setItemMeta(meta);
-                    inv.setItem(i - startIdx, stack);
+                }
+                int startIdx = Math.max(0, (state.deliveriesPage - 1) * 45);
+                int endIdx = Math.min(units.size(), startIdx + 45);
+                for (int i = startIdx; i < endIdx; i++) {
+                    inv.setItem(i - startIdx, units.get(i));
                 }
                 if (state.deliveriesPage > 1) {
-                    inv.setItem(45, this.namedWithLore(Material.ARROW, "\u00a7aPrevious", "orders_claims_prev", List.of()));
+                    inv.setItem(45, this.namedWithLore(Material.ARROW, "§aPrevious", "orders_claims_prev", List.of()));
                 }
-                if (deliveries.size() > endIdx) {
-                    inv.setItem(53, this.namedWithLore(Material.ARROW, "\u00a7aNext", "orders_claims_next", List.of()));
+                if (units.size() > endIdx) {
+                    inv.setItem(53, this.namedWithLore(Material.ARROW, "§aNext", "orders_claims_next", List.of()));
                 }
                 inv.setItem(48, this.namedWithLore(Material.HOPPER, "\u00a7a\u00a7lClaim Everything", "orders_claims_claim_all", List.of("\u00a77Collect \u00a7fall \u00a77pending deliveries", "\u00a77across every page at once")));
                 inv.setItem(49, this.namedWithLore(Material.EMERALD, "\u00a7aSell all on page", "orders_claims_sell_page", List.of()));
@@ -13601,7 +13847,26 @@ TabCompleter {
         if (value > 0.0) {
             return value;
         }
-        return 1.0;
+        // Uncatalogued / newly-added items fall back to a category-based default so EVERY orderable
+        // item has a real worth instead of a $1 floor.
+        double fallback = this.fallbackWorthFor(stack.getType());
+        return fallback > 0.0 ? fallback : 1.0;
+    }
+
+    // Category-based default worth for any item without a configured sell/worth price.
+    private double fallbackWorthFor(Material mat) {
+        if (mat == null) return -1.0;
+        String n = mat.name();
+        if (n.endsWith("_HEAD") || n.endsWith("_SKULL")) return 25_000.0;
+        if (n.startsWith("NETHERITE_")) return 50_000.0;
+        if (n.endsWith("_SMITHING_TEMPLATE")) return 9_000.0;
+        if (n.startsWith("MUSIC_DISC_")) return 8_000.0;
+        if (n.endsWith("_BANNER_PATTERN")) return 4_000.0;
+        if (n.endsWith("_POTTERY_SHERD")) return 3_500.0;
+        if (n.equals("POTION") || n.endsWith("_POTION") || n.equals("TIPPED_ARROW")) return 1_200.0;
+        if (n.startsWith("DIAMOND_")) return 5_000.0;
+        if (n.startsWith("ENCHANTED_")) return 4_000.0;
+        return 500.0;
     }
 
     private List<OrderEntry> queryOrders(OrdersViewState state) {
@@ -15843,6 +16108,24 @@ TabCompleter {
         private PendingRtpTeleport(String dimension, boolean bypassChecks) {
             this.dimension = dimension;
             this.bypassChecks = bypassChecks;
+        }
+    }
+
+    private static final class RtpQueueEntry {
+        private final int gearScore;
+        private final long enqueuedAt;
+        private final Sound disc;
+        private RtpQueueEntry(int gearScore, long enqueuedAt, Sound disc) {
+            this.gearScore = gearScore; this.enqueuedAt = enqueuedAt; this.disc = disc;
+        }
+    }
+
+    private static final class StoredPearl {
+        private final UUID worldId;
+        private final double x, y, z;
+        private final org.bukkit.util.Vector velocity;
+        private StoredPearl(UUID worldId, double x, double y, double z, org.bukkit.util.Vector velocity) {
+            this.worldId = worldId; this.x = x; this.y = y; this.z = z; this.velocity = velocity;
         }
     }
 
