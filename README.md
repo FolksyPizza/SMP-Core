@@ -29,6 +29,10 @@ One honest note. I lost the source for part of PizzaNetworkCore at some point an
 | PizzaLimbo | 0.1.0 | A lightweight limbo backend that holds players during maintenance when you run behind a Velocity proxy. |
 | PizzaProxyGuard | 1.0.0 | A small Velocity proxy plugin: denies new joins while the backend is down (with a maintenance message) and turns moderation kicks/bans into a clean disconnect instead of dropping the player into the limbo fallback. |
 | PizzaCommon | 1.0.0 | Shared storage library (YAML or MySQL). Currently used by PizzaChatGuard and shaded into it; the plan is to migrate the other plugins onto it over time. |
+| PizzaSpawnRules | 1.0.0 | Lobby spawn protections and a silent unlimited double jump. Hub servers only — its protected zone grants creative flight, and with `lockAllWorld` the zone is the whole world, so on a survival server it hands everyone flight. |
+| EnderchestExpander | 1.0.0 | Expands the ender chest from 27 to 54 slots, with persistent storage. |
+| PizzaUtils | 1.0.0 | Small utility commands: night vision, ping, view distance. |
+| PizzaTune | 1.0.0 | Live-tunes view distance and chunk send/load rates without a restart. |
 
 ## Status
 
@@ -38,7 +42,9 @@ The single-server survival features are stable and well tested in production: th
 
 One thing to know up front: PizzaNetworkCore stores its economy and player data in a MySQL or MariaDB database, not in flat files. You need a database for it to run. That can be a local MySQL on the same box or a remote one. The other plugins (chat, punishment, rules) use plain YAML.
 
-The cross-server functionality is Alpha and is off by default. Shared player state across a network and the limbo maintenance flow assume a specific Velocity proxy and database setup, and they have not had the same hardening as the core. They stay dormant unless you set `sync.enabled: true` in the core config. A single server never touches that path.
+The cross-server functionality is Beta, and it is now the setup I actually run: a Velocity proxy in front of lobby, survival and maintenance backends sharing one database. Shared inventories, balances, permissions, chat and cross-server RTP work. It is still younger than the single-server code and has had less exposure to a crowd, so treat it as Beta rather than settled.
+
+It stays dormant unless you set `sync.enabled: true` in the core config, and a single server never touches that path. If you do want it, [`network/`](network) has the full topology, configuration and ops tooling.
 
 ## Requirements
 
@@ -51,6 +57,22 @@ Recommended: 4 or more CPU cores, 8 to 12 GB RAM, and SSD storage. That is close
 The core plugin does more per tick than a stock server, so give it real CPU and an SSD if you expect a crowd. Most of the RAM goes to the world and players rather than the plugins.
 
 ## Install
+
+### Single server, or a proxy network
+
+Both are supported, and the network path is purely additive — nothing about the
+single-server setup changed.
+
+**Single Paper server** is the simpler choice and what most people want. Everything below
+describes it, and it needs nothing from the `network/` directory.
+
+**Velocity proxy network** puts a lobby, survival, maintenance and optional dev backend
+behind one proxy, sharing player state through the database, so a player keeps their
+inventory, balance, rank and settings as they move between servers. That is the layout the
+plugins were designed around and the one I run. See [`network/`](network) for the topology,
+configs and ops scripts.
+
+### Getting the plugins in place
 
 There are two ways to run it.
 

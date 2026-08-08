@@ -2,8 +2,8 @@ name: PizzaPunishment
 main: me.pizzasmp.punishdrop.PunishDropPlugin
 version: 1.0.0
 api-version: "1.21"
-author: FolksyPizza
-description: ExampleSMP punishment stack with presets, Ban IDs, history, and admin GUIs.
+author: PizzaSMP
+description: PizzaSMP punishment stack with presets, Ban IDs, history, and admin GUIs.
 commands:
   punish:
     description: Punish a player using a preset category or custom duration and reason.
@@ -66,7 +66,7 @@ commands:
     usage: /searchid <id>
     permission: pizzasmp.history
   bans:
-    description: Open the ExampleSMP moderation GUI.
+    description: Open the PizzaSMP moderation GUI.
     usage: /bans [page]
     permission: pizzasmp.bans
   moderation:

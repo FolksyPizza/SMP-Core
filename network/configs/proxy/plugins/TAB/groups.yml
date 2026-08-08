@@ -1,0 +1,60 @@
+# PROXY-SIDE TAB — this file owns the TABLIST.
+#
+# TAB runs on Velocity with global-playerlist and tablist-name-formatting enabled, so the
+# proxy renders the player list for the whole network. Anything set in a BACKEND's
+# groups.yml is overridden here for the tablist; the backends still own the above-head
+# nametag (scoreboard-teams is disabled on the proxy). Keep the two in step.
+#
+# Prefixes are written out rather than pulled through %luckperms-prefix% because the
+# stored LuckPerms values used the &x&R&R&G&G&B&B hex form, which only renders when the
+# colour char is the section sign. Through TAB it printed a literal "&x". The LuckPerms
+# groups now store &#RRGGBB (which TAB does parse) and these values mirror them, so a
+# rank shows correctly even if the LuckPerms hook is unavailable on the proxy.
+
+dev:
+  tabprefix: "&#A14CFF&lDEV &r"
+  tagprefix: "&#A14CFF&lDEV &r"
+
+owner:
+  tabprefix: "&#00BFFF&lOWNER &r"
+  tagprefix: "&#00BFFF&lOWNER &r"
+
+co-owner:
+  tabprefix: "&#00BFFF&lCO-OWNER &r"
+  tagprefix: "&#00BFFF&lCO-OWNER &r"
+
+sradmin:
+  tabprefix: "&4SrAdmin &r"
+  tagprefix: "&4SrAdmin &r"
+
+admin:
+  tabprefix: "&cAdmin &r"
+  tagprefix: "&cAdmin &r"
+
+srmod:
+  tabprefix: "&aSrMod &r"
+  tagprefix: "&aSrMod &r"
+
+mod:
+  tabprefix: "&2Mod &r"
+  tagprefix: "&2Mod &r"
+
+staff:
+  tabprefix: "&9Staff &r"
+  tagprefix: "&9Staff &r"
+
+pizza++:
+  tabprefix: "&6++ &r"
+  tagprefix: "&6++ &r"
+
+pizza+:
+  tabprefix: "&b+ &r"
+  tagprefix: "&b+ &r"
+
+# Unlisted groups fall back to whatever LuckPerms holds.
+_DEFAULT_:
+  tabprefix: "%luckperms-prefix%"
+  tagprefix: "%luckperms-prefix%"
+  customtabname: "%player%"
+  tabsuffix: "%luckperms-suffix%"
+  tagsuffix: "%luckperms-suffix%"

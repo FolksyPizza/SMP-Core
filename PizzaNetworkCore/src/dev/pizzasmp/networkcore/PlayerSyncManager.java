@@ -1,7 +1,23 @@
 /*
- * PlayerSyncManager is part of the SMP-Core plugin suite.
- * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Released under the MIT License (see LICENSE). Provided AS IS, without warranty.
+ * Decompiled with CFR 0.152.
+ * 
+ * Could not load the following classes:
+ *  io.papermc.paper.threadedregions.scheduler.ScheduledTask
+ *  org.bukkit.Bukkit
+ *  org.bukkit.GameMode
+ *  org.bukkit.Location
+ *  org.bukkit.Statistic
+ *  org.bukkit.Statistic$Type
+ *  org.bukkit.World
+ *  org.bukkit.attribute.Attribute
+ *  org.bukkit.configuration.file.FileConfiguration
+ *  org.bukkit.entity.Player
+ *  org.bukkit.inventory.ItemStack
+ *  org.bukkit.plugin.Plugin
+ *  org.bukkit.plugin.java.JavaPlugin
+ *  org.bukkit.scheduler.BukkitTask
+ *  org.bukkit.util.io.BukkitObjectInputStream
+ *  org.bukkit.util.io.BukkitObjectOutputStream
  */
 package dev.pizzasmp.networkcore;
 
@@ -79,11 +95,11 @@ final class PlayerSyncManager {
         this.serverName = configuredServer == null || configuredServer.isBlank() || "auto".equalsIgnoreCase(configuredServer) ? this.detectServerName() : configuredServer.trim().toLowerCase();
         String host = cfg.getString("sync.database.host", "127.0.0.1");
         int port = cfg.getInt("sync.database.port", 3306);
-        String database = cfg.getString("sync.database.name", "smpcore");
+        String database = cfg.getString("sync.database.name", "pizzasmp");
         String params = cfg.getString("sync.database.parameters", "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true");
         this.dbUrl = "jdbc:mariadb://" + host + ":" + port + "/" + database + "?" + params;
-        this.dbUser = cfg.getString("sync.database.user", "smpcore");
-        this.dbPassword = cfg.getString("sync.database.password", "changeme");
+        this.dbUser = cfg.getString("sync.database.user", "pizzasmp");
+        this.dbPassword = cfg.getString("sync.database.password", "pizzasmp_change_me");
         this.leaseSeconds = Math.max(10, cfg.getInt("sync.session.lease-seconds", 45));
         this.heartbeatTicks = Math.max(20, cfg.getInt("sync.session.heartbeat-ticks", 200));
         this.reconnectEnabled = cfg.getBoolean("sync.reconnect.enabled", true);
@@ -195,7 +211,15 @@ final class PlayerSyncManager {
                 }
                 this.applyInventoryAndState(player, snapshot);
                 this.debugAppliedState(player, "join_apply");
-                if (this.restoreLocationOnJoin && this.serverName.equalsIgnoreCase(snapshot.lastServer) && (world = Bukkit.getWorld((String)snapshot.worldName)) != null) {
+                // A queued RTP means the player explicitly asked to be moved somewhere
+                // random. Restoring their old position first is wrong on its own terms,
+                // and it also raced the RTP: the restore teleport is scheduled at
+                // locationTeleportDelayTicks while the RTP runs later off an async safe
+                // -location search, so the player ended up back where they started.
+                // Covers both "RTP:" (search on arrival) and "RTPAT:" (pre-resolved).
+                boolean rtpQueued = pendingAction != null
+                    && pendingAction.toUpperCase(java.util.Locale.ROOT).startsWith("RTP");
+                if (!rtpQueued && this.restoreLocationOnJoin && this.serverName.equalsIgnoreCase(snapshot.lastServer) && (world = Bukkit.getWorld((String)snapshot.worldName)) != null) {
                     Location location = new Location(world, snapshot.x, snapshot.y, snapshot.z, snapshot.yaw, snapshot.pitch);
                     this.runOnPlayerLater(player, () -> {
                         if (player.isOnline()) {
@@ -229,6 +253,31 @@ final class PlayerSyncManager {
         if (this.debugPendingActions) {
             this.plugin.getLogger().info("[pending-action-debug] stage=apply uuid=" + String.valueOf(player.getUniqueId()) + " server=" + this.serverName + " action=" + pendingAction);
         }
+        if (pendingAction.toUpperCase(java.util.Locale.ROOT).startsWith("RTP")
+                && this.plugin instanceof PizzaNetworkCore rtpCore) {
+            rtpCore.rtpLog("pending_apply", "player=" + player.getName()
+                + " syncServer=" + this.serverName + " action=" + pendingAction);
+        }
+        // ORDER MATTERS. "RTPAT:" also starts with "RTP", so the search-on-arrival branch
+        // below used to swallow it and run a fresh random search instead of placing the
+        // player at the coordinates the destination backend had already resolved — the
+        // pre-resolved path was dead code. Handle the exact prefix first.
+        if (pendingAction.startsWith("RTPAT:")) {
+            String[] parts = pendingAction.substring("RTPAT:".length()).split(",");
+            if (parts.length >= 4) {
+                World w = Bukkit.getWorld(parts[0]);
+                if (w != null) {
+                    try {
+                        Location dest = new Location(w, Double.parseDouble(parts[1]),
+                            Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
+                        this.runOnPlayerLater(player, () -> {
+                            if (player.isOnline()) player.teleport(dest);
+                        }, 5L);
+                    } catch (NumberFormatException ignored) { }
+                }
+            }
+            return;
+        }
         if (pendingAction.toUpperCase().startsWith("RTP") && "survival".equalsIgnoreCase(this.serverName)) {
             String raw;
             String dimensionArg = "overworld";
@@ -261,13 +310,16 @@ final class PlayerSyncManager {
 
     void queueOneTimeAction(UUID uuid, String action, int ttlSeconds) {
         this.runAsync(() -> {
-            String sql = "INSERT INTO player_transfer_actions (uuid, action, expires_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE action=VALUES(action), expires_at=VALUES(expires_at)";
-            Timestamp expiresAt = Timestamp.from(Instant.now().plusSeconds(Math.max(5, ttlSeconds)));
+            // Expiry is computed by the database — see upsertLease for why a Java-side
+            // Timestamp here made every queued action arrive already expired.
+            String sql = "INSERT INTO player_transfer_actions (uuid, action, expires_at) "
+                       + "VALUES (?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)) "
+                       + "ON DUPLICATE KEY UPDATE action=VALUES(action), expires_at=VALUES(expires_at)";
             try (Connection connection = this.getConnection();
                  PreparedStatement ps = connection.prepareStatement(sql);){
                 ps.setString(1, uuid.toString());
                 ps.setString(2, action);
-                ps.setTimestamp(3, expiresAt);
+                ps.setInt(3, Math.max(5, ttlSeconds));
                 ps.executeUpdate();
                 if (this.debugPendingActions) {
                     this.plugin.getLogger().info("[pending-action-debug] stage=queue uuid=" + String.valueOf(uuid) + " server=" + this.serverName + " action=" + action + " ttl=" + ttlSeconds);
@@ -514,18 +566,31 @@ final class PlayerSyncManager {
         }
     }
 
+    /**
+     * TIMESTAMPS COME FROM THE DATABASE, NOT FROM JAVA.
+     *
+     * These rows were written with Timestamp.from(Instant.now()), which the driver sends
+     * in the JVM's local zone. Our MariaDB runs UTC, so on an EDT host every lease landed
+     * four hours in the past and `expires_at > CURRENT_TIMESTAMP` was never true. Nothing
+     * errored; the network simply behaved as though no one was online anywhere — no
+     * cross-backend name completion, no cross-backend /tpa or /msg routing, and queued
+     * transfer actions (including RTP) expired before they could be applied.
+     *
+     * Computing the expiry with the server's own clock removes the dependency on host and
+     * container zones agreeing, which is the only version of this that stays correct on
+     * someone else's machine.
+     */
     private void upsertLease(UUID uuid, String leaseToken) {
-        String sql = "INSERT INTO session_leases (uuid, lease_token, server_name, expires_at, heartbeat_at) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE lease_token=VALUES(lease_token), server_name=VALUES(server_name), expires_at=VALUES(expires_at), heartbeat_at=VALUES(heartbeat_at)";
-        Instant now = Instant.now();
-        Timestamp heartbeatAt = Timestamp.from(now);
-        Timestamp expiresAt = Timestamp.from(now.plusSeconds(this.leaseSeconds));
+        String sql = "INSERT INTO session_leases (uuid, lease_token, server_name, expires_at, heartbeat_at) "
+                   + "VALUES (?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND), CURRENT_TIMESTAMP) "
+                   + "ON DUPLICATE KEY UPDATE lease_token=VALUES(lease_token), server_name=VALUES(server_name), "
+                   + "expires_at=VALUES(expires_at), heartbeat_at=VALUES(heartbeat_at)";
         try (Connection connection = this.getConnection();
              PreparedStatement ps = connection.prepareStatement(sql);){
             ps.setString(1, uuid.toString());
             ps.setString(2, leaseToken);
             ps.setString(3, this.serverName);
-            ps.setTimestamp(4, expiresAt);
-            ps.setTimestamp(5, heartbeatAt);
+            ps.setLong(4, this.leaseSeconds);
             ps.executeUpdate();
         }
         catch (SQLException e) {

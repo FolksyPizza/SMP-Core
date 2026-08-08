@@ -1,0 +1,24 @@
+name: PizzaTune
+version: 1.0.0
+main: dev.pizzasmp.tune.PizzaTune
+api-version: '1.21'
+authors: [PizzaSMP]
+description: Live-tune view distance and chunk send/load rates without restart.
+commands:
+  viewdistance:
+    description: Show or set the server view-distance live (1-32).
+    usage: /viewdistance [N|nether|end|overworld N]
+    aliases: [vd]
+    permission: pizzasmp.tune.viewdistance
+  chunkspeeds:
+    description: Show or set per-player chunk send/load rate live.
+    usage: /chunkspeeds [N | send N | load N | generate N | reset]
+    aliases: [cs]
+    permission: pizzasmp.tune.chunkspeeds
+permissions:
+  pizzasmp.tune.viewdistance:
+    description: Change server view distance live.
+    default: op
+  pizzasmp.tune.chunkspeeds:
+    description: Change chunk send/load rate live.
+    default: op

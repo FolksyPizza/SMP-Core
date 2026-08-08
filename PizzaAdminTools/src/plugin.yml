@@ -8,15 +8,15 @@ commands:
     usage: /gtp <player> [home-name|home-index]
     permission: pizzasmp.gtp
   homes:
-    description: Open the ExampleSMP homes GUI.
+    description: Open the PizzaSMP homes GUI.
     usage: /homes
     permission: pizzasmp.homes
   menu:
-    description: Open the ExampleSMP main menu.
+    description: Open the PizzaSMP main menu.
     usage: /menu
     permission: pizzasmp.menu
   guide:
-    description: Open the ExampleSMP guide menu.
+    description: Open the PizzaSMP guide menu.
     usage: /guide
     permission: pizzasmp.guide
   freeze:
@@ -53,12 +53,15 @@ commands:
     description: PizzaBans command hub.
     usage: /pizzabans [help]
   pizzaplugins:
-    description: Show ExampleSMP plugin stack.
+    description: Show PizzaSMP plugin stack.
     usage: /pizzaplugins
     permission: pizzasmp.pluginadmin
   # /sus and /suspicious are handled by PizzaNetworkCore — keeping it registered here would cause a conflict
-  # /nv and /nightvision are handled by PizzaNetworkCore (same state as the /settings
-  # Night Vision toggle) — keeping them registered here would conflict, like /sus.
+  nv:
+    description: Toggle infinite night vision.
+    usage: /nv [player]
+    aliases: [nightvision]
+    permission: pizzasmp.nv
   stash:
     description: Spawn a small randomized survival camp where you are looking.
     usage: /stash
@@ -81,10 +84,6 @@ commands:
     description: Spectator-track a player in 3rd person.
     usage: /atrack [player]
     permission: pizzasmp.admin.track
-  servermaint:
-    description: Frozen-in-place maintenance (players stay connected but can't move).
-    usage: /servermaint <start [reason]|end|status>
-    permission: pizzasmp.maintenance.admin
   sfmode:
     description: Toggle staff mode (hide and disable staff commands for yourself).
     usage: /sfmode

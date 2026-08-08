@@ -1,9 +1,11 @@
 package me.pizzasmp.punishdrop;
 
 /*
- * PunishDropPlugin is part of the SMP-Core plugin suite.
+ * PunishDropPlugin — part of the PizzaSMP plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Released under the MIT License (see LICENSE). Provided AS IS, without warranty.
+ * Licensed under the PizzaSMP Non-Commercial Source License v1.0 (see LICENSE).
+ * Non-commercial use only; no sale/resale without written permission; AGPL-style
+ * share-alike + network source disclosure. Provided AS IS, without warranty.
  */
 
 import java.io.File;
@@ -1207,7 +1209,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         buttons.add(dialogButton(Component.text("Anticheat Flags", DIALOG_BRAND), null, 150, p -> { p.closeDialog(); p.performCommand("sus"); }));
         buttons.add(dialogButton(Component.text("Clear All Bans", NamedTextColor.RED), null, 150, p -> openBulkClearDialog(p, ViewMode.ACTIVE_BANS)));
         buttons.add(dialogButton(Component.text("Clear All Mutes", NamedTextColor.YELLOW), null, 150, p -> openBulkClearDialog(p, ViewMode.ACTIVE_MUTES)));
-        player.showDialog(buildDialog(Component.text("ExampleSMP Moderation", DIALOG_BRAND), body,
+        player.showDialog(buildDialog(Component.text("Server Moderation", DIALOG_BRAND), body,
             DialogType.multiAction(buttons).columns(3).exitAction(dialogButton(Component.text("Close"), null, 150, null)).build()));
     }
 
@@ -1396,7 +1398,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             return;
         }
         ModerationMenuHolder holder = new ModerationMenuHolder();
-        Inventory inventory = Bukkit.createInventory(holder, MENU_GUI_SIZE, ChatColor.DARK_RED + "ExampleSMP Moderation");
+        Inventory inventory = Bukkit.createInventory(holder, MENU_GUI_SIZE, ChatColor.DARK_RED + "Server Moderation");
         holder.inventory = inventory;
 
         fillInventory(inventory, Material.BLACK_STAINED_GLASS_PANE, ChatColor.BLACK.toString());
@@ -2640,7 +2642,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private String buildBanScreenMessage(PunishmentRecord record) {
-        return ChatColor.RED + "You are banned from ExampleSMP. If you believe this was a mistake please make a ticket in the Example SMP Discord"
+        return ChatColor.RED + "You are banned from this server. If you believe this was a mistake please make a ticket in the Example SMP Discord"
             + "\n"
             + ChatColor.YELLOW + DISCORD_INVITE
             + "\n\n"
@@ -3419,9 +3421,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private enum ViewMode {
-        ACTIVE_BANS("Active Bans", ChatColor.DARK_RED + "ExampleSMP Bans"),
-        ACTIVE_MUTES("Active Mutes", ChatColor.DARK_RED + "ExampleSMP Mutes"),
-        HISTORY("History", ChatColor.DARK_RED + "ExampleSMP History");
+        ACTIVE_BANS("Active Bans", ChatColor.DARK_RED + "Server Bans"),
+        ACTIVE_MUTES("Active Mutes", ChatColor.DARK_RED + "PizzaSMP Mutes"),
+        HISTORY("History", ChatColor.DARK_RED + "PizzaSMP History");
 
         private final String displayName;
         private final String title;
@@ -3522,7 +3524,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
                 actionType = PunishmentType.BAN;
             }
             String duration = section.getString("duration", actionType == PunishmentType.KICK ? "" : "30d");
-            String reason = section.getString("reason", "ExampleSMP Rule Violation");
+            String reason = section.getString("reason", "PizzaSMP Rule Violation");
             List<String> aliases = new ArrayList<>();
             for (String alias : section.getStringList("aliases")) {
                 if (alias == null || alias.isBlank()) {

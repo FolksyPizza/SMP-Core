@@ -1,11 +1,5 @@
 package dev.pizzasmp.chat;
 
-/*
- * PizzaChatGuard is part of the SMP-Core plugin suite.
- * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Released under the MIT License (see LICENSE). Provided AS IS, without warranty.
- */
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -46,12 +40,6 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     private static final PlainTextComponentSerializer PLAIN = PlainTextComponentSerializer.plainText();
     private static final String PERM_BYPASS = "pizzasmp.chatguard.bypass";
     private static final String PERM_CLEAR = "pizzasmp.chatguard.clearwarnings";
-    private static final String PERM_LINKS = "pizzasmp.chatguard.links";   // may post links (bypass ADVERT only)
-    private static final String PERM_MANAGE = "pizzasmp.chatguard.manage"; // manage whitelist + owner-guard toggle
-    // Staff groups get link permission automatically. Owner/co-owner/dev are ALSO full-exempt (below).
-    private static final String[] STAFF_GROUPS = {
-        "group.mod", "group.srmod", "group.admin", "group.sradmin", "group.co-owner", "group.owner", "group.dev", "group.staff"
-    };
 
     // Slurs / hard bans — matched as whole words after leet normalization. Kept minimal &
     // specific to avoid catching innocent words. (Stored normalized/lowercase.)
@@ -88,26 +76,12 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     private int capsMinLength = 8;            // only caps-check messages this long+
     private double capsThreshold = 0.7;       // >70% uppercase letters = caps violation
 
-    // Unified storage (yaml default; mysql for cross-instance sync). Namespace "chatguard".
-    private dev.pizzasmp.common.SuiteStorage storage;
-
-    // Exemption policy (persisted in the "policy" storage doc, so it syncs across instances).
-    // guardOwner=false (default): owner/co-owner/dev are fully exempt from the filter. Toggle it ON
-    // from /admin (or /pcg owner on) to also guard owner/dev. Staff always keep link permission.
-    private boolean guardOwner = false;
-    // Players opted-in to link permission (bypass the ADVERT/URL filter only). Managed via /admin.
-    private final Set<UUID> linkWhitelist = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, String> linkWhitelistNames = new ConcurrentHashMap<>();
-
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "chatguard");
-        this.storage.importFromYamlOnce(java.util.List.of("strikes"), false);
         loadPolicy();
         initLeet();
         loadStrikes();
-        loadPolicyState();
         Bukkit.getPluginManager().registerEvents(this, this);
         getLogger().info("PizzaChatGuard enabled — " + slurWords.size() + " slurs, "
             + blockedWords.size() + " blocked, " + safeWords.size() + " safe-words, "
@@ -117,7 +91,6 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     @Override
     public void onDisable() {
         persistStrikes();
-        if (this.storage != null) this.storage.close();
     }
 
     /**
@@ -126,6 +99,8 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
      */
     private synchronized void persistStrikes() {
         try {
+            java.io.File f = new java.io.File(getDataFolder(), "strikes.yml");
+            if (!f.getParentFile().exists()) f.getParentFile().mkdirs();
             org.bukkit.configuration.file.YamlConfiguration cfg = new org.bukkit.configuration.file.YamlConfiguration();
             long now = System.currentTimeMillis();
             for (Map.Entry<UUID, Integer> e : violationCount.entrySet()) {
@@ -138,16 +113,17 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
                 String name = strikeNames.get(e.getKey());
                 if (name != null) cfg.set("names." + key, name);
             }
-            // yaml -> strikes.yml file; mysql -> suite_docs row (shared across instances).
-            this.storage.saveDoc("strikes", cfg);
+            cfg.save(f);
         } catch (Exception ex) {
-            getLogger().warning("Failed saving strikes: " + ex.getMessage());
+            getLogger().warning("Failed saving strikes.yml: " + ex.getMessage());
         }
     }
 
     private void loadStrikes() {
         try {
-            org.bukkit.configuration.file.YamlConfiguration cfg = this.storage.loadDoc("strikes");
+            java.io.File f = new java.io.File(getDataFolder(), "strikes.yml");
+            if (!f.exists()) return;
+            org.bukkit.configuration.file.YamlConfiguration cfg = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
             org.bukkit.configuration.ConfigurationSection counts = cfg.getConfigurationSection("counts");
             if (counts == null) return;
             long now = System.currentTimeMillis();
@@ -218,15 +194,13 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     public void onChat(AsyncChatEvent e) {
         Player p = e.getPlayer();
+        // Filter applies to EVERYONE (no bypass) — wildcard perms would otherwise exempt staff/owner.
         if (!filterEnabled || e.isCancelled()) return;
-        // Owner/co-owner/dev are fully exempt unless the owner-guard is toggled on.
-        if (isFullyExempt(p)) return;
         String message = PLAIN.serialize(e.message());
         if (message == null || message.isBlank()) return;
+        getLogger().info("[ChatGuard] inspecting from " + p.getName() + ": " + message);
 
         Violation v = inspect(p, message);
-        // Staff and whitelisted players may post links: an ADVERT-only violation is allowed for them.
-        if (v == Violation.ADVERT && hasLinkBypass(p)) v = Violation.NONE;
         if (v == Violation.NONE) {
             lastMessageTime.put(p.getUniqueId(), System.currentTimeMillis());
             lastMessageText.put(p.getUniqueId(), message.toLowerCase(Locale.ROOT).trim());
@@ -240,7 +214,6 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     public void onPrivateMessage(PlayerCommandPreprocessEvent e) {
         Player p = e.getPlayer();
         if (!filterEnabled) return;
-        if (isFullyExempt(p)) return;
         String msg = e.getMessage();
         String lower = msg.toLowerCase(Locale.ROOT);
         // Only inspect the message body of private-message commands.
@@ -261,7 +234,6 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         }
         if (body == null || body.isBlank()) return;
         Violation v = inspectContent(body);
-        if (v == Violation.ADVERT && hasLinkBypass(p)) v = Violation.NONE;
         if (v != Violation.NONE) {
             e.setCancelled(true);
             handleViolation(p, v, body);
@@ -289,58 +261,6 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         strikeNames.remove(id);
         persistStrikes();
         getLogger().info("[ChatGuard] strikes cleared for " + targetName + " (unmuted by " + e.getPlayer().getName() + ").");
-    }
-
-    // ---- exemption policy --------------------------------------------------
-    private boolean isOwnerOrDev(Player p) {
-        return p.hasPermission("group.owner") || p.hasPermission("group.co-owner") || p.hasPermission("group.dev");
-    }
-
-    /** Fully exempt from the whole filter: owner/co-owner/dev, unless the owner-guard is toggled on. */
-    private boolean isFullyExempt(Player p) {
-        return isOwnerOrDev(p) && !guardOwner;
-    }
-
-    /** May post links (bypasses the ADVERT/URL filter only): staff, whitelisted players, and the full-exempt. */
-    private boolean hasLinkBypass(Player p) {
-        if (isFullyExempt(p)) return true;
-        if (p.hasPermission(PERM_LINKS)) return true;
-        if (linkWhitelist.contains(p.getUniqueId())) return true;
-        for (String g : STAFF_GROUPS) if (p.hasPermission(g)) return true;
-        return false;
-    }
-
-    private synchronized void persistPolicy() {
-        try {
-            org.bukkit.configuration.file.YamlConfiguration cfg = new org.bukkit.configuration.file.YamlConfiguration();
-            cfg.set("guard-owner", guardOwner);
-            java.util.List<String> wl = new java.util.ArrayList<>();
-            for (UUID u : linkWhitelist) wl.add(u.toString());
-            cfg.set("link-whitelist", wl);
-            for (Map.Entry<UUID, String> e : linkWhitelistNames.entrySet()) cfg.set("names." + e.getKey(), e.getValue());
-            this.storage.saveDoc("policy", cfg);
-        } catch (Exception ex) {
-            getLogger().warning("Failed saving ChatGuard policy: " + ex.getMessage());
-        }
-    }
-
-    private void loadPolicyState() {
-        try {
-            org.bukkit.configuration.file.YamlConfiguration cfg = this.storage.loadDoc("policy");
-            guardOwner = cfg.getBoolean("guard-owner", getConfig().getBoolean("guard-owner", false));
-            linkWhitelist.clear();
-            linkWhitelistNames.clear();
-            for (String s : cfg.getStringList("link-whitelist")) {
-                try { linkWhitelist.add(UUID.fromString(s)); } catch (IllegalArgumentException ignored) {}
-            }
-            org.bukkit.configuration.ConfigurationSection names = cfg.getConfigurationSection("names");
-            if (names != null) for (String k : names.getKeys(false)) {
-                try { linkWhitelistNames.put(UUID.fromString(k), names.getString(k)); } catch (IllegalArgumentException ignored) {}
-            }
-            getLogger().info("[ChatGuard] policy: guard-owner=" + guardOwner + ", link-whitelist=" + linkWhitelist.size());
-        } catch (Exception ex) {
-            getLogger().warning("Failed loading ChatGuard policy: " + ex.getMessage());
-        }
     }
 
     private enum Violation { NONE, SLUR, BLOCKED, ADVERT, SPAM_RATE, SPAM_DUPLICATE, CAPS }
@@ -578,51 +498,14 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
             return true;
         }
         if (name.equals("pizzachatguard") || name.equals("pcg")) {
-            if (args.length >= 1) {
-                String sub = args[0].toLowerCase(Locale.ROOT);
-                if (sub.equals("reload") && sender.hasPermission(PERM_CLEAR)) {
-                    loadPolicy();
-                    loadPolicyState();
-                    sender.sendMessage("§aPizzaChatGuard policy reloaded.");
-                    return true;
-                }
-                if (sub.equals("owner")) {
-                    if (!sender.hasPermission(PERM_MANAGE)) { sender.sendMessage("§cNo permission."); return true; }
-                    if (args.length >= 2) guardOwner = args[1].equalsIgnoreCase("on") || args[1].equalsIgnoreCase("true");
-                    else guardOwner = !guardOwner;
-                    persistPolicy();
-                    sender.sendMessage("§7Owner/Dev chat guard is now " + (guardOwner ? "§aON §7(owner/dev are filtered)" : "§cOFF §7(owner/dev exempt)"));
-                    return true;
-                }
-                if (sub.equals("whitelist") || sub.equals("wl")) {
-                    if (!sender.hasPermission(PERM_MANAGE)) { sender.sendMessage("§cNo permission."); return true; }
-                    String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "list";
-                    if ((action.equals("add") || action.equals("remove")) && args.length >= 3) {
-                        Player online = Bukkit.getPlayerExact(args[2]);
-                        UUID id; String pname;
-                        if (online != null) { id = online.getUniqueId(); pname = online.getName(); }
-                        else { org.bukkit.OfflinePlayer o = Bukkit.getOfflinePlayer(args[2]); id = o.getUniqueId(); pname = o.getName() != null ? o.getName() : args[2]; }
-                        if (action.equals("add")) {
-                            linkWhitelist.add(id); linkWhitelistNames.put(id, pname);
-                            sender.sendMessage("§aAdded §f" + pname + " §ato the ChatGuard link whitelist.");
-                        } else {
-                            linkWhitelist.remove(id); linkWhitelistNames.remove(id);
-                            sender.sendMessage("§7Removed §f" + pname + " §7from the ChatGuard link whitelist.");
-                        }
-                        persistPolicy();
-                        return true;
-                    }
-                    sender.sendMessage("§eChatGuard link whitelist §7(" + linkWhitelist.size() + "):");
-                    for (UUID u : linkWhitelist) sender.sendMessage("§7- §f" + linkWhitelistNames.getOrDefault(u, u.toString()));
-                    sender.sendMessage("§7Usage: /pcg whitelist add|remove <player>");
-                    return true;
-                }
+            if (args.length >= 1 && args[0].equalsIgnoreCase("reload") && sender.hasPermission(PERM_CLEAR)) {
+                loadPolicy();
+                sender.sendMessage("§aPizzaChatGuard policy reloaded.");
+                return true;
             }
             sender.sendMessage("§ePizzaChatGuard §7— false-positive-resistant chat filter");
             sender.sendMessage("§7/clearwarnings <player> §8- clear a player's warnings");
             sender.sendMessage("§7/pcg reload §8- reload config");
-            sender.sendMessage("§7/pcg owner on|off §8- also guard owner/dev");
-            sender.sendMessage("§7/pcg whitelist add|remove|list <player> §8- link whitelist");
             return true;
         }
         return false;

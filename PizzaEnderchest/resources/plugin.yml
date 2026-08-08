@@ -1,0 +1,6 @@
+name: EnderchestExpander
+version: 1.0.0
+main: dev.pizzasmp.plugins.EnderchestExpander
+api-version: '1.21'
+authors: [FolksyPizza]
+description: Expands enderchests from 9x3 (27 slots) to 9x6 (54 slots) with persistent storage

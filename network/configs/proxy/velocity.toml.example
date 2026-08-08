@@ -1,0 +1,38 @@
+bind = "0.0.0.0:25565"
+motd = "\n<white>1.21.11-Dev"
+show-max-players = 1000
+# Mojang authentication happens HERE, at the proxy. This is what fetches each
+# player's real UUID and their skin/textures property on every login, then hands
+# both to the backends over modern forwarding — so skins stay current.
+# The backends deliberately keep online-mode=false; they trust this proxy via
+# forwarding.secret. Setting them true would break the network.
+online-mode = true
+player-info-forwarding-mode = "modern"
+forwarding-secret-file = "forwarding.secret"
+announce-forge = false
+kick-existing-players = false
+ping-passthrough = "DESCRIPTION"
+enable-player-address-logging = true
+force-key-authentication = true
+config-version = "2.7"
+# Lobby is the sole fallback. PizzaNetworkCore's PlayerSyncManager reads the player's
+# last-logout server on join and forwards them on from here, so a bare join lands in
+# lobby and is routed onward. Keeping survival out of `try` is deliberate: it stops a
+# kicked or banned player from silently falling through into another backend.
+try = ["lobby"]
+
+[servers]
+lobby = "127.0.0.1:25566"
+survival = "127.0.0.1:25567"
+maintenance = "127.0.0.1:25569"
+# Development/test backend. Deliberately NOT in `try` — a player must ask for it
+# explicitly (/server dev) and is never routed here by a fallback.
+dev = "127.0.0.1:25568"
+
+[forced-hosts]
+"lobby.pizzasmp.local" = ["lobby"]
+
+[advanced]
+login-ratelimit = 0
+accepts-transfers = true
+bungee-plugin-message-channel = true

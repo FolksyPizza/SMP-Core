@@ -1,0 +1,9 @@
+spawnedit:
+  duration_ms: 600000
+
+gates:
+  enabled: false
+  debug_log: false
+
+spawn_cleanup:
+  max_blocks: 30000

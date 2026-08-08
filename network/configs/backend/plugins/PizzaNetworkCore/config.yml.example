@@ -1,0 +1,100 @@
+sync:
+  enabled: true
+  server-name: auto
+  database:
+    host: 127.0.0.1
+    port: 3306
+    name: pizzasmp
+    user: pizzasmp
+    password: CHANGE_ME
+    parameters: useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
+  session:
+    lease-seconds: 45
+    heartbeat-ticks: 200
+  reconnect:
+    # Send a joining player on to the backend they last logged out of.
+    # Velocity's try=["lobby"] lands everyone in lobby; this forwards them onward.
+    enabled: true
+    lobby-server-name: lobby
+    excluded-servers:
+    - maintenance
+    # never auto-return a player into the dev/test backend
+    - dev
+    bypass-permission: ''
+    delay-ticks: 20
+    min-offline-seconds: 4
+  location:
+    restore-on-join: true
+    teleport-delay-ticks: 5
+  debug:
+    log-join-state: false
+    log-pending-actions: false
+maintenance_music:
+  enabled: false
+  sound: MUSIC_DISC_MELLOHI
+  interval_seconds: 176
+  volume: 0.6
+  pitch: 1.0
+  debug_log: false
+maintenance_queue:
+  debug_log: false
+  return_batch_size: 2
+  return_drain_interval_ticks: 20
+# Join queue (capacity gate) — disabled 2026-06-10 until reworked as a pre-join layer (task #51)
+queue:
+  enabled: false
+router:
+  spawn-server-name: lobby
+  debug_log: false
+combat:
+  tag_seconds: 20
+  actionbar_prefix: '§fCombat: &#00BFFF'
+  quit_death: true
+  debug_log: false
+rtp:
+  min-radius: 500
+  # Hard cap on how far RTP may land. A world whose border was never set carries
+  # vanilla's ~30,000,000-block default half-width; without this cap RTP picks
+  # ungenerated terrain and the player arrives in an empty void.
+  max-radius: 5000
+  max-radius-border-padding: 64
+  search-attempts: 96
+  unsafe-ground-materials:
+  - WATER
+  - LAVA
+  - KELP
+  - KELP_PLANT
+  - MAGMA_BLOCK
+  - CAMPFIRE
+  - SOUL_CAMPFIRE
+  - CACTUS
+  - SWEET_BERRY_BUSH
+  - POWDER_SNOW
+  - FIRE
+  - SOUL_FIRE
+chat_debug:
+  log_bridge_payloads: true
+chat:
+  # MUST be true or onChat returns before any routing runs.
+  intercept_async_chat: true
+  global_chat_enabled: true
+  # Only for a backend with NO proxy relay; would double-print here.
+  bridge_local_echo: false
+  cross_server_msg_enabled: true
+  cross_server_team_chat_enabled: true
+hud:
+  sidebar_enabled: true
+  force_ascii_icons: false
+# Adaptive autosave — saves worlds + players every online_interval while anyone is
+# online, every empty_interval when the server is empty (bukkit.yml autosave = 10min net)
+autosave:
+  online_interval_seconds: 180
+  empty_interval_seconds: 600
+world_access:
+  disabled_worlds: []
+  rtp_disabled_worlds: []
+  evac_target: world
+  admin_bypass: false
+  lock_message: '&cThis region is down for maintenance'
+flags:
+  end_closed: false

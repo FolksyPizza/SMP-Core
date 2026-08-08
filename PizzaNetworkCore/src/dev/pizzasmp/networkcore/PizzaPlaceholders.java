@@ -1,7 +1,9 @@
 /*
- * PizzaPlaceholders is part of the SMP-Core plugin suite.
+ * PizzaPlaceholders — part of the PizzaSMP plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Released under the MIT License (see LICENSE). Provided AS IS, without warranty.
+ * Licensed under the PizzaSMP Non-Commercial Source License v1.0 (see LICENSE).
+ * Non-commercial use only; no sale/resale without written permission; AGPL-style
+ * share-alike + network source disclosure. Provided AS IS, without warranty.
  */
 package dev.pizzasmp.networkcore;
 
@@ -20,7 +22,7 @@ public final class PizzaPlaceholders extends PlaceholderExpansion {
     PizzaPlaceholders(PizzaNetworkCore plugin) { this.plugin = plugin; }
 
     @Override public String getIdentifier() { return "pizzasmp"; }
-    @Override public String getAuthor() { return "FolksyPizza"; }
+    @Override public String getAuthor() { return "ExampleSMP"; }
     @Override public String getVersion() { return "1.0.0"; }
     @Override public boolean persist() { return true; }   // survive PAPI reloads
 

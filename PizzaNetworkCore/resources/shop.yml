@@ -1,7 +1,7 @@
 shop:
   categories:
     blocks:
-      title: "§9§lExampleSMP §8» §fShop: Blocks"
+      title: "§9§lPizzaSMP §8» §fShop: Blocks"
       icon: "BRICKS"
       slot: 10
       items:
@@ -18,7 +18,7 @@ shop:
           buy: 120.0
           sell: 60.0
     food:
-      title: "§9§lExampleSMP §8» §fShop: Food"
+      title: "§9§lPizzaSMP §8» §fShop: Food"
       icon: "COOKED_BEEF"
       slot: 12
       items:
@@ -35,7 +35,7 @@ shop:
           buy: 96.0
           sell: 36.0
     tools:
-      title: "§9§lExampleSMP §8» §fShop: Tools"
+      title: "§9§lPizzaSMP §8» §fShop: Tools"
       icon: "DIAMOND_PICKAXE"
       slot: 14
       items:
@@ -46,7 +46,7 @@ shop:
           buy: 1250.0
           sell: 450.0
     combat:
-      title: "§9§lExampleSMP §8» §fShop: Combat"
+      title: "§9§lPizzaSMP §8» §fShop: Combat"
       icon: "DIAMOND_SWORD"
       slot: 16
       items:
@@ -63,7 +63,7 @@ shop:
           buy: 120.0
           sell: 48.0
     misc:
-      title: "§9§lExampleSMP §8» §fShop: Misc"
+      title: "§9§lPizzaSMP §8» §fShop: Misc"
       icon: "ENDER_PEARL"
       slot: 28
       items:

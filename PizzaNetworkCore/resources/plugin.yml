@@ -2,14 +2,33 @@ name: PizzaNetworkCore
 version: 1.0.0
 main: dev.pizzasmp.networkcore.PizzaNetworkCore
 api-version: '1.21'
-folia-supported: false
-authors: [FolksyPizza]
-description: Core survival plugin. Economy (auction house, player orders, shop, sellable items), homes, teleports, a follow/friends system, settings menus, leaderboards, and the scoreboard HUD.
-softdepend: [Vault, PlaceholderAPI, ProtocolLib, LuckPerms, Essentials]
+folia-supported: true
+authors: [PizzaSMP]
+description: PizzaSMP core UX plugin (join/quit suppression, guide/settings/stats GUIs)
 libraries:
   - org.mariadb.jdbc:mariadb-java-client:3.5.4
   - com.zaxxer:HikariCP:5.1.0
 commands:
+  spawn:
+    usage: /spawn
+    description: Teleport to the network lobby spawn.
+  warp:
+    usage: /warp <spawn>
+    description: Warp to a network destination.
+  # DELIBERATELY UNREGISTERED (2026-08-07) — maintenance moved to CLI (scripts/).
+  #   admin, manage  - the in-game consoles. Removed to bound the blast radius of a
+  #                    LuckPerms permission leak: they put maintenance, world access,
+  #                    economy and feature flags behind one node. Handler code
+  #                    (openManageConsole / openAdmin*) is intentionally LEFT IN PLACE
+  #                    but unreachable; unregistering is the security win, and deleting
+  #                    it would be a large churn pass through a 20k-line class.
+  #   region         - HIDDEN, not removed. It is ~60 call sites (world-access engine,
+  #                    closed_worlds channel, limbo hold), and a Folia-era variant will
+  #                    reuse it. The machinery stays; only the command is gone.
+  #   maintenancemotd- removed. It wrote into kennytv Maintenance's config.yml, which we
+  #                    no longer run. MOTD control now lives in PizzaProxyGuard, driven
+  #                    from the CLI.
+  # See docs/notes/MAINTENANCE-MODEL.md.
   settings:
     usage: /settings
   stats:
@@ -42,9 +61,6 @@ commands:
     usage: /nv [player]
     description: Toggle infinite night vision (same state as the /settings toggle).
     aliases: [nightvision]
-  manage:
-    usage: /manage
-    description: Backend management console (dev + granted admins).
   tpauto:
     usage: /tpauto
     description: Toggle auto-accepting incoming TPA requests (same state as /settings).
@@ -54,23 +70,14 @@ commands:
     usage: /homes
   kill:
     usage: /kill
-  admin:
-    usage: /admin
-    description: In-game server admin console.
-    permission: pizzasmp.admin.console
-  maintenancemotd:
-    usage: /maintenancemotd <text>
-    description: Set the maintenance server-list MOTD.
-    aliases: [setmaintenancemotd, maintmotd]
-    permission: pizzasmp.admin.console
   limbomaint:
     usage: /limbomaint <start|stop|status>
     description: Full-stop limbo maintenance (transfer players to limbo, restart SMP).
     aliases: [limbo]
     permission: pizzasmp.admin.console
   branding:
-    usage: /branding [status] | /branding set <profile>
-    description: Switch the active server brand profile.
+    usage: /branding [status] | /branding set <pizzasmp|horizonsmp>
+    description: Switch the active server brand profile (PizzaSMP/HorizonSMP).
     permission: pizzasmp.admin.console
   worth:
     usage: /worth [item]
@@ -100,6 +107,8 @@ commands:
     usage: /rtpq
     description: Queue for a gear-matched RTP duel.
     aliases: [rtpqueue]
+  ecobot:
+    usage: /ecobot [status|list|order|buy|deliver|clear|reload|pause|resume]
   tpa:
     usage: /tpa <player>
   tpahere:

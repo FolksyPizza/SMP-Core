@@ -1,14 +1,12 @@
 sync:
-  # ALPHA: cross-server player sync + limbo maintenance. Off by default.
-  # A single standalone server does not need this; the economy uses the database below regardless.
-  enabled: false
+  enabled: true
   server-name: auto
   database:
     host: 127.0.0.1
     port: 3306
-    name: smpcore
-    user: smpcore
-    password: changeme
+    name: pizzasmp
+    user: pizzasmp
+    password: pizzasmp_change_me
     parameters: "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true"
   session:
     lease-seconds: 45

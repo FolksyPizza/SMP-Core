@@ -1,7 +1,97 @@
 /*
- * PizzaNetworkCore is part of the SMP-Core plugin suite.
+ * PizzaNetworkCore — part of the PizzaSMP plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Released under the MIT License (see LICENSE). Provided AS IS, without warranty.
+ * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
+ */
+/*
+ * Decompiled with CFR 0.152.
+ * 
+ * Could not load the following classes:
+ *  com.comphenix.protocol.PacketType
+ *  com.comphenix.protocol.PacketType$Play$Server
+ *  com.comphenix.protocol.ProtocolLibrary
+ *  com.comphenix.protocol.events.PacketAdapter
+ *  com.comphenix.protocol.events.PacketContainer
+ *  com.comphenix.protocol.events.PacketEvent
+ *  com.comphenix.protocol.events.PacketListener
+ *  com.destroystokyo.paper.event.server.AsyncTabCompleteEvent
+ *  io.papermc.paper.event.player.AsyncChatEvent
+ *  io.papermc.paper.threadedregions.scheduler.ScheduledTask
+ *  net.kyori.adventure.text.Component
+ *  net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
+ *  net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+ *  net.milkbowl.vault.chat.Chat
+ *  net.milkbowl.vault.economy.Economy
+ *  net.milkbowl.vault.economy.EconomyResponse
+ *  org.bukkit.Bukkit
+ *  org.bukkit.Difficulty
+ *  org.bukkit.GameRule
+ *  org.bukkit.Location
+ *  org.bukkit.Material
+ *  org.bukkit.NamespacedKey
+ *  org.bukkit.OfflinePlayer
+ *  org.bukkit.Sound
+ *  org.bukkit.World
+ *  org.bukkit.attribute.Attribute
+ *  org.bukkit.attribute.AttributeInstance
+ *  org.bukkit.block.Block
+ *  org.bukkit.block.data.BlockData
+ *  org.bukkit.block.data.Waterlogged
+ *  org.bukkit.command.Command
+ *  org.bukkit.command.CommandExecutor
+ *  org.bukkit.command.CommandSender
+ *  org.bukkit.command.PluginCommand
+ *  org.bukkit.command.TabCompleter
+ *  org.bukkit.configuration.ConfigurationSection
+ *  org.bukkit.configuration.file.FileConfiguration
+ *  org.bukkit.configuration.file.YamlConfiguration
+ *  org.bukkit.enchantments.Enchantment
+ *  org.bukkit.entity.Entity
+ *  org.bukkit.entity.ExperienceOrb
+ *  org.bukkit.entity.HumanEntity
+ *  org.bukkit.entity.Player
+ *  org.bukkit.entity.Projectile
+ *  org.bukkit.event.EventHandler
+ *  org.bukkit.event.EventPriority
+ *  org.bukkit.event.Listener
+ *  org.bukkit.event.block.BlockBreakEvent
+ *  org.bukkit.event.block.BlockPlaceEvent
+ *  org.bukkit.event.entity.EntityDamageByEntityEvent
+ *  org.bukkit.event.entity.EntityDeathEvent
+ *  org.bukkit.event.entity.PlayerDeathEvent
+ *  org.bukkit.event.inventory.ClickType
+ *  org.bukkit.event.inventory.InventoryClickEvent
+ *  org.bukkit.event.inventory.InventoryCloseEvent
+ *  org.bukkit.event.inventory.InventoryDragEvent
+ *  org.bukkit.event.player.PlayerCommandPreprocessEvent
+ *  org.bukkit.event.player.PlayerGameModeChangeEvent
+ *  org.bukkit.event.player.PlayerJoinEvent
+ *  org.bukkit.event.player.PlayerMoveEvent
+ *  org.bukkit.event.player.PlayerPortalEvent
+ *  org.bukkit.event.player.PlayerQuitEvent
+ *  org.bukkit.event.server.TabCompleteEvent
+ *  org.bukkit.inventory.Inventory
+ *  org.bukkit.inventory.InventoryHolder
+ *  org.bukkit.inventory.ItemStack
+ *  org.bukkit.inventory.meta.ArmorMeta
+ *  org.bukkit.inventory.meta.ItemMeta
+ *  org.bukkit.inventory.meta.PotionMeta
+ *  org.bukkit.inventory.meta.trim.ArmorTrim
+ *  org.bukkit.inventory.meta.trim.TrimMaterial
+ *  org.bukkit.inventory.meta.trim.TrimPattern
+ *  org.bukkit.persistence.PersistentDataType
+ *  org.bukkit.plugin.Plugin
+ *  org.bukkit.plugin.RegisteredServiceProvider
+ *  org.bukkit.plugin.java.JavaPlugin
+ *  org.bukkit.potion.PotionEffectType
+ *  org.bukkit.potion.PotionType
+ *  org.bukkit.scoreboard.DisplaySlot
+ *  org.bukkit.scoreboard.Objective
+ *  org.bukkit.scoreboard.Scoreboard
+ *  org.bukkit.scoreboard.Team
+ *  org.bukkit.util.NumberConversions
+ *  org.bukkit.util.io.BukkitObjectInputStream
+ *  org.bukkit.util.io.BukkitObjectOutputStream
  */
 package dev.pizzasmp.networkcore;
 
@@ -13,6 +103,8 @@ import com.comphenix.protocol.events.PacketEvent;
 import com.comphenix.protocol.events.PacketListener;
 import com.comphenix.protocol.wrappers.WrappedParticle;
 import com.destroystokyo.paper.event.server.AsyncTabCompleteEvent;
+// import dev.pizzasmp.networkcore.MaintenanceQueueManager;
+// import dev.pizzasmp.networkcore.PlayerSyncManager;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import java.io.ByteArrayInputStream;
@@ -152,7 +244,8 @@ public final class PizzaNetworkCore
 extends JavaPlugin
 implements Listener,
 CommandExecutor,
-TabCompleter {
+TabCompleter,
+org.bukkit.plugin.messaging.PluginMessageListener {
     private static final String BRIDGE_CHANNEL = "pizzasmp:bridge";
     private static final Pattern HEX_COLOR_PATTERN = Pattern.compile("(?i)&#([0-9a-f]{6})");
     private static final String TITLE_SETTINGS = "Settings";
@@ -166,6 +259,114 @@ TabCompleter {
     private static final String TITLE_SHOP_CONFIRM = "Shop \u2013 Buy";
     private static final String TITLE_SHARD_SHOP = "Shard Shop";
     private static final String SERVER_UUID = "00000000-0000-0000-0000-000000000001";
+    // Items the EcoBot must never list/order: non-vanilla / not obtainable in survival.
+    private static final java.util.Set<String> ECOBOT_EXCLUDED_KEYS = java.util.Set.of(
+        "BARRIER","BEDROCK","COMMAND_BLOCK","CHAIN_COMMAND_BLOCK","REPEATING_COMMAND_BLOCK",
+        "STRUCTURE_BLOCK","STRUCTURE_VOID","DEBUG_STICK","COMMAND_BLOCK_MINECART",
+        "LIGHT","KNOWLEDGE_BOOK","JIGSAW","END_PORTAL_FRAME","END_PORTAL","NETHER_PORTAL",
+        "MOVING_PISTON","PISTON_HEAD","AIR","CAVE_AIR","VOID_AIR","SPAWNER",
+        "TRIAL_SPAWNER","VAULT","BUDDING_AMETHYST","REINFORCED_DEEPSLATE","PETRIFIED_OAK_SLAB",
+        "DRAGON_EGG","SUSPICIOUS_SAND","SUSPICIOUS_GRAVEL","CHORUS_PLANT","FROGSPAWN",
+        "POWDER_SNOW","SCULK_SHRIEKER","BUNDLE","FARMLAND","DIRT_PATH"
+    );
+
+    // True for materials the EcoBot must skip (non-vanilla / not survival-obtainable).
+    private boolean isEcobotExcluded(Material mat) {
+        if (mat == null || !mat.isItem() || mat.isLegacy()) return true;
+        String k = mat.name();
+        return ECOBOT_EXCLUDED_KEYS.contains(k)
+            || k.endsWith("_SPAWN_EGG")
+            || k.startsWith("INFESTED_")
+            || k.startsWith("LEGACY_");
+    }
+
+    // Hand-tuned prices (per single item) for rare / hard-to-obtain / limited items so they sit
+    // high on the EcoBot scale. These OVERRIDE the sell/worth config.
+    // 2026-06-03: lowered ~60-65% to deflate the early economy (it still has to grow). Previous
+    // higher values are saved in backups/economy-* for an easy revert.
+    private static final java.util.Map<String, Double> ECOBOT_RARE_PRICES = java.util.Map.ofEntries(
+        java.util.Map.entry("DRAGON_HEAD", 10_000_000.0),
+        java.util.Map.entry("PIGLIN_HEAD", 10_000_000.0),
+        java.util.Map.entry("WITHER_SKELETON_SKULL", 90_000.0),
+        java.util.Map.entry("HEAVY_CORE", 2_500_000.0),
+        java.util.Map.entry("MACE", 1_200_000.0),
+        java.util.Map.entry("ELYTRA", 450_000.0),
+        java.util.Map.entry("NETHER_STAR", 100_000.0),
+        java.util.Map.entry("BEACON", 130_000.0),
+        java.util.Map.entry("ENCHANTED_GOLDEN_APPLE", 110_000.0),
+        java.util.Map.entry("TOTEM_OF_UNDYING", 50_000.0),
+        java.util.Map.entry("TRIDENT", 80_000.0),
+        java.util.Map.entry("HEART_OF_THE_SEA", 40_000.0),
+        java.util.Map.entry("RECOVERY_COMPASS", 25_000.0),
+        java.util.Map.entry("ECHO_SHARD", 7_000.0),
+        java.util.Map.entry("SHULKER_SHELL", 12_000.0),
+        java.util.Map.entry("NETHERITE_INGOT", 18_000.0),
+        java.util.Map.entry("NETHERITE_BLOCK", 162_000.0),
+        java.util.Map.entry("NETHERITE_SCRAP", 4_500.0),
+        java.util.Map.entry("ANCIENT_DEBRIS", 9_000.0),
+        java.util.Map.entry("ZOMBIE_HEAD", 14_000.0),
+        java.util.Map.entry("SKELETON_SKULL", 16_000.0),
+        java.util.Map.entry("CREEPER_HEAD", 14_000.0),
+        java.util.Map.entry("PLAYER_HEAD", 9_000.0),
+        java.util.Map.entry("CONDUIT", 32_000.0),
+        java.util.Map.entry("ENCHANTED_BOOK", 2_500.0),
+        java.util.Map.entry("BREEZE_ROD", 5_000.0),
+        java.util.Map.entry("WIND_CHARGE", 700.0),
+        java.util.Map.entry("OMINOUS_BOTTLE", 3_200.0),
+        java.util.Map.entry("OMINOUS_TRIAL_KEY", 11_000.0),
+        java.util.Map.entry("TRIAL_KEY", 4_500.0),
+        java.util.Map.entry("GOLDEN_APPLE", 2_000.0),
+        java.util.Map.entry("MUSIC_DISC_PIGSTEP", 22_000.0),
+        java.util.Map.entry("MUSIC_DISC_CREATOR", 15_000.0)
+    );
+
+    // Curated extra materials EcoBot should ALWAYS consider listing, even when they have no
+    // sell/worth config entry (rares, new items, potions, smithing templates, mob heads...).
+    private static final java.util.Set<Material> ECOBOT_EXTRA_MATERIALS = buildEcobotExtraMaterials();
+    private static java.util.Set<Material> buildEcobotExtraMaterials() {
+        java.util.LinkedHashSet<Material> set = new java.util.LinkedHashSet<>();
+        for (String k : ECOBOT_RARE_PRICES.keySet()) {
+            Material m = Material.matchMaterial(k);
+            if (m != null) set.add(m);
+        }
+        for (Material m : Material.values()) {
+            if (m.isLegacy() || !m.isItem()) continue;
+            String n = m.name();
+            if (n.endsWith("_POTION") || n.equals("POTION") || n.equals("TIPPED_ARROW")
+                    || n.endsWith("_SMITHING_TEMPLATE") || n.endsWith("_HEAD") || n.endsWith("_SKULL")
+                    || n.endsWith("_BANNER_PATTERN") || n.startsWith("MUSIC_DISC_")
+                    || n.endsWith("_POTTERY_SHERD") || n.equals("HEAVY_CORE") || n.equals("MACE")) {
+                set.add(m);
+            }
+        }
+        return set;
+    }
+
+    // EcoBot price for a single item: rare overrides first, then sell/worth config, then a
+    // sensible category fallback so newly-added / uncatalogued items still get listed.
+    private double ecobotUnitPrice(Material mat) {
+        if (mat == null) return -1.0;
+        Double rare = ECOBOT_RARE_PRICES.get(mat.name());
+        if (rare != null) return rare;
+        double cfg = this.sellUnitPrice(mat);
+        if (cfg > 0.0) return cfg;
+        return this.ecobotFallbackPrice(mat);
+    }
+
+    private double ecobotFallbackPrice(Material mat) {
+        String n = mat.name();
+        if (n.endsWith("_HEAD") || n.endsWith("_SKULL")) return 25_000.0;
+        if (n.startsWith("NETHERITE_")) return 50_000.0;
+        if (n.endsWith("_SMITHING_TEMPLATE")) return 9_000.0;
+        if (n.startsWith("MUSIC_DISC_")) return 8_000.0;
+        if (n.endsWith("_BANNER_PATTERN")) return 4_000.0;
+        if (n.endsWith("_POTTERY_SHERD")) return 3_500.0;
+        if (n.equals("POTION") || n.endsWith("_POTION") || n.equals("TIPPED_ARROW")) return 1_200.0;
+        if (n.startsWith("DIAMOND_")) return 5_000.0;
+        if (n.startsWith("ENCHANTED_")) return 4_000.0;
+        // Generic fallback so anything obtainable can still be auctioned.
+        return 500.0;
+    }
     private static final String TITLE_AH = "Auction House";
     private static final String TITLE_SELL_GUI = "Sell Items";
     private static final String TITLE_ORDERS = "Orders";
@@ -224,7 +425,7 @@ TabCompleter {
     private FileConfiguration shopConfig;
     private FileConfiguration sellConfig;
     private FileConfiguration worthConfig;
-    // ---- Branding (active brand profile; see branding.yml) ----
+    // ---- Branding (PizzaSMP <-> HorizonSMP toggle; see branding.yml) ----
     private FileConfiguration brandingConfig;
     private String brandActive = "pizzasmp";
     private String brandDisplay = "ExampleSMP";
@@ -281,9 +482,12 @@ TabCompleter {
     private final Map<UUID, Long> combatTaggedUntil = new ConcurrentHashMap<UUID, Long>();
     private final Map<UUID, TaskHandle> combatActionbarTasks = new ConcurrentHashMap<UUID, TaskHandle>();
     private final Set<UUID> activeRtpSearches = ConcurrentHashMap.newKeySet();
-    // Vanilla pearls: a player's thrown pearls are captured + removed on logout and re-spawned on login.
+    // Vanilla pearls: a player's thrown pearls are captured + removed on logout and re-spawned on
+    // login (in-memory, same runtime), so they never persist to disk while the owner is offline.
     private final Map<UUID, List<StoredPearl>> loggedOutPearls = new ConcurrentHashMap<UUID, List<StoredPearl>>();
-    // RTP Queue (duels): players searching for a gear-matched opponent.
+    // RTP Queue (duels): players searching for a gear-matched opponent. On match both are RTP'd to
+    // one fresh spot; they are not bound to fight, no reward, no return. Cancels ONLY on death,
+    // disconnect, or combat (a cancel just frees the other to keep searching).
     private final Map<UUID, RtpQueueEntry> rtpDuelQueue = new ConcurrentHashMap<UUID, RtpQueueEntry>();
     private static final Sound[] RTPQ_DISCS = new Sound[] {
         Sound.MUSIC_DISC_MELLOHI, Sound.MUSIC_DISC_STAL, Sound.MUSIC_DISC_PIGSTEP, Sound.MUSIC_DISC_CAT
@@ -337,6 +541,11 @@ TabCompleter {
     private final Map<UUID, Long> lastPlaytimeFlush = new ConcurrentHashMap<UUID, Long>();
     private boolean routerDebug;
     private boolean combatDebug;
+    // /rtp spans three processes (origin backend -> proxy -> destination backend) and each
+    // hop can fail silently. Every hop logs one line so a failure names itself instead of
+    // being narrowed down by guesswork. Defaults ON: it is a handful of lines per /rtp.
+    private boolean rtpDebug;
+    private volatile boolean autoEcoPaused = false;
     private volatile boolean shuttingDown = false;
     // World access control (/admin console). Persisted under world_access.* in config.yml.
     private final java.util.Set<String> disabledWorlds = ConcurrentHashMap.newKeySet();
@@ -360,9 +569,7 @@ TabCompleter {
     private static final long VD_RECOVER_DELAY_MS = 120_000L;
     private final java.util.Set<UUID> combatLoggedPending = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.Random ecoRandom = new java.util.Random();
-    // In-memory accumulator for high-frequency player stats (blocks/kills/deaths/mobs). Flushed
-    // in batches every 30s + on quit + on disable, instead of one DB upsert per block.
-    private final java.util.concurrent.ConcurrentHashMap<UUID, java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder>> pendingLongStats = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.List<TaskHandle> autoEcoTasks = new java.util.ArrayList<>();
     private final Map<UUID, Long> tpaCooldowns = new ConcurrentHashMap<UUID, Long>();
     private final Map<UUID, TPARequest> pendingTpaRequests = new ConcurrentHashMap<UUID, TPARequest>();
     private final Map<UUID, Long> tpaRequestExpiry = new ConcurrentHashMap<UUID, Long>();
@@ -373,7 +580,7 @@ TabCompleter {
     private volatile List<String> cachedNetworkPlayerNames = List.of();
     private volatile long cachedNetworkPlayerNamesLoadedAt;
     private TaskHandle notificationPollTask;
-    private static final List<SettingDefinition> SETTINGS_DEFINITIONS = List.of(new SettingDefinition("public_chat", "Public Chat", Material.OAK_SIGN, 0, 1, true, List.of(), false, null), new SettingDefinition("private_messages", "Private Messages", Material.SPRUCE_SIGN, 1, 1, true, List.of(), false, null), new SettingDefinition("chat_server_messages", "Chat Server Messages", Material.BIRCH_SIGN, 2, 1, true, List.of(), false, null), new SettingDefinition("hotbar_server_messages", "Hotbar Server Messages", Material.JUNGLE_SIGN, 3, 1, true, List.of(), false, null), new SettingDefinition("pay_players", "Pay Players", Material.ACACIA_SIGN, 4, 1, true, List.of(), false, null), new SettingDefinition("bounty_alerts", "Bounty Alerts", Material.DARK_OAK_SIGN, 5, 1, true, List.of(), false, null), new SettingDefinition("auction_alerts", "Auction Alerts", Material.MANGROVE_SIGN, 6, 1, true, List.of(), false, null), new SettingDefinition("fast_crystals", "Fast Crystals", Material.END_CRYSTAL, 9, 1, true, List.of("Reduces crystal fight effects"), false, null), new SettingDefinition("totem_particles", "Totem Particles", Material.TOTEM_OF_UNDYING, 10, 1, true, List.of(), false, null), new SettingDefinition("explosion_particles", "Explosion Particles", Material.TNT, 11, 1, true, List.of(), false, null), new SettingDefinition("explosion_sounds", "Explosion Sounds", Material.GOAT_HORN, 12, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_buy", "Quick Auction Buy", Material.GOLD_INGOT, 13, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_sell", "Quick Auction Sell", Material.EMERALD, 8, 1, false, List.of("List instantly with no confirm screen"), false, null), new SettingDefinition("chainmail_on_respawn", "Chainmail on Respawn", Material.CHAINMAIL_HELMET, 14, 1, true, List.of(), false, null), new SettingDefinition("disable_mob_spawns", "Disable Mob Spawns", Material.ZOMBIE_HEAD, 15, 1, false, List.of(), false, null), new SettingDefinition("fast_anchor", "Fast Anchor", Material.RESPAWN_ANCHOR, 16, 1, true, List.of("Reduces anchor fight effects"), false, null), new SettingDefinition("player_visibility", "Player Visibility", Material.PLAYER_HEAD, 18, 1, true, List.of(), false, null), new SettingDefinition("scoreboard_toggle", "Scoreboard Toggle", Material.LECTERN, 19, 1, true, List.of(), false, null), new SettingDefinition("tpa_confirm_menus", "TPA Confirm Menus", Material.FEATHER, 20, 1, true, List.of(), false, null), new SettingDefinition("music_sound_notifications", "Music/Sound Notifications", Material.MUSIC_DISC_MELLOHI, 21, 1, true, List.of(), false, null), new SettingDefinition("order_notifications", "Order Notifications", Material.PAPER, 22, 1, true, List.of(), false, null), new SettingDefinition("tpa_auto_accept", "Auto Accept TPAs", Material.SLIME_BALL, 23, 1, false, List.of("Instantly accept incoming", "TPA requests (/tpauto)"), false, null), new SettingDefinition("tpa_requests", "TPA Requests", Material.ENDER_PEARL, 28, 1, true, List.of(), false, null), new SettingDefinition("tpahere_requests", "TPAHere Requests", Material.ENDER_EYE, 29, 1, true, List.of(), false, null), new SettingDefinition("team_invites", "Team Invites", Material.SHIELD, 30, 1, true, List.of(), false, null), new SettingDefinition("payments", "Payments", Material.EMERALD, 31, 1, true, List.of(), false, null), new SettingDefinition("team_chat", "Team Chat", Material.BELL, 32, 1, false, List.of(), false, null), new SettingDefinition("worth_display", "Worth Display", Material.BOOK, 33, 1, true, List.of(), false, null), new SettingDefinition("night_vision", "Night Vision", Material.GOLDEN_CARROT, 17, 1, false, List.of(), false, null), new SettingDefinition("show_money", "Show Money", Material.SUNFLOWER, 24, 1, true, List.of(), false, null), new SettingDefinition("show_shards", "Show Shards", Material.AMETHYST_SHARD, 25, 1, true, List.of(), false, null), new SettingDefinition("show_kills", "Show Kills", Material.NETHERITE_SWORD, 26, 1, true, List.of(), false, null), new SettingDefinition("show_deaths", "Show Deaths", Material.SKELETON_SKULL, 27, 1, true, List.of(), false, null), new SettingDefinition("show_playtime", "Show Playtime", Material.CLOCK, 34, 1, true, List.of(), false, null), new SettingDefinition("auction_overflow", "Auction Overflow", Material.HOPPER, 7, 1, false, List.of("Drop bought items when your", "inventory is full instead of blocking"), false, null), new SettingDefinition("search_spell_check", "Search Spell Check", Material.NAME_TAG, 35, 1, true, List.of("Auto-correct typos in", "AH and orders search"), false, null));
+    private static final List<SettingDefinition> SETTINGS_DEFINITIONS = List.of(new SettingDefinition("public_chat", "Public Chat", Material.OAK_SIGN, 0, 1, true, List.of(), false, null), new SettingDefinition("private_messages", "Private Messages", Material.SPRUCE_SIGN, 1, 1, true, List.of(), false, null), new SettingDefinition("chat_server_messages", "Chat Server Messages", Material.BIRCH_SIGN, 2, 1, true, List.of(), false, null), new SettingDefinition("hotbar_server_messages", "Hotbar Server Messages", Material.JUNGLE_SIGN, 3, 1, true, List.of(), false, null), new SettingDefinition("pay_players", "Pay Players", Material.ACACIA_SIGN, 4, 1, true, List.of(), false, null), new SettingDefinition("bounty_alerts", "Bounty Alerts", Material.DARK_OAK_SIGN, 5, 1, true, List.of(), false, null), new SettingDefinition("auction_alerts", "Auction Alerts", Material.MANGROVE_SIGN, 6, 1, true, List.of(), false, null), new SettingDefinition("fast_crystals", "Fast Crystals", Material.END_CRYSTAL, 9, 1, true, List.of("Reduces crystal fight effects"), false, null), new SettingDefinition("totem_particles", "Totem Particles", Material.TOTEM_OF_UNDYING, 10, 1, true, List.of(), false, null), new SettingDefinition("explosion_particles", "Explosion Particles", Material.TNT, 11, 1, true, List.of(), false, null), new SettingDefinition("explosion_sounds", "Explosion Sounds", Material.GOAT_HORN, 12, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_buy", "Quick Auction Buy", Material.GOLD_INGOT, 13, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_sell", "Quick Auction Sell", Material.EMERALD, 8, 1, false, List.of("List instantly with no confirm screen"), false, null), new SettingDefinition("chainmail_on_respawn", "Chainmail on Respawn", Material.CHAINMAIL_HELMET, 14, 1, true, List.of(), false, null), new SettingDefinition("disable_mob_spawns", "Disable Mob Spawns", Material.ZOMBIE_HEAD, 15, 1, false, List.of(), false, null), new SettingDefinition("fast_anchor", "Fast Anchor", Material.RESPAWN_ANCHOR, 16, 1, true, List.of("Reduces anchor fight effects"), false, null), new SettingDefinition("player_visibility", "Player Visibility", Material.PLAYER_HEAD, 18, 1, true, List.of(), false, null), new SettingDefinition("scoreboard_toggle", "Scoreboard Toggle", Material.LECTERN, 19, 1, true, List.of(), false, null), new SettingDefinition("tpa_confirm_menus", "TPA Confirm Menus", Material.FEATHER, 20, 1, true, List.of(), false, null), new SettingDefinition("music_sound_notifications", "Music/Sound Notifications", Material.MUSIC_DISC_MELLOHI, 21, 1, true, List.of(), false, null), new SettingDefinition("order_notifications", "Order Notifications", Material.PAPER, 22, 1, true, List.of(), false, null), new SettingDefinition("tpa_auto_accept", "Auto Accept TPAs", Material.SLIME_BALL, 23, 1, false, List.of("Instantly accept incoming", "TPA requests (/tpauto)"), false, null), new SettingDefinition("tpa_requests", "TPA Requests", Material.ENDER_PEARL, 28, 1, true, List.of(), false, null), new SettingDefinition("tpahere_requests", "TPAHere Requests", Material.ENDER_EYE, 29, 1, true, List.of(), false, null), new SettingDefinition("team_invites", "Team Invites", Material.SHIELD, 30, 1, true, List.of(), false, null), new SettingDefinition("payments", "Payments", Material.EMERALD, 31, 1, true, List.of(), false, null), new SettingDefinition("team_chat", "Team Chat", Material.BELL, 32, 1, false, List.of(), false, null), new SettingDefinition("worth_display", "Worth Display", Material.BOOK, 33, 1, true, List.of(), false, null), new SettingDefinition("night_vision", "Night Vision", Material.GOLDEN_CARROT, 17, 1, false, List.of(), false, null), new SettingDefinition("show_money", "Show Money", Material.SUNFLOWER, 24, 1, true, List.of(), false, null), new SettingDefinition("show_shards", "Show Shards", Material.AMETHYST_SHARD, 25, 1, true, List.of(), false, null), new SettingDefinition("show_kills", "Show Kills", Material.NETHERITE_SWORD, 26, 1, true, List.of(), false, null), new SettingDefinition("show_deaths", "Show Deaths", Material.SKELETON_SKULL, 27, 1, true, List.of(), false, null), new SettingDefinition("show_playtime", "Show Playtime", Material.CLOCK, 34, 1, true, List.of(), false, null), new SettingDefinition("auction_overflow", "Auction Overflow", Material.HOPPER, 7, 1, false, List.of("Drop bought items when your", "inventory is full instead of blocking"), false, null), new SettingDefinition("search_spell_check", "Search Spell Check", Material.NAME_TAG, 35, 1, true, List.of("Auto-correct typos in", "AH and orders search"), false, null), new SettingDefinition("money_nametags", "Money Nametags", Material.GOLD_NUGGET, 36, 1, true, List.of("Show each player's balance", "on a line below their name"), false, null));
     private static final List<ShopEntry> END_CATEGORY_ITEMS = List.of(
         new ShopEntry("ender_chest",        "Ender Chest",        Material.ENDER_CHEST,        2500.0,  1, List.of()),
         new ShopEntry("ender_pearl",         "Ender Pearl",        Material.ENDER_PEARL,        75.0,    1, List.of()),
@@ -444,7 +651,7 @@ TabCompleter {
         this.amethystKindKey = new NamespacedKey((Plugin)this, "amethyst_kind");
         this.amethystExpireKey = new NamespacedKey((Plugin)this, "amethyst_expire_at");
         this.settings = this.getConfig();
-        this.loadBranding();       // resolve active brand profile before any UI renders
+        this.loadBranding();       // resolve active brand profile (PizzaSMP/HorizonSMP) before any UI renders
         this.ensureDataSource();   // warm the DB connection pool before any query runs
         this.loadShopConfig();
         this.loadSellConfig();
@@ -455,30 +662,21 @@ TabCompleter {
         }
         this.routerDebug = this.settings.getBoolean("router.debug_log", false);
         this.combatDebug = this.settings.getBoolean("combat.debug_log", false);
+        this.rtpDebug = this.settings.getBoolean("rtp.debug_log", true);
         this.chatBridgeDebug = this.settings.getBoolean("chat_debug.log_bridge_payloads", false);
         this.getLogger().info("[hud] icon mode=" + (this.isAsciiHudIconsEnabled() ? "ascii-fallback" : "glyph-preferred") + " shards=" + this.hudGlyph("\u25c6", "[S]") + " kills=" + this.hudGlyph("\u2020", "[K]") + " deaths=" + this.hudGlyph("\u2620", "[D]") + " playtime=" + this.hudGlyph("\u231b", "[T]"));
         this.setupEconomy();
         this.setupChat();
         this.runAsyncTask(this::ensureUiSchema);
-        // Cross-server sync and limbo maintenance (Alpha). Off by default: a single standalone
-        // server does not need the network transfer layer, and the economy runs from the database
-        // configured above without it. Set sync.enabled true to run a multi-backend network.
-        boolean syncEnabled = this.settings.getBoolean("sync.enabled", false);
-        if (syncEnabled) {
-            this.playerSyncManager = new PlayerSyncManager(this);
-            this.playerSyncManager.start();
-            if (!this.isFoliaRuntime()) {
-                this.maintenanceQueueManager = new MaintenanceQueueManager(this, this.detectServerName());
-                this.maintenanceQueueManager.start();
-            } else {
-                this.maintenanceQueueManager = null;
-            }
+        this.playerSyncManager = new PlayerSyncManager(this);
+        this.playerSyncManager.start();
+        this.startDbHealthCheck();
+        if (!this.isFoliaRuntime()) {
+            this.maintenanceQueueManager = new MaintenanceQueueManager(this, this.detectServerName());
+            this.maintenanceQueueManager.start();
         } else {
-            this.playerSyncManager = null;
             this.maintenanceQueueManager = null;
         }
-        this.startDbHealthCheck();
-        Bukkit.getScheduler().runTaskTimerAsynchronously((Plugin)this, this::flushPendingLongStats, 600L, 600L);
         Bukkit.getPluginManager().registerEvents((Listener)this, (Plugin)this);
         this.registerCommand("guide", this);
         this.registerCommand("settings", this);
@@ -514,12 +712,14 @@ TabCompleter {
         this.registerCommand("queuetest", this);
         this.registerCommand("vdthrottle", this);
         this.registerCommand("nv", this);   // /nv + /nightvision: same state as the /settings Night Vision toggle
+        this.registerCommand("region", this);   // per-world maintenance (close/evacuate/reopen a dimension)
         this.registerCommand("tpauto", this);   // auto-accept incoming TPA requests (same state as /settings)
         this.registerCommand("kill", this);
         this.registerCommand("worth", this);
         this.registerCommand("sellmulti", this);
         this.registerCommand("sethome", this);
         this.registerCommand("delhome", this);
+        this.registerCommand("ecobot", this);
         this.registerCommand("admin", this);
         this.registerCommand("manage", this);   // backend management tier (perm pizzasmp.manage)
         this.registerCommand("maintenancemotd", this);
@@ -528,9 +728,13 @@ TabCompleter {
         this.loadWorldAccess();
         this.getServer().getMessenger().registerOutgoingPluginChannel((Plugin)this, "BungeeCord");
         this.getServer().getMessenger().registerOutgoingPluginChannel((Plugin)this, BRIDGE_CHANNEL);
+        // Incoming half: the proxy relays cross-server RTP over the same channel.
+        this.getServer().getMessenger().registerIncomingPluginChannel((Plugin)this, BRIDGE_CHANNEL, this);
         this.refreshNetworkPlayerNameCacheAsync();
         this.notificationPollTask = this.runAsyncRepeatingTask(this::pollPendingPlayerNotifications, 20L, 20L);
         this.startPlaytimeAndAfkTask();
+        // EcoBot keeps the auction house stocked. It is not gated behind anything.
+        Bukkit.getScheduler().runTaskLaterAsynchronously((Plugin)this, this::initAutoEco, 100L);
         // One-shot (marker-file guarded): convert every team home into a personal named home
         // for ALL team members, then clear team homes. Part of the teams -> friends transition.
         this.runAsyncTask(this::migrateTeamHomesToPersonal);
@@ -538,12 +742,18 @@ TabCompleter {
         Bukkit.getScheduler().runTaskTimer((Plugin)this, this::runAmethystExpirySweep, 1200L, 1200L);
         // TPS-reactive view distance throttle: check every 30s (600 ticks)
         Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickVdThrottle, 600L, 600L);
+        // RTP duel queue: refresh hotbars, time out waits, and match gear-close pairs every second.
         Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickRtpDuelQueue, 40L, 20L);
         // Queue admit timer: admit 1 queued player every N ticks (default 60 = 3s)
         Bukkit.getScheduler().runTaskTimer((Plugin)this, () -> { if (this.isQueueEnabled() && !this.joinQueue.isEmpty()) this.admitNextPlayer(); }, 100L, 60L);
         // Adaptive autosave: every 3 min while players are online, every 10 min when empty
         // (bukkit.yml autosave is the 10-min incremental safety net; this adds the fast path).
         Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickAdaptiveAutosave, 1200L, 600L);
+        // Money nametags: refresh every 10s rather than hooking every economy write site,
+        // which would mean touching auction/orders/shop/sell independently.
+        Bukkit.getScheduler().runTaskTimer((Plugin)this, () -> {
+            for (Player online : Bukkit.getOnlinePlayers()) this.refreshMoneyNametagsFor(online);
+        }, 200L, 200L);
         Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickVoidRescue, 20L, 20L);   // overworld void = silent RTP to safety
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             try { new PizzaPlaceholders(this).register(); this.getLogger().info("Registered PlaceholderAPI expansion 'pizzasmp' (balance)."); }
@@ -556,7 +766,6 @@ TabCompleter {
     }
 
     public void onDisable() {
-        this.flushPendingLongStats();
         this.shuttingDown = true;
         // Limbo sync safety net: on ANY shutdown (plain stop, crash-stop, /admin restart — not just the
         // /limbomaint flow), snapshot every online player's location + inventory + ender chest so the
@@ -612,6 +821,10 @@ TabCompleter {
             if (taskHandle == null) continue;
             taskHandle.cancel();
         }
+        for (TaskHandle ecoTask : this.autoEcoTasks) {
+            if (ecoTask != null) ecoTask.cancel();
+        }
+        this.autoEcoTasks.clear();
         if (this.notificationPollTask != null) {
             this.notificationPollTask.cancel();
             this.notificationPollTask = null;
@@ -623,9 +836,24 @@ TabCompleter {
 
     private void setupEconomy() {
         try {
+            // Register OUR economy first, at Highest, so it outranks EssentialsX.
+            //
+            // Essentials keeps balances in per-server YAML (plugins/Essentials/userdata),
+            // so while it owned the Vault hook a player's money differed on every backend
+            // and never reconciled. PizzaEconomy is backed by the shared `balances` table,
+            // which every backend points at, so money becomes genuinely network-wide.
+            //
+            // Set economy.provide-vault=false to hand the hook back to Essentials (single
+            // -server deployments that would rather keep flat-file balances).
+            if (this.settings.getBoolean("economy.provide-vault", true)) {
+                Bukkit.getServicesManager().register(Economy.class, new PizzaEconomy(this),
+                    this, org.bukkit.plugin.ServicePriority.Highest);
+                this.getLogger().info("Registered PizzaNetworkCore as the Vault economy provider (DB-backed, network-wide).");
+            }
             RegisteredServiceProvider rsp = Bukkit.getServicesManager().getRegistration(Economy.class);
             if (rsp != null) {
                 this.economy = (Economy)rsp.getProvider();
+                this.getLogger().info("Vault economy provider in use: " + this.economy.getName());
             }
         }
         catch (NoClassDefFoundError ignored) {
@@ -854,6 +1082,8 @@ TabCompleter {
         }
     }
 
+    // Vanilla pearls: capture the player's still-airborne pearls, remove them (so nothing persists
+    // while they are offline), and re-spawn them on their next login.
     private void capturePearlsOnQuit(Player player) {
         UUID pid = player.getUniqueId();
         List<StoredPearl> stored = new java.util.ArrayList<StoredPearl>();
@@ -866,7 +1096,9 @@ TabCompleter {
                 }
             }
         }
-        if (!stored.isEmpty()) this.loggedOutPearls.put(pid, stored);
+        if (!stored.isEmpty()) {
+            this.loggedOutPearls.put(pid, stored);
+        }
     }
 
     private void restorePearlsOnJoin(Player player) {
@@ -899,7 +1131,6 @@ TabCompleter {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
-        this.runAsyncTask(() -> this.flushPendingLongStatsFor(e.getPlayer().getUniqueId()));
         long elapsed;
         e.quitMessage(null);
         UUID uuid = e.getPlayer().getUniqueId();
@@ -916,7 +1147,7 @@ TabCompleter {
         }
         this.cancelPendingTeleport(e.getPlayer(), false);
         this.cancelPendingRtp(uuid);
-        this.cancelRtpQueue(uuid, null);   // disconnect cancels the duel search
+        this.cancelRtpQueue(uuid, null);   // disconnect cancels the duel search (frees any near-match)
         this.capturePearlsOnQuit(e.getPlayer());
         this.mutualFriendsCache.remove(uuid);   // locator-bar friends-only cache
         this.rtpCooldowns.remove(uuid);
@@ -1017,7 +1248,7 @@ TabCompleter {
     // EnderchestExpander opens a DETACHED 54-slot inventory titled "§7Enderchest" (both via /ec and by
     // right-clicking the block), so the vanilla ender-chest open sound + lid animation never fire.
     // Hook EE's inventory directly (by title) so the FX works for BOTH open paths.
-    private static final String EE_TITLE = "§7Enderchest";
+    private static final String EE_TITLE = "§0Ender Chest";
     @EventHandler(priority=EventPriority.MONITOR)
     public void onEnderChestOpenFx(org.bukkit.event.inventory.InventoryOpenEvent event) {
         if (!(event.getPlayer() instanceof Player p)) return;
@@ -1210,6 +1441,20 @@ TabCompleter {
         }
     }
 
+    @EventHandler(ignoreCancelled = true)
+    public void onDeathDestroyPearls(PlayerDeathEvent e) {
+        Player p = e.getPlayer();
+        if (!this.isSettingEnabledCached(p.getUniqueId(), "pearls_destroy_on_death")) return;
+        UUID pid = p.getUniqueId();
+        for (World w : Bukkit.getWorlds()) {
+            for (org.bukkit.entity.EnderPearl pearl : w.getEntitiesByClass(org.bukkit.entity.EnderPearl.class)) {
+                if (pearl.getShooter() instanceof Player sp && sp.getUniqueId().equals(pid)) {
+                    pearl.remove();
+                }
+            }
+        }
+    }
+
     @EventHandler
     public void onDeathDropDespawn(org.bukkit.event.entity.ItemDespawnEvent e) {
         if (!this.protectedDeathDrops.contains(e.getEntity().getUniqueId())) return;
@@ -1264,7 +1509,7 @@ TabCompleter {
             if (w.getWorldBorder() != null) {
                 centerX = w.getWorldBorder().getCenter().getX();
                 centerZ = w.getWorldBorder().getCenter().getZ();
-                borderRadius = Math.max(256.0, w.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
+                borderRadius = this.rtpMaxRadius(w);
             }
             RtpSearchPlan plan = new RtpSearchPlan(w.getName(), centerX, centerZ, Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius, Math.max(8, this.settings.getInt("rtp.search-attempts", 96)), player.getLocation().getYaw());
             this.searchRtpLocation(player.getUniqueId(), plan, 0);
@@ -1298,7 +1543,7 @@ TabCompleter {
             return;
         }
         this.lastActivityTime.put(player.getUniqueId(), System.currentTimeMillis());
-        this.incrementLongStat(player.getUniqueId(), "blocks_placed", 1L);
+        this.runAsyncTask(() -> this.incrementLongStat(player.getUniqueId(), "blocks_placed", 1L));
     }
 
     @EventHandler(ignoreCancelled=true)
@@ -1308,7 +1553,7 @@ TabCompleter {
             return;
         }
         this.lastActivityTime.put(player.getUniqueId(), System.currentTimeMillis());
-        this.incrementLongStat(player.getUniqueId(), "blocks_broken", 1L);
+        this.runAsyncTask(() -> this.incrementLongStat(player.getUniqueId(), "blocks_broken", 1L));
     }
 
     @EventHandler(ignoreCancelled=true)
@@ -1322,6 +1567,41 @@ TabCompleter {
 
     // /pay handled at LOWEST priority so it ALWAYS runs before Essentials (which otherwise
     // cancels the event and would skip our HIGHEST handler).
+    /**
+     * Route /spawn, /warp spawn, /hub and /lobby to the lobby backend.
+     *
+     * PNC registers none of these commands, so a player typing /spawn was handled by
+     * Essentials and teleported to the LOCAL server's spawn - it never crossed to the
+     * lobby. routeWarpLikeCommand already knew how to do this correctly; nothing was
+     * calling it from a player-typed command. Intercept here and hand it over.
+     */
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onSpawnRoute(PlayerCommandPreprocessEvent e) {
+        String raw = e.getMessage();
+        if (raw == null || raw.length() < 2 || raw.charAt(0) != '/') return;
+        String[] parts = raw.substring(1).trim().split("\\s+");
+        if (parts.length == 0) return;
+        // dispatchTeleportCommand marks the player before re-dispatching; skipping here
+        // lets that dispatch through to Essentials instead of looping back into us.
+        if (this.delayBypassDispatch.contains(e.getPlayer().getUniqueId())) {
+            return;
+        }
+        String label = parts[0].toLowerCase(Locale.ROOT);
+        String target;
+        if (label.equals("spawn") || label.equals("hub") || label.equals("lobby")) {
+            target = "spawn";
+        } else if (label.equals("warp") && parts.length >= 2) {
+            String w = parts[1].toLowerCase(Locale.ROOT);
+            if (!w.equals("spawn") && !w.equals("hub") && !w.equals("lobby")) return;
+            target = "spawn";
+        } else {
+            return;
+        }
+        e.setCancelled(true);
+        Player p = e.getPlayer();
+        this.runOnPlayerThread(p, () -> this.routeWarpLikeCommand(p, target));
+    }
+
     @EventHandler(priority=EventPriority.LOWEST, ignoreCancelled=false)
     public void onPayFirst(PlayerCommandPreprocessEvent e) {
         Player player = e.getPlayer();
@@ -1603,8 +1883,38 @@ TabCompleter {
             return;
         }
         if (!this.settings.getBoolean("chat.global_chat_enabled", true)) {
+            // Global relay off: leave the event alone so vanilla delivers it to this backend only.
             return;
         }
+        // Global relay on: cancel local delivery and hand the message to the proxy, which fans it
+        // back out to every player on the network (cancelling prevents double delivery).
+        e.setCancelled(true);
+        String prefix = "";
+        if (this.chatProvider != null) {
+            String raw = this.chatProvider.getPlayerPrefix(p);
+            prefix = raw == null ? "" : this.normalizeLegacyColors(raw);
+        }
+        String globalPrefix = prefix;
+        String globalMessage = this.plainMessage(e.message());
+        String globalServer = this.detectServerName();
+        this.runAsyncTask(() -> this.logChatMessage(p.getUniqueId(), p.getName(), globalServer, "global", globalMessage));
+        this.sendBridgeChat(p, globalPrefix, globalMessage);
+        // Proxy-less backends set chat.bridge_local_echo=true so the sender's server still shows it.
+        if (this.settings.getBoolean("chat.bridge_local_echo", false)) {
+            this.deliverChatLocally(p, globalPrefix, globalMessage);
+        }
+    }
+
+    // Renders a global chat line to this backend's players only (fallback when no proxy relay is
+    // listening; gated by chat.bridge_local_echo). Respects each viewer's public_chat setting.
+    private void deliverChatLocally(Player sender, String prefix, String msg) {
+        Component formatted = this.legacyColorize((prefix == null ? "" : prefix) + "§f" + sender.getName() + " §8» §f" + msg);
+        for (Player viewer : this.getServer().getOnlinePlayers()) {
+            if (this.isSettingEnabledCached(viewer.getUniqueId(), "public_chat")) {
+                viewer.sendMessage(formatted);
+            }
+        }
+        this.getServer().getConsoleSender().sendMessage(formatted);
     }
 
     @EventHandler
@@ -1901,6 +2211,9 @@ TabCompleter {
             // Allow staff to take items from offline player snapshots
             return;
         }
+        // Click feedback sound — ONLY for our own virtual GUIs (created with a null holder). Real
+        // containers (chest/hopper/shulker/barrel) have a block/entity holder, so moving items in
+        // them stays silent.
         if (e.getClickedInventory() != null && e.getRawSlot() >= 0 && e.getRawSlot() < e.getView().getTopInventory().getSize()
                 && e.getView().getTopInventory().getHolder() == null
                 && e.getCurrentItem() != null && e.getCurrentItem().getType() != Material.AIR && e.getWhoClicked() instanceof Player) {
@@ -2377,7 +2690,7 @@ TabCompleter {
         if (world.getWorldBorder() != null) {
             centerX = world.getWorldBorder().getCenter().getX();
             centerZ = world.getWorldBorder().getCenter().getZ();
-            borderRadius = Math.max(256.0, world.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
+            borderRadius = this.rtpMaxRadius(world);
         }
         RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ,
             Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius,
@@ -2782,8 +3095,8 @@ TabCompleter {
     private static final java.util.Set<String> CMD_SUGGEST_STAFF_PREFIXES = java.util.Set.of(
         "admin", "punish", "offend", "unoffend", "sus", "suspicious", "moderation", "freeze", "unfreeze",
         "stash", "spawnstash", "pizzaplus", "maintenance", "maintenancemotd", "limbomaint", "limbo",
-        "branding", "vdthrottle", "sfmode", "staffmode", "gmcbypass", "atrack", "servermaint",
-        "invsee", "vanish", "sudo", "eco", "lp", "luckperms", "gtp", "admindelhome", "queuetest");
+        "region", "branding", "vdthrottle", "sfmode", "staffmode", "gmcbypass", "atrack", "servermaint",
+        "invsee", "vanish", "sudo", "eco", "lp", "luckperms", "gtp", "admindelhome", "ecobot", "queuetest");
 
     private boolean knownCommand(String label) {
         return Bukkit.getCommandMap().getKnownCommands().containsKey(label.toLowerCase(Locale.ROOT));
@@ -3083,7 +3396,7 @@ TabCompleter {
             this.handlePizzaSusFlagCommand(sender, args);
             return true;
         }
-        // Console-capable (and admin players): switch the active brand profile.
+        // Console-capable (and admin players): switch the active brand profile (PizzaSMP <-> HorizonSMP).
         if ("branding".equals(cmdNameLower)) {
             if (sender instanceof Player pp && !pp.hasPermission(PERM_ADMIN_CONSOLE)) {
                 pp.sendMessage("§cThis command does not exist.");
@@ -3173,6 +3486,10 @@ TabCompleter {
             case "nv":
             case "nightvision": {
                 this.handleNvCommand(p, args);
+                break;
+            }
+            case "region": {
+                this.handleRegionCommand(p, args);
                 break;
             }
             case "tpauto": {
@@ -3274,6 +3591,14 @@ TabCompleter {
                 }
                 vs.page = 1;
                 this.openOrdersMenu(p);
+                break;
+            }
+            case "ecobot": {
+                if (!p.hasPermission("pizzasmp.admin.eco")) {
+                    p.sendMessage("\u00a7cNo permission.");
+                    return true;
+                }
+                this.handleEcobotCommand(p, args);
                 break;
             }
             case "afk": {
@@ -4405,7 +4730,7 @@ TabCompleter {
     // enchant_spec grammar: "*" = any, "" = unenchanted only, "sharpness:5,fire_aspect:2" = item must
     // hold at least those enchants at >= those levels. Enchant keys use the vanilla registry name.
 
-    /** The canonical enchant spec that describes an item exactly (for enchant-specific orders). */
+    /** The canonical enchant spec that describes an item exactly (for EcoBot-posted specific orders). */
     private String itemEnchantSpecOf(ItemStack item) {
         if (item == null) return "*";
         java.util.Map<org.bukkit.enchantments.Enchantment, Integer> ench = item.getEnchantments();
@@ -5123,27 +5448,30 @@ TabCompleter {
         });
     }
 
-    // Legacy team-home persistence. Teams are retired (see TEAMS_DISABLED); this remains for data
-    // compatibility with old rows but is not reachable in normal play. Reconstructed after the
-    // original source for this method was lost, matching the schema used by loadTeamHome/clearTeamHome.
+    /*
+     * Exception decompiling
+     */
     private boolean setTeamHome(UUID uuid, Location location) {
-        String sql = "UPDATE teams t JOIN team_members tm ON tm.team_id = t.id "
-            + "SET t.home_world=?, t.home_x=?, t.home_y=?, t.home_z=?, t.home_yaw=?, t.home_pitch=? "
-            + "WHERE tm.member_uuid=?";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, location.getWorld().getName());
-            ps.setDouble(2, location.getX());
-            ps.setDouble(3, location.getY());
-            ps.setDouble(4, location.getZ());
-            ps.setFloat(5, location.getYaw());
-            ps.setFloat(6, location.getPitch());
-            ps.setString(7, uuid.toString());
-            return ps.executeUpdate() > 0;
-        } catch (SQLException ex) {
-            this.getLogger().warning("[teamhome] setTeamHome failed: " + ex.getMessage());
-            return false;
-        }
+        /*
+         * This method has failed to decompile.  When submitting a bug report, please provide this stack trace, and (if you hold appropriate legal rights) the relevant class file.
+         * 
+         * org.benf.cfr.reader.util.ConfusedCFRException: Tried to end blocks [14[TRYBLOCK]], but top level block is 36[DOLOOP]
+         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement.processEndingBlocks(Op04StructuredStatement.java:435)
+         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement.buildNestedBlocks(Op04StructuredStatement.java:484)
+         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op03SimpleStatement.createInitialStructuredBlock(Op03SimpleStatement.java:736)
+         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysisInner(CodeAnalyser.java:850)
+         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysisOrWrapFail(CodeAnalyser.java:278)
+         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysis(CodeAnalyser.java:201)
+         *     at org.benf.cfr.reader.entities.attributes.AttributeCode.analyse(AttributeCode.java:94)
+         *     at org.benf.cfr.reader.entities.Method.analyse(Method.java:531)
+         *     at org.benf.cfr.reader.entities.ClassFile.analyseMid(ClassFile.java:1055)
+         *     at org.benf.cfr.reader.entities.ClassFile.analyseTop(ClassFile.java:942)
+         *     at org.benf.cfr.reader.Driver.doJarVersionTypes(Driver.java:257)
+         *     at org.benf.cfr.reader.Driver.doJar(Driver.java:139)
+         *     at org.benf.cfr.reader.CfrDriverImpl.analyse(CfrDriverImpl.java:76)
+         *     at org.benf.cfr.reader.Main.main(Main.java:54)
+         */
+        throw new IllegalStateException("Decompilation failed");
     }
 
     private void clearTeamHome(UUID uuid) {
@@ -5258,7 +5586,15 @@ TabCompleter {
         });
     }
 
+    /** One structured line per RTP hop. See the rtpDebug field for why this exists. */
+    void rtpLog(String stage, String detail) {
+        if (this.rtpDebug) {
+            this.getLogger().info("[rtp] server=" + this.detectServerName() + " stage=" + stage + " " + detail);
+        }
+    }
+
     private void handleRtpCommand(Player player, String[] args) {
+        this.rtpLog("command", "player=" + player.getName() + " args=" + Arrays.toString(args));
         if (!this.canUseRtp(player)) {
             player.sendMessage("\u00a7cYou do not have permission to use /rtp.");
             return;
@@ -5320,9 +5656,10 @@ TabCompleter {
             return;
         }
         UUID uuid = player.getUniqueId();
-        // Using /rtp while queued for a duel cancels the duel search; re-running RTP before the
-        // teleport lands just starts another search (no "already in progress" denial).
+        // Using /rtp while queued for a duel cancels the duel search (frees any near-match opponent).
         this.cancelRtpQueue(uuid, null);
+        // Re-running RTP before the teleport lands is allowed: it just starts another search and
+        // teleports again. No "already in progress" denial.
         if (!bypassChecks && !this.canUseRtpNow(player)) {
             long remaining = this.getRtpCooldownRemainingMillis(player);
             long remainingSeconds = Math.max(1L, (long)Math.ceil((double)remaining / 1000.0));
@@ -5334,12 +5671,41 @@ TabCompleter {
             return;
         }
         // SEARCH FIRST: find a safe spot, THEN start the countdown.
+        this.rtpLog("warmup_ok", "player=" + player.getName() + " dim=" + dimension + " bypass=" + bypassChecks);
         this.beginRtpSearch(player, dimension, bypassChecks);
     }
 
     // Locate a safe destination (async chunk loading), then start the visible countdown.
     private void beginRtpSearch(Player player, String dimension, boolean bypassChecks) {
         UUID uuid = player.getUniqueId();
+        // RTP always lands in the survival world. On a multi-backend network, running it from the
+        // lobby/maintenance used to scatter players around that backend's hub world; send them to
+        // survival and re-run the command on arrival. On a single survival server this is a no-op.
+        if (!this.isServer("survival")) {
+            if (this.playerSyncManager == null) {
+                this.rtpLog("cross_abort", "player=" + player.getName() + " reason=sync_disabled");
+                player.sendActionBar(Component.text("§cRTP is unavailable right now."));
+                return;
+            }
+            {
+                String dim = (dimension == null || dimension.isBlank()) ? "overworld" : dimension;
+                this.rtpLog("cross_request", "player=" + player.getName() + " dim=" + dim + " target=survival");
+                // Ask survival for a destination BEFORE moving the player. Transferring
+                // first and searching on arrival is what made cross-server /rtp look
+                // like it merely moved you to survival. The proxy relays this; if it
+                // cannot (nobody on survival, so no channel), it answers RTPFALLBACK and
+                // we use the old transfer-then-search path.
+                this.pendingCrossRtp.put(uuid, dim);
+                this.sendBridgePayload(player, out -> {
+                    out.writeUTF("RTPREQ");
+                    out.writeUTF(uuid.toString());
+                    out.writeUTF(dim);
+                    out.writeUTF(this.detectServerName());
+                    out.writeUTF("survival");
+                });
+            }
+            return;
+        }
         String worldName = switch (dimension) {
             case "nether" -> "world_nether";
             case "end" -> "world_the_end";
@@ -5359,17 +5725,18 @@ TabCompleter {
             player.sendActionBar(this.worldLockComponent());
             return;
         }
-        double borderRadius = 5000.0;
         double centerX = 0.0, centerZ = 0.0;
         if (world.getWorldBorder() != null) {
             centerX = world.getWorldBorder().getCenter().getX();
             centerZ = world.getWorldBorder().getCenter().getZ();
-            borderRadius = Math.max(256.0, world.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
         }
+        double borderRadius = this.rtpMaxRadius(world);
         this.activeRtpSearches.add(uuid);
         RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ,
-            Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius,
+            Math.min(Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius - 1.0), borderRadius,
             Math.max(16, this.settings.getInt("rtp.search-attempts", 120)), player.getLocation().getYaw());
+        this.rtpLog("search_start", "player=" + player.getName() + " world=" + world.getName()
+            + " radius=" + (long) plan.minRadius + ".." + (long) plan.maxRadius + " attempts=" + plan.maxAttempts);
         this.rtpAttemptAsync(uuid, plan, dimension, bypassChecks, 0);
     }
 
@@ -5379,6 +5746,7 @@ TabCompleter {
         if (player == null || !player.isOnline()) { this.activeRtpSearches.remove(uuid); return; }
         if (attempt >= plan.maxAttempts) {
             this.activeRtpSearches.remove(uuid);
+            this.rtpLog("search_exhausted", "player=" + player.getName() + " attempts=" + attempt);
             player.sendActionBar(Component.text("\u00a7cCouldn't find a safe spot \u2014 try again."));
             this.rtpCooldowns.remove(uuid);
             return;
@@ -5398,6 +5766,8 @@ TabCompleter {
                 return;
             }
             // Found! Start the countdown to this exact location.
+            this.rtpLog("search_hit", "player=" + player.getName() + " attempt=" + attempt
+                + " at=" + target.getBlockX() + "," + target.getBlockY() + "," + target.getBlockZ());
             this.activeRtpSearches.remove(uuid);
             PendingRtpTeleport pending = new PendingRtpTeleport(dimension, bypassChecks);
             pending.destination = target;
@@ -5406,19 +5776,8 @@ TabCompleter {
         }));
     }
 
-    @EventHandler(ignoreCancelled = true)
-    public void onDeathDestroyPearls(PlayerDeathEvent e) {
-        Player p = e.getPlayer();
-        if (!this.isSettingEnabledCached(p.getUniqueId(), "pearls_destroy_on_death")) return;
-        UUID pid = p.getUniqueId();
-        for (World w : Bukkit.getWorlds()) {
-            for (org.bukkit.entity.EnderPearl pearl : w.getEntitiesByClass(org.bukkit.entity.EnderPearl.class)) {
-                if (pearl.getShooter() instanceof Player sp && sp.getUniqueId().equals(pid)) pearl.remove();
-            }
-        }
-    }
-
     // ===== RTP Queue (duels / matchmaking) =====
+
     private void handleRtpQueueCommand(Player player, String[] args) {
         UUID uuid = player.getUniqueId();
         // No manual cancel: a queued player stays in until matched, timed out, or death/disconnect/combat.
@@ -5434,7 +5793,11 @@ TabCompleter {
             player.sendActionBar(Component.text("§cSurvival is under maintenance. Try again later."));
             return;
         }
-        if (!this.useDialogUi(player)) { this.enqueueRtpDuel(player); return; }
+        if (!this.useDialogUi(player)) {
+            this.enqueueRtpDuel(player);
+            return;
+        }
+        // Layout: prompt at the top; No on the left (closes), Yes on the right (searches).
         ActionButton no = this.dialogButton(Component.text("No", NamedTextColor.RED), null, 120, q -> q.closeDialog());
         ActionButton yes = this.dialogButton(Component.text("Yes", NamedTextColor.GREEN), null, 120,
             pl -> this.runOnPlayerThread(pl, () -> this.enqueueRtpDuel(pl)));
@@ -5454,6 +5817,7 @@ TabCompleter {
         player.sendActionBar(this.legacyColorize("&#00BFFFSearching for opponent…"));
     }
 
+    // Remove a player from the duel queue: stop the disc + clear the hotbar; optional message.
     private void cancelRtpQueue(UUID uuid, String messageOrNull) {
         RtpQueueEntry entry = this.rtpDuelQueue.remove(uuid);
         if (entry == null) return;
@@ -5464,10 +5828,12 @@ TabCompleter {
         }
     }
 
+    // Runs every second: refresh the searching hotbar, time out long waits, and match gear-close pairs.
     private void tickRtpDuelQueue() {
         if (this.rtpDuelQueue.isEmpty()) return;
         long now = System.currentTimeMillis();
         long timeoutMs = Math.max(15L, this.settings.getLong("rtpq.timeout-seconds", 30L)) * 1000L;
+        // 1) Refresh hotbar + drop offline/timed-out entries.
         List<UUID> ready = new java.util.ArrayList<UUID>();
         for (Map.Entry<UUID, RtpQueueEntry> me : this.rtpDuelQueue.entrySet()) {
             Player p = Bukkit.getPlayer(me.getKey());
@@ -5479,6 +5845,7 @@ TabCompleter {
             p.sendActionBar(this.legacyColorize("&#00BFFFSearching for opponent…"));
             ready.add(me.getKey());
         }
+        // 2) Match adjacent-by-gear pairs whose gap fits the (widening) band.
         ready.sort((a, b) -> Integer.compare(this.rtpDuelQueue.get(a).gearScore, this.rtpDuelQueue.get(b).gearScore));
         for (int i = 0; i + 1 < ready.size(); i += 2) {
             UUID a = ready.get(i), b = ready.get(i + 1);
@@ -5486,19 +5853,25 @@ TabCompleter {
             if (ea == null || eb == null) continue;
             int gap = Math.abs(ea.gearScore - eb.gearScore);
             int band = Math.max(this.duelBand(ea, now), this.duelBand(eb, now));
-            if (gap <= band) this.startRtpDuelMatch(a, b);
+            if (gap <= band) {
+                this.startRtpDuelMatch(a, b);
+            }
         }
     }
 
+    // Matchmaking band widens with wait time so a lonely player eventually matches anyone.
     private int duelBand(RtpQueueEntry e, long now) {
         long secs = Math.max(0L, (now - e.enqueuedAt) / 1000L);
         return 8 + (int)(secs * 4L);
     }
 
+    // Gear score: armor tiers + main-hand weapon tier + total enchant levels. Naked ~ 0.
     private int computeGearScore(Player player) {
         int score = 0;
         org.bukkit.inventory.PlayerInventory inv = player.getInventory();
-        for (ItemStack piece : inv.getArmorContents()) score += this.materialTier(piece) + this.enchantLevels(piece);
+        for (ItemStack piece : inv.getArmorContents()) {
+            score += this.materialTier(piece) + this.enchantLevels(piece);
+        }
         ItemStack hand = inv.getItemInMainHand();
         score += this.materialTier(hand) + this.enchantLevels(hand);
         return score;
@@ -5528,6 +5901,7 @@ TabCompleter {
         Player pa = Bukkit.getPlayer(a);
         Player pb = Bukkit.getPlayer(b);
         if (pa == null || !pa.isOnline() || pb == null || !pb.isOnline()) {
+            // One dropped between selection and match: requeue the survivor so it keeps searching.
             if (pa != null && pa.isOnline() && ea != null) this.rtpDuelQueue.put(a, ea);
             if (pb != null && pb.isOnline() && eb != null) this.rtpDuelQueue.put(b, eb);
             return;
@@ -5539,6 +5913,7 @@ TabCompleter {
         this.beginDuelSearch(a, b);
     }
 
+    // Find ONE fresh, safe overworld spot (same logic as /rtp) and drop both players on it.
     private void beginDuelSearch(UUID a, UUID b) {
         World world = Bukkit.getWorld("world");
         if (world == null && !Bukkit.getWorlds().isEmpty()) world = Bukkit.getWorlds().getFirst();
@@ -5547,7 +5922,7 @@ TabCompleter {
         if (world.getWorldBorder() != null) {
             centerX = world.getWorldBorder().getCenter().getX();
             centerZ = world.getWorldBorder().getCenter().getZ();
-            borderRadius = Math.max(256.0, world.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
+            borderRadius = this.rtpMaxRadius(world);
         }
         Player pa = Bukkit.getPlayer(a);
         float yaw = pa != null ? pa.getLocation().getYaw() : 0.0f;
@@ -5735,6 +6110,65 @@ TabCompleter {
         return "shards".equals(label);
     }
 
+    /** Exact money with thousands separators: 100999123000 -> "100,999,123,000.00". */
+    private String formatExactMoney(double amount) {
+        return String.format("%,.0f", amount);
+    }
+
+    /**
+     * Second nametag line showing the player's balance below their name.
+     *
+     * Implemented with a scoreboard team's suffix rather than an armour stand: it costs
+     * no entities, follows the player automatically, and cannot desync. Gated by the
+     * per-viewer "money_nametags" setting under Settings > Visuals.
+     */
+    private void refreshMoneyNametagsFor(Player viewer) {
+        if (viewer == null || !viewer.isOnline()) return;
+        boolean wants = this.isSettingEnabledCached(viewer.getUniqueId(), "money_nametags");
+        java.util.List<Player> others = new java.util.ArrayList<>(Bukkit.getOnlinePlayers());
+        this.runAsyncTask(() -> {
+            java.util.Map<String, String> lines = new java.util.HashMap<>();
+            if (wants) {
+                for (Player other : others) {
+                    if (other == null || other.equals(viewer)) continue;   // not your own head
+                    lines.put(other.getName(), "\u00a7a$" + this.formatExactMoney(this.getMoneyBalance(other)));
+                }
+            }
+            this.runOnPlayerThread(viewer, () -> {
+                if (!viewer.isOnline()) return;
+                try {
+                    org.bukkit.scoreboard.Scoreboard sb = viewer.getScoreboard();
+                    if (sb == null || sb.equals(Bukkit.getScoreboardManager().getMainScoreboard())) {
+                        sb = Bukkit.getScoreboardManager().getNewScoreboard();
+                        viewer.setScoreboard(sb);
+                    }
+                    for (Player other : others) {
+                        if (other == null || other.equals(viewer)) continue;
+                        String teamName = "pzbal_" + Integer.toHexString(other.getName().hashCode());
+                        if (teamName.length() > 16) teamName = teamName.substring(0, 16);
+                        org.bukkit.scoreboard.Team t = sb.getTeam(teamName);
+                        String line = lines.get(other.getName());
+                        if (line == null) { if (t != null) t.unregister(); continue; }
+                        if (t == null) t = sb.registerNewTeam(teamName);
+                        t.setSuffix("\n" + line);
+                        if (!t.hasEntry(other.getName())) t.addEntry(other.getName());
+                    }
+                } catch (Throwable ignored) { }
+            });
+        });
+    }
+
+    /** Drop the balance line when the viewer turns the setting off. */
+    private void clearMoneyNametag(Player target) {
+        try {
+            org.bukkit.scoreboard.Scoreboard sb = Bukkit.getScoreboardManager().getMainScoreboard();
+            String teamName = "pzbal_" + target.getName();
+            if (teamName.length() > 16) teamName = teamName.substring(0, 16);
+            org.bukkit.scoreboard.Team t = sb.getTeam(teamName);
+            if (t != null) t.unregister();
+        } catch (Throwable ignored) { }
+    }
+
     private void handleBalanceCommand(Player player, String[] args) {
         if (player == null || !player.isOnline()) {
             return;
@@ -5751,7 +6185,7 @@ TabCompleter {
                         player.sendMessage("\u00a7cPlayer not found.");
                         return;
                     }
-                    player.sendMessage("\u00a7a" + result.username() + "'s balance is: \u00a7f$" + this.formatCompactNumber(result.balance()));
+                    player.sendMessage(this.legacyColorize("&f" + result.username() + "'s balance is &a$&a" + this.formatExactMoney(result.balance())));
                 });
                 return;
             }
@@ -5760,7 +6194,10 @@ TabCompleter {
                 if (!player.isOnline()) {
                     return;
                 }
-                player.sendActionBar((Component)Component.text((String)("You have \u00a7a$" + this.formatCompactNumber(bal))));
+                // Chat AND hotbar, both with the exact figure (not the abbreviated form).
+                String exact = this.formatExactMoney(bal);
+                player.sendMessage(this.legacyColorize("&fYou have &a$" + exact));
+                player.sendActionBar(this.legacyColorize("&fYou have &a$" + exact));
             });
         });
     }
@@ -6052,11 +6489,21 @@ TabCompleter {
         this.refreshSidebarSoon(player);
     }
 
+    /**
+     * Credit an offline player.
+     *
+     * This used to park the amount in `pending_vault_credit` and apply it on their next
+     * join, because the economy of record was EssentialsX's per-server YAML and there was
+     * no way to touch an offline player's balance from another backend. It is now the
+     * shared `balances` table, so the money lands immediately and shows the correct figure
+     * network-wide the moment it is sent — no login required. `pending_vault_credit` is
+     * still drained on join to clear rows queued before this change.
+     */
     private void depositMoneyOffline(UUID uuid, double amount) {
         if (uuid == null || amount <= 0.0) {
             return;
         }
-        String sql = "INSERT INTO balances (uuid, pending_vault_credit) VALUES (?, ?) ON DUPLICATE KEY UPDATE pending_vault_credit = pending_vault_credit + VALUES(pending_vault_credit)";
+        String sql = "INSERT INTO balances (uuid, money) VALUES (?, ?) ON DUPLICATE KEY UPDATE money = money + VALUES(money)";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql);){
             ps.setString(1, uuid.toString());
@@ -6326,7 +6773,7 @@ TabCompleter {
         }
     }
 
-    // Teams are disabled (superseded by the friends system). Data is kept;
+    // Teams are disabled (superseded by the friends system, #60). Data is kept;
     // flip TEAMS_DISABLED + rebuild to re-enable.
     private static final boolean TEAMS_DISABLED = true;
 
@@ -6376,7 +6823,7 @@ TabCompleter {
         p.sendMessage("§7/team gui §f- Team member GUI");
     }
 
-    // ============================== Friends system ==============================
+    // ============================== Friends system (#60) ==============================
     // Backend only — the friends GUI comes later. One DB row per relationship:
     // PENDING = open request requester->target, ACCEPTED = mutual friendship.
 
@@ -6883,7 +7330,7 @@ TabCompleter {
         }
     }
 
-    // ===================== Friends dialog frontend =====================
+    // ===================== Friends dialog frontend (#60) =====================
     // Vanilla 1.21.6+ dialog screens via the Paper Dialog API. Bedrock players
     // (Floodgate UUID prefix) keep the text commands.
 
@@ -7900,7 +8347,7 @@ TabCompleter {
         try { this.saveResource("branding.yml", false); } catch (Exception ignored) {}
         File f = new File(this.getDataFolder(), "branding.yml");
         this.brandingConfig = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
-        String active = this.brandingConfig.getString("active", "example");
+        String active = this.brandingConfig.getString("active", "pizzasmp");
         String base = "profiles." + active + ".";
         if (!this.brandingConfig.isConfigurationSection("profiles." + active)) {
             this.getLogger().warning("[brand] profile '" + active + "' not found in branding.yml; using pizzasmp defaults.");
@@ -8136,7 +8583,7 @@ TabCompleter {
     private String jdbcUrl() {
         String host = this.settings.getString("sync.database.host", "127.0.0.1");
         int port = this.settings.getInt("sync.database.port", 3306);
-        String database = this.settings.getString("sync.database.name", "smpcore");
+        String database = this.settings.getString("sync.database.name", "pizzasmp");
         String parameters = this.settings.getString("sync.database.parameters", "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true");
         return "jdbc:mariadb://" + host + ":" + port + "/" + database + "?" + parameters;
     }
@@ -8151,8 +8598,8 @@ TabCompleter {
             hc.setPoolName("PizzaNetworkCore");
             hc.setDriverClassName("org.mariadb.jdbc.Driver");
             hc.setJdbcUrl(this.jdbcUrl());
-            hc.setUsername(this.settings.getString("sync.database.user", "smpcore"));
-            hc.setPassword(this.settings.getString("sync.database.password", "changeme"));
+            hc.setUsername(this.settings.getString("sync.database.user", "pizzasmp"));
+            hc.setPassword(this.settings.getString("sync.database.password", "pizzasmp_change_me"));
             // Small pool: a remote 1-ECPU DB runs only a few queries truly in parallel; HikariCP guidance
             // is that a small pool beats a large one. Stays far under the server's 200-connection ceiling.
             hc.setMaximumPoolSize(this.settings.getInt("sync.database.pool.max-size", 20));
@@ -8190,8 +8637,8 @@ TabCompleter {
             catch (ClassNotFoundException ignored) {}
         }
         return DriverManager.getConnection(this.jdbcUrl(),
-            this.settings.getString("sync.database.user", "smpcore"),
-            this.settings.getString("sync.database.password", "changeme"));
+            this.settings.getString("sync.database.user", "pizzasmp"),
+            this.settings.getString("sync.database.password", "pizzasmp_change_me"));
     }
 
     private boolean isTeleportCommand(String label) {
@@ -8306,7 +8753,7 @@ TabCompleter {
         if (world.getWorldBorder() != null) {
             centerX = world.getWorldBorder().getCenter().getX();
             centerZ = world.getWorldBorder().getCenter().getZ();
-            borderRadius = Math.max(256.0, world.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
+            borderRadius = this.rtpMaxRadius(world);
         }
         RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ, Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius, Math.max(8, this.settings.getInt("rtp.search-attempts", 96)), player.getLocation().getYaw());
         this.searchRtpLocation(player.getUniqueId(), plan, 0);
@@ -8534,6 +8981,175 @@ TabCompleter {
         return this.getCombatRemainingMillis(player) > 0L;
     }
 
+    /** Pending cross-server RTPs, keyed by player, so a reply can find its requester. */
+    private final java.util.Map<UUID, String> pendingCrossRtp = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @Override
+    public void onPluginMessageReceived(String channel, Player carrier, byte[] message) {
+        if (!BRIDGE_CHANNEL.equals(channel)) return;
+        try (java.io.DataInputStream in = new java.io.DataInputStream(new java.io.ByteArrayInputStream(message))) {
+            String action = in.readUTF();
+            this.rtpLog("bridge_in", "action=" + action + " carrier=" + (carrier == null ? "none" : carrier.getName()));
+            switch (action) {
+                case "RTPFIND" -> {
+                    // We own the destination world: find a spot and answer.
+                    String uuid = in.readUTF();
+                    String dim = in.readUTF();
+                    String origin = in.readUTF();
+                    this.serveRtpFind(UUID.fromString(uuid), dim, origin, carrier);
+                }
+                case "RTPGO" -> {
+                    // Destination resolved. Send the player over with it attached, so
+                    // they land directly instead of arriving and then being moved.
+                    String uuid = in.readUTF();
+                    String world = in.readUTF();
+                    double x = in.readDouble(), y = in.readDouble(), z = in.readDouble();
+                    UUID id = UUID.fromString(uuid);
+                    this.pendingCrossRtp.remove(id);
+                    Player p = Bukkit.getPlayer(id);
+                    if (p == null || !p.isOnline()) {
+                        this.rtpLog("go_no_player", "uuid=" + id);
+                        return;
+                    }
+                    this.rtpLog("go", "player=" + p.getName() + " at=" + world + " "
+                        + (long) x + "," + (long) y + "," + (long) z);
+                    if (this.playerSyncManager != null) {
+                        this.playerSyncManager.queueOneTimeAction(id,
+                            "RTPAT:" + world + "," + x + "," + y + "," + z, 60);
+                    }
+                    this.connectToServer(p, "survival");
+                }
+                case "RTPFALLBACK" -> {
+                    // Destination backend had no connection for us to talk over (nobody
+                    // on it). Fall back to the old path: transfer, then search there.
+                    String uuid = in.readUTF();
+                    UUID id = UUID.fromString(uuid);
+                    String dim = this.pendingCrossRtp.remove(id);
+                    Player p = Bukkit.getPlayer(id);
+                    if (p == null || !p.isOnline()) return;
+                    if (this.playerSyncManager != null) {
+                        this.playerSyncManager.queueOneTimeAction(id, "RTP:" + (dim == null ? "overworld" : dim), 60);
+                    }
+                    this.connectToServer(p, "survival");
+                }
+                default -> { }
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("bridge message failed: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Find a safe RTP spot asynchronously and hand it to the callback.
+     *
+     * Chunk loads go through Paper's async chunk API so the main thread never blocks;
+     * the safety test itself runs on the region thread that owns the chunk, which is
+     * also what keeps this correct under Folia.
+     */
+    /**
+     * How far out RTP may land, in blocks from the world-border centre.
+     *
+     * The border is the natural bound, but a world whose border was never set carries
+     * vanilla's default of 59,999,968 — half of that is a ~30,000,000-block radius. RTP
+     * then picks a coordinate in never-generated terrain and the player arrives to an
+     * empty sky, because nothing streams in that far out. That is exactly what "it's just
+     * a void when I RTP" was. `rtp.max-radius` caps it regardless of the border, so a
+     * fresh world with a default border still behaves sanely out of the box.
+     */
+    private double rtpMaxRadius(World world) {
+        double cap = Math.max(256.0, this.settings.getDouble("rtp.max-radius", 5000.0));
+        double fromBorder = cap;
+        if (world.getWorldBorder() != null) {
+            fromBorder = Math.max(256.0,
+                world.getWorldBorder().getSize() / 2.0 - (double) this.getRtpBorderPadding());
+        }
+        return Math.min(cap, fromBorder);
+    }
+
+    private void findAsyncSafeLocation(World world, java.util.function.Consumer<Location> cb) {
+        double cx = 0.0, cz = 0.0;
+        if (world.getWorldBorder() != null) {
+            cx = world.getWorldBorder().getCenter().getX();
+            cz = world.getWorldBorder().getCenter().getZ();
+        }
+        double radius = this.rtpMaxRadius(world);
+        double minR = Math.min(Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), radius - 1.0);
+        this.tryAsyncSafeSpot(world, cx, cz, minR, radius, 0,
+            Math.max(8, this.settings.getInt("rtp.search-attempts", 96)), cb);
+    }
+
+    private void tryAsyncSafeSpot(World world, double cx, double cz, double minR, double maxR,
+                                  int attempt, int maxAttempts, java.util.function.Consumer<Location> cb) {
+        if (attempt >= maxAttempts) { cb.accept(null); return; }
+        double ang = Math.random() * Math.PI * 2.0;
+        double dist = minR + Math.random() * Math.max(1.0, maxR - minR);
+        int bx = (int) Math.round(cx + Math.cos(ang) * dist);
+        int bz = (int) Math.round(cz + Math.sin(ang) * dist);
+        world.getChunkAtAsync(bx >> 4, bz >> 4).thenAccept(chunk -> {
+            try {
+                int by = world.getHighestBlockYAt(bx, bz);
+                Location loc = new Location(world, bx + 0.5, by + 1.0, bz + 0.5);
+                if (this.isSafeRtpSpot(loc)) { cb.accept(loc); return; }
+            } catch (Throwable ignored) { }
+            this.tryAsyncSafeSpot(world, cx, cz, minR, maxR, attempt + 1, maxAttempts, cb);
+        });
+    }
+
+    /** Solid ground, breathable space above, and not lava/void/water. */
+    private boolean isSafeRtpSpot(Location loc) {
+        if (loc == null || loc.getWorld() == null) return false;
+        org.bukkit.block.Block ground = loc.clone().add(0, -1, 0).getBlock();
+        org.bukkit.block.Block feet = loc.getBlock();
+        org.bukkit.block.Block head = loc.clone().add(0, 1, 0).getBlock();
+        if (!ground.getType().isSolid()) return false;
+        Material g = ground.getType();
+        if (g == Material.LAVA || g == Material.WATER || g == Material.MAGMA_BLOCK
+            || g == Material.CACTUS || g == Material.POWDER_SNOW) return false;
+        return feet.isEmpty() && head.isEmpty();
+    }
+
+    /** Run the normal safe-location search for a player who is on another backend. */
+    private void serveRtpFind(UUID uuid, String dimension, String originServer, Player carrier) {
+        String worldName = switch (dimension == null ? "overworld" : dimension) {
+            case "nether" -> "world_nether";
+            case "end" -> "world_the_end";
+            default -> "world";
+        };
+        World world = Bukkit.getWorld(worldName);
+        if (world == null) {
+            this.rtpLog("find_no_world", "uuid=" + uuid + " world=" + worldName);
+            return;
+        }
+        this.rtpLog("find_start", "uuid=" + uuid + " world=" + worldName + " origin=" + originServer);
+        this.findAsyncSafeLocation(world, loc -> {
+            if (loc == null) {
+                this.rtpLog("find_failed", "uuid=" + uuid + " world=" + worldName);
+                return;
+            }
+            // The answer rides back on a player connection, so it needs one that is still
+            // open. The carrier is whoever's channel delivered the request; if they left,
+            // any other player on this backend will do.
+            Player replyVia = (carrier != null && carrier.isOnline())
+                ? carrier
+                : Bukkit.getOnlinePlayers().stream().findFirst().orElse(null);
+            if (replyVia == null) {
+                this.rtpLog("find_no_carrier", "uuid=" + uuid + " (no open connection to answer over)");
+                return;
+            }
+            this.rtpLog("find_hit", "uuid=" + uuid + " at=" + loc.getBlockX() + "," + loc.getBlockY()
+                + "," + loc.getBlockZ() + " via=" + replyVia.getName());
+            this.sendBridgePayload(replyVia, out -> {
+                out.writeUTF("RTPRES");
+                out.writeUTF(uuid.toString());
+                out.writeUTF(originServer);
+                out.writeUTF(loc.getWorld().getName());
+                out.writeDouble(loc.getX());
+                out.writeDouble(loc.getY());
+                out.writeDouble(loc.getZ());
+            });
+        });
+    }
+
     private void searchRtpLocation(UUID uuid, RtpSearchPlan plan, int attempt) {
         if (!this.activeRtpSearches.contains(uuid)) {
             return;
@@ -8705,8 +9321,8 @@ TabCompleter {
     }
 
     private long getRtpCooldownMillis(Player player) {
-        // Cooldown is configurable (rtp.cooldown-seconds, default 0 = none); a 250ms anti-spam floor
-        // always applies. Server owners can raise the config value to add a real RTP cooldown.
+        // Cooldown is configurable (rtp.cooldown-seconds, default 0 = none) so other server owners can
+        // add one; a 250ms anti-spam throttle floor always applies.
         long cfg = this.settings.getLong("rtp.cooldown-seconds", 0L) * 1000L;
         return Math.max(250L, cfg);
     }
@@ -8762,6 +9378,7 @@ TabCompleter {
         PendingRtpTeleport pending = this.pendingRtpTeleports.get(uuid);
         Player player = Bukkit.getPlayer((UUID)uuid);
         if (pending == null || player == null || !player.isOnline()) {
+            this.rtpLog("teleport_abort", "uuid=" + uuid + " pending=" + (pending != null) + " online=" + (player != null && player.isOnline()));
             this.cancelPendingRtp(uuid);
             return;
         }
@@ -8907,35 +9524,8 @@ TabCompleter {
     }
 
     private boolean isServer(String logicalName) {
-        int port = Bukkit.getPort();
-        return switch (logicalName.toLowerCase()) {
-            case "lobby" -> {
-                if (port == 25566) {
-                    yield true;
-                }
-                yield false;
-            }
-            case "survival", "main" -> {
-                // Single-server deployment runs survival on the default 25565.
-                if (port == 25567 || port == 25565) {
-                    yield true;
-                }
-                yield false;
-            }
-            case "pvp" -> {
-                if (port == 25568) {
-                    yield true;
-                }
-                yield false;
-            }
-            case "maintenance" -> {
-                if (port == 25569) {
-                    yield true;
-                }
-                yield false;
-            }
-            default -> false;
-        };
+        if (logicalName == null) return false;
+        return this.detectServerName().equalsIgnoreCase(this.normalizeServerTarget(logicalName));
     }
 
     private String normalizeServerTarget(String target) {
@@ -8949,22 +9539,33 @@ TabCompleter {
         if ("hub".equals(normalized) || "server".equals(normalized)) {
             return "lobby";
         }
-        if ("duels".equals(normalized)) {
-            return "pvp";
-        }
         return normalized;
     }
 
+    /**
+     * This backend's logical name, as the proxy and the sync tables know it.
+     *
+     * `sync.server-name` in config.yml wins; "auto" (or absent) falls back to the port map.
+     * Honouring the config matters because the port map cannot be right for every operator:
+     * the dev backend runs on 25568, which this map used to call "pvp" — a server that no
+     * longer exists — so dev identified as pvp and every isServer() check against it failed.
+     * PVP is retired; 25568 is dev.
+     */
     private String detectServerName() {
+        String configured = this.settings == null ? null : this.settings.getString("sync.server-name", "auto");
+        if (configured != null && !configured.isBlank() && !"auto".equalsIgnoreCase(configured)) {
+            return this.normalizeServerTarget(configured.trim());
+        }
         int port = Bukkit.getPort();
         if (port == 25566) {
             return "lobby";
         }
         if (port == 25567 || port == 25565) {
+            // Single-server deployment runs survival on the default 25565.
             return "survival";
         }
         if (port == 25568) {
-            return "pvp";
+            return "dev";
         }
         if (port == 25569) {
             return "maintenance";
@@ -9052,6 +9653,34 @@ TabCompleter {
                     out.add(option);
                 }
                 return out;
+            }
+            return List.of();
+        }
+        if ("ecobot".equalsIgnoreCase(command.getName())) {
+            if (args.length == 1) {
+                String prefix = args[0].toLowerCase();
+                List<String> subs = List.of("status","list","order","buy","deliver","clear","reload","pause","resume");
+                ArrayList<String> out = new ArrayList<String>();
+                for (String s : subs) { if (s.startsWith(prefix)) out.add(s); }
+                return out;
+            }
+            if (args.length == 2) {
+                String sub = args[0].toLowerCase();
+                if ("list".equals(sub) || "order".equals(sub)) {
+                    String prefix = args[1].toUpperCase(Locale.ROOT);
+                    ArrayList<String> out = new ArrayList<String>();
+                    for (Material mat : Material.values()) {
+                        if (mat.isLegacy() || !mat.isItem()) continue;
+                        if (mat.name().startsWith(prefix)) out.add(mat.name().toLowerCase(Locale.ROOT));
+                    }
+                    return out;
+                }
+                if ("clear".equals(sub)) {
+                    String prefix = args[1].toLowerCase();
+                    ArrayList<String> out = new ArrayList<String>();
+                    for (String s : List.of("listings","orders")) { if (s.startsWith(prefix)) out.add(s); }
+                    return out;
+                }
             }
             return List.of();
         }
@@ -9238,7 +9867,10 @@ TabCompleter {
             return false;
         }
         return switch (label) {
-            case "msg", "tell", "w", "pm", "message", "tpa", "tpahere", "gtp", "punish", "bancheck", "forgive", "unpunish" -> true;
+            case "msg", "tell", "w", "pm", "message", "reply", "r",
+                 "tpa", "tpahere", "tpaccept", "tpdeny", "gtp",
+                 "pay", "follow", "unfollow", "friend", "friends",
+                 "punish", "bancheck", "forgive", "unpunish", "sus", "suspicious" -> true;
             default -> false;
         };
     }
@@ -11459,7 +12091,7 @@ TabCompleter {
             this.addColumnIfMissing(conn, st, "order_listings", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at");
             this.addColumnIfMissing(conn, st, "order_listings", "expires_at", "TIMESTAMP NULL DEFAULT NULL AFTER updated_at");
             // Order-matching engine: enchantment requirement for this order.
-            //   '*'         = wildcard, accepts any/no enchants
+            //   '*'         = wildcard, accepts any/no enchants (EcoBot baseline buyer)
             //   ''  (empty) = plain only, accepts only UNENCHANTED items
             //   'ench:lvl,…'= accepts items that CONTAIN at least those enchants at >= those levels
             this.addColumnIfMissing(conn, st, "order_listings", "enchant_spec", "VARCHAR(255) NOT NULL DEFAULT '*'");
@@ -11484,7 +12116,7 @@ TabCompleter {
             this.execSchema(st, bountiesSql);
             String commandLogSql = "CREATE TABLE IF NOT EXISTS command_log (id BIGINT AUTO_INCREMENT PRIMARY KEY,player_uuid CHAR(36) NOT NULL,player_name VARCHAR(16) NOT NULL,command TEXT NOT NULL,server_name VARCHAR(32) NOT NULL,logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,INDEX idx_cmd_player (player_uuid, logged_at),INDEX idx_cmd_logged (logged_at))";
             this.execSchema(st, commandLogSql);
-            // Friends system (replaces teams): one row per relationship; PENDING rows are
+            // Friends system (#60, replaces teams): one row per relationship; PENDING rows are
             // requests from requester->target, ACCEPTED rows are mutual (queried both directions).
             String friendsSql = "CREATE TABLE IF NOT EXISTS friends (id BIGINT AUTO_INCREMENT PRIMARY KEY,requester_uuid CHAR(36) NOT NULL,target_uuid CHAR(36) NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'PENDING',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,responded_at TIMESTAMP NULL DEFAULT NULL,UNIQUE KEY uk_friend_pair (requester_uuid,target_uuid),INDEX idx_friend_target_status (target_uuid,status),INDEX idx_friend_requester_status (requester_uuid,status))";
             this.execSchema(st, friendsSql);
@@ -11618,7 +12250,7 @@ TabCompleter {
             if (!def.key.equals(key)) continue;
             return def.defaultValue;
         }
-        // Dialog-only settings not in the inventory grid; default OFF (opt-in).
+        // Dialog-only settings not in the 36-slot inventory grid; default OFF (opt-in).
         if (key.equals("phantom_spawns") || key.equals("pearls_destroy_on_death")) return false;
         return true;
     }
@@ -11934,9 +12566,10 @@ TabCompleter {
         int cap = this.marketSlotCap(player);
         this.renderOwnOrdersEntries(inv, orders, 1);
         int n = Math.min(orders.size(), 45);
-        this.fillMarketSlots(inv, n, cap, "orders_new_slot", "§7Empty Order Slot", "§fClick to create an order");
-        // Claiming deliveries is done from an order's own detail page, not this overview grid.
-        inv.setItem(49, this.namedWithLore(Material.HOPPER, "§aFilter: §f" + state.filter, "orders_my_filter", List.of("§7Click to change")));
+        this.fillMarketSlots(inv, n, cap, "orders_new_slot", "\u00a77Empty Order Slot", "\u00a7fClick to create an order");
+        // Claiming deliveries is done from an order's own detail page (the "Claim items" chest there),
+        // not from this overview grid \u2014 so no claim chest is rendered here.
+        inv.setItem(49, this.namedWithLore(Material.HOPPER, "\u00a7aFilter: \u00a7f" + state.filter, "orders_my_filter", List.of("\u00a77Click to change")));
         inv.setItem(50, this.namedWithLore(Material.ARROW, "\u00a7aBack to Orders", "orders_main", List.of()));
         player.openInventory(inv);
     }
@@ -12018,7 +12651,8 @@ TabCompleter {
         }
         OrderBuilderState s = this.orderBuilderState.computeIfAbsent(player.getUniqueId(), k -> new OrderBuilderState());
         if (s.material == null || !s.material.isItem()) {
-            // Inventory picker renders REAL item icons (dialog buttons can only show text/glyphs).
+            // Item selection uses the inventory picker so it renders REAL item icons (Paper dialog
+            // buttons can only show text/emoji glyphs). Amount/price/review stay on dialogs below.
             this.openOrderItemPicker(player);
         } else if (s.amount <= 0L) {
             this.requestTextInput(player, TextInputMode.ORDER_AMOUNT, "Type order amount in chat (supports 1k/1m/1b).");
@@ -13496,7 +14130,7 @@ TabCompleter {
                 conn.setAutoCommit(false);
                 try (PreparedStatement sel = conn.prepareStatement("SELECT amount_total,amount_filled,unit_price FROM order_listings WHERE id=? AND creator_uuid=? AND status='ACTIVE' AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) FOR UPDATE");
                      PreparedStatement upd = conn.prepareStatement("UPDATE order_listings SET status='CANCELLED' WHERE id=? AND creator_uuid=? AND status='ACTIVE'");
-                     PreparedStatement refund = conn.prepareStatement("INSERT INTO balances (uuid,pending_vault_credit) VALUES (?,?) ON DUPLICATE KEY UPDATE pending_vault_credit=pending_vault_credit+VALUES(pending_vault_credit)");){
+                     PreparedStatement refund = conn.prepareStatement("INSERT INTO balances (uuid,money) VALUES (?,?) ON DUPLICATE KEY UPDATE money=money+VALUES(money)");){
                     double unitPrice;
                     int remaining;
                     sel.setLong(1, orderId);
@@ -13567,25 +14201,26 @@ TabCompleter {
                 }
                 Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_ORDERS_DELIVERIES);
                 // Expand each delivery into one-stack-per-slot units (blocks -> 64, pearls -> 16,
-                // totems -> 1). Clicking any unit claims that whole delivery.
+                // totems -> 1, etc.) so the page shows the real quantity as stacks instead of piling a
+                // whole delivery into a single slot. Clicking any unit claims that entire delivery.
                 List<ItemStack> units = new java.util.ArrayList<ItemStack>();
                 for (OrderDeliveryEntry delivery : deliveries) {
                     if (delivery.item() == null) continue;
                     Material mat = delivery.item().getType();
                     int max = Math.max(1, delivery.item().getMaxStackSize());
                     long remaining = Math.max(1L, delivery.amount());
-                    while (remaining > 0 && units.size() < 450) {
+                    while (remaining > 0 && units.size() < 450) {   // bound work; claim still pays the full DB amount
                         int amt = (int)Math.min((long)max, remaining);
                         ItemStack unit = delivery.item().clone();
                         unit.setAmount(amt);
                         ItemMeta meta = unit.getItemMeta();
-                        meta.setDisplayName("§a" + this.humanName(mat));
+                        meta.setDisplayName("\u00a7a" + this.humanName(mat));
                         meta.setLore(List.of(
-                            "§7This delivery: §f" + String.format("%,d", delivery.amount()) + "x total",
-                            "§7Delivered by: §f" + delivery.fulfillerName(),
-                            "§7Paid out: §f$" + this.fmtMoney(delivery.payout()),
-                            "§7Time: §f" + this.shortAge(delivery.createdAtMs()),
-                            "§aClick to claim this delivery"
+                            "\u00a77This delivery: \u00a7f" + String.format("%,d", delivery.amount()) + "x total",
+                            "\u00a77Delivered by: \u00a7f" + delivery.fulfillerName(),
+                            "\u00a77Paid out: \u00a7f$" + this.fmtMoney(delivery.payout()),
+                            "\u00a77Time: \u00a7f" + this.shortAge(delivery.createdAtMs()),
+                            "\u00a7aClick to claim this delivery"
                         ));
                         if (this.uiActionKey != null) {
                             meta.getPersistentDataContainer().set(this.uiActionKey, PersistentDataType.STRING, "orders_claim_delivery:" + delivery.id());
@@ -13601,10 +14236,10 @@ TabCompleter {
                     inv.setItem(i - startIdx, units.get(i));
                 }
                 if (state.deliveriesPage > 1) {
-                    inv.setItem(45, this.namedWithLore(Material.ARROW, "§aPrevious", "orders_claims_prev", List.of()));
+                    inv.setItem(45, this.namedWithLore(Material.ARROW, "\u00a7aPrevious", "orders_claims_prev", List.of()));
                 }
                 if (units.size() > endIdx) {
-                    inv.setItem(53, this.namedWithLore(Material.ARROW, "§aNext", "orders_claims_next", List.of()));
+                    inv.setItem(53, this.namedWithLore(Material.ARROW, "\u00a7aNext", "orders_claims_next", List.of()));
                 }
                 inv.setItem(48, this.namedWithLore(Material.HOPPER, "\u00a7a\u00a7lClaim Everything", "orders_claims_claim_all", List.of("\u00a77Collect \u00a7fall \u00a77pending deliveries", "\u00a77across every page at once")));
                 inv.setItem(49, this.namedWithLore(Material.EMERALD, "\u00a7aSell all on page", "orders_claims_sell_page", List.of()));
@@ -13847,26 +14482,10 @@ TabCompleter {
         if (value > 0.0) {
             return value;
         }
-        // Uncatalogued / newly-added items fall back to a category-based default so EVERY orderable
-        // item has a real worth instead of a $1 floor.
-        double fallback = this.fallbackWorthFor(stack.getType());
+        // Uncatalogued / newly-added items (maces, copper armor, resin, etc.) fall back to a
+        // category-based default so EVERY orderable item has a real worth instead of a $1 floor.
+        double fallback = this.ecobotFallbackPrice(stack.getType());
         return fallback > 0.0 ? fallback : 1.0;
-    }
-
-    // Category-based default worth for any item without a configured sell/worth price.
-    private double fallbackWorthFor(Material mat) {
-        if (mat == null) return -1.0;
-        String n = mat.name();
-        if (n.endsWith("_HEAD") || n.endsWith("_SKULL")) return 25_000.0;
-        if (n.startsWith("NETHERITE_")) return 50_000.0;
-        if (n.endsWith("_SMITHING_TEMPLATE")) return 9_000.0;
-        if (n.startsWith("MUSIC_DISC_")) return 8_000.0;
-        if (n.endsWith("_BANNER_PATTERN")) return 4_000.0;
-        if (n.endsWith("_POTTERY_SHERD")) return 3_500.0;
-        if (n.equals("POTION") || n.endsWith("_POTION") || n.equals("TIPPED_ARROW")) return 1_200.0;
-        if (n.startsWith("DIAMOND_")) return 5_000.0;
-        if (n.startsWith("ENCHANTED_")) return 4_000.0;
-        return 500.0;
     }
 
     private List<OrderEntry> queryOrders(OrdersViewState state) {
@@ -14395,7 +15014,7 @@ TabCompleter {
                 try (PreparedStatement sel = conn.prepareStatement("SELECT seller_uuid,price,item_blob FROM auction_listings WHERE id=? AND status='ACTIVE' FOR UPDATE");
                      PreparedStatement upd = conn.prepareStatement("UPDATE auction_listings SET status='SOLD', buyer_uuid=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='ACTIVE'");
                      PreparedStatement payout = conn.prepareStatement("INSERT INTO auction_payouts (recipient_uuid,listing_id,amount,claimed) VALUES (?,?,?,1)");
-                     PreparedStatement sellerCredit = conn.prepareStatement("INSERT INTO balances (uuid,pending_vault_credit) VALUES (?,?) ON DUPLICATE KEY UPDATE pending_vault_credit=pending_vault_credit+VALUES(pending_vault_credit)");){
+                     PreparedStatement sellerCredit = conn.prepareStatement("INSERT INTO balances (uuid,money) VALUES (?,?) ON DUPLICATE KEY UPDATE money=money+VALUES(money)");){
                     sel.setLong(1, listingId);
                     try (ResultSet rs = sel.executeQuery();){
                         if (!rs.next()) {
@@ -15028,55 +15647,15 @@ TabCompleter {
         if (uuid == null || column == null || amount == 0L) {
             return;
         }
-        this.pendingLongStats
-            .computeIfAbsent(uuid, k -> new java.util.concurrent.ConcurrentHashMap<>())
-            .computeIfAbsent(column, k -> new java.util.concurrent.atomic.LongAdder())
-            .add(amount);
-    }
-
-    // Write one player's accumulated deltas on an existing connection. Column names are code
-    // constants (kills/deaths/blocks_placed/blocks_broken/mobs_killed), never user input.
-    private void writeStatDeltas(Connection conn, UUID uuid, java.util.Map<String, java.util.concurrent.atomic.LongAdder> cols) throws java.sql.SQLException {
-        for (java.util.Map.Entry<String, java.util.concurrent.atomic.LongAdder> e : cols.entrySet()) {
-            long delta = e.getValue().sum();
-            if (delta == 0L) continue;
-            String col = e.getKey();
-            String sql = "INSERT INTO player_stats (uuid, " + col + ") VALUES (?, ?) ON DUPLICATE KEY UPDATE " + col + " = " + col + " + VALUES(" + col + "), updated_at=CURRENT_TIMESTAMP";
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, uuid.toString());
-                ps.setLong(2, delta);
-                ps.executeUpdate();
-            }
-        }
-    }
-
-    // Flush all accumulated stat deltas in one connection (30s timer + onDisable).
-    private void flushPendingLongStats() {
-        if (this.pendingLongStats.isEmpty()) {
-            return;
-        }
-        try (Connection conn = this.openSyncConnection()) {
-            for (UUID uuid : new java.util.ArrayList<>(this.pendingLongStats.keySet())) {
-                java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder> cols = this.pendingLongStats.remove(uuid);
-                if (cols != null) this.writeStatDeltas(conn, uuid, cols);
-            }
+        String sql = "INSERT INTO player_stats (uuid, " + column + ") VALUES (?, ?) ON DUPLICATE KEY UPDATE " + column + " = " + column + " + VALUES(" + column + "), updated_at=CURRENT_TIMESTAMP";
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);){
+            ps.setString(1, uuid.toString());
+            ps.setLong(2, amount);
+            ps.executeUpdate();
         }
         catch (Exception ex) {
-            this.getLogger().warning("Failed flushing player stats: " + ex.getMessage());
-        }
-    }
-
-    // Flush a single player's accumulated stats (on quit).
-    private void flushPendingLongStatsFor(UUID uuid) {
-        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder> cols = this.pendingLongStats.remove(uuid);
-        if (cols == null || cols.isEmpty()) {
-            return;
-        }
-        try (Connection conn = this.openSyncConnection()) {
-            this.writeStatDeltas(conn, uuid, cols);
-        }
-        catch (Exception ex) {
-            this.getLogger().warning("Failed flushing player stats: " + ex.getMessage());
+            this.getLogger().warning("Failed incrementing stat " + column + ": " + ex.getMessage());
         }
     }
 
@@ -16111,21 +16690,29 @@ TabCompleter {
         }
     }
 
+    // One player waiting in the RTP duel queue.
     private static final class RtpQueueEntry {
         private final int gearScore;
         private final long enqueuedAt;
         private final Sound disc;
+
         private RtpQueueEntry(int gearScore, long enqueuedAt, Sound disc) {
-            this.gearScore = gearScore; this.enqueuedAt = enqueuedAt; this.disc = disc;
+            this.gearScore = gearScore;
+            this.enqueuedAt = enqueuedAt;
+            this.disc = disc;
         }
     }
 
+    // A thrown ender pearl captured at logout, re-spawned at the owner's next login.
     private static final class StoredPearl {
         private final UUID worldId;
         private final double x, y, z;
         private final org.bukkit.util.Vector velocity;
+
         private StoredPearl(UUID worldId, double x, double y, double z, org.bukkit.util.Vector velocity) {
-            this.worldId = worldId; this.x = x; this.y = y; this.z = z; this.velocity = velocity;
+            this.worldId = worldId;
+            this.x = x; this.y = y; this.z = z;
+            this.velocity = velocity;
         }
     }
 
@@ -16554,6 +17141,796 @@ TabCompleter {
                 });
             } catch (Exception ex) { this.getLogger().warning("openTeamMemberManageGui failed: " + ex.getMessage()); }
         });
+    }
+
+    // ── Auto-ECO (NPC economy engine) ────────────────────────────────────────
+
+    private void initAutoEco() {
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement("INSERT INTO players (uuid,username) VALUES (?,?) ON DUPLICATE KEY UPDATE username=VALUES(username)")) {
+            ps.setString(1, SERVER_UUID);
+            ps.setString(2, "Server");
+            ps.executeUpdate();
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Failed to upsert Server player row: " + ex.getMessage());
+        }
+        // Auto-list: every 10 minutes (12000 ticks), initial delay 5 min
+        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused) this.runAutoListPass(); }, 6000L, 12000L));
+        // Auto-order: every 15 minutes (18000 ticks), initial delay 7 min
+        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused) this.runAutoOrderPass(); }, 8400L, 18000L));
+        // Auto-buy: every 10 minutes (12000 ticks), initial delay 3 min
+        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused) this.runAutoBuyPass(50); }, 3600L, 12000L));
+        // Auto-deliver: every 10 minutes (12000 ticks), initial delay 8 min (orders need 5 min age first)
+        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused) this.runAutoDeliverPass(100); }, 9600L, 12000L));
+        this.getLogger().info("[AutoEco] Enabled. Server UUID=" + SERVER_UUID);
+    }
+
+    private void runAutoListPass() {
+        if (this.autoEcoPaused) return;
+        if (this.sellConfig == null) return;
+        ConfigurationSection prices = this.sellConfig.getConfigurationSection("prices");
+        if (prices == null) return;
+        try (Connection conn = this.openSyncConnection()) {
+            java.util.Map<String, Integer> currentCounts = new java.util.HashMap<>();
+            try (PreparedStatement ps = conn.prepareStatement("SELECT item_key, COUNT(*) FROM auction_listings WHERE seller_uuid=? AND status='ACTIVE' GROUP BY item_key")) {
+                ps.setString(1, SERVER_UUID);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) currentCounts.put(rs.getString(1), rs.getInt(2));
+                }
+            }
+            int posted = 0;
+            java.util.List<String> keys = new java.util.ArrayList<>(prices.getKeys(false));
+            java.util.Collections.shuffle(keys, this.ecoRandom);
+            int maxPerMaterial = 25;
+            int batchLimit = 300;
+            // Build the candidate set: configured-price items PLUS curated extras (rares, new
+            // items, potions, mob heads, smithing templates...) so coverage is broad.
+            java.util.LinkedHashSet<Material> candidates = new java.util.LinkedHashSet<>();
+            for (String matName : keys) {
+                Material m = Material.matchMaterial(matName);
+                if (m != null) candidates.add(m);
+            }
+            candidates.addAll(ECOBOT_EXTRA_MATERIALS);
+            java.util.List<Material> candidateList = new java.util.ArrayList<>(candidates);
+            java.util.Collections.shuffle(candidateList, this.ecoRandom);
+            for (Material mat : candidateList) {
+                if (posted >= batchLimit) break;
+                if (this.isEcobotExcluded(mat)) continue;
+                // Potions / tipped arrows need PotionMeta — handled by the dedicated potion pass
+                // below (a bare ItemStack renders as "Uncraftable Potion").
+                String mname = mat.name();
+                if (mname.equals("POTION") || mname.endsWith("_POTION") || mname.equals("TIPPED_ARROW")) continue;
+                int currentCount = currentCounts.getOrDefault(mat.name(), 0);
+                if (currentCount >= maxPerMaterial) continue;
+                double sellPrice = this.ecobotUnitPrice(mat);
+                if (sellPrice <= 0) continue;
+                double ahPrice = this.calcServerAhPrice(mat, sellPrice);
+                // Rare singletons (heads, elytra, mace...) list one-at-a-time, not full stacks.
+                int listAmt = ECOBOT_RARE_PRICES.containsKey(mat.name()) ? 1 : mat.getMaxStackSize();
+                int perMatCap = ECOBOT_RARE_PRICES.containsKey(mat.name()) ? Math.min(3, maxPerMaterial) : maxPerMaterial;
+                int toPost = Math.min(perMatCap - currentCount, batchLimit - posted);
+                for (int i = 0; i < toPost && i >= 0; i++) {
+                    this.postServerAhListing(conn, mat, ahPrice * listAmt, listAmt);
+                    posted++;
+                }
+            }
+            posted += this.runAutoEnchantedBookListPass(conn, currentCounts, maxPerMaterial);
+            posted += this.runAutoPotionListPass(conn, currentCounts);
+            posted += this.runAutoEnchantedGearListPass(conn, currentCounts);
+            posted += this.postArmorSets(conn);
+            posted += this.runAutoPvpListPass(conn, currentCounts);
+            if (posted > 0) this.getLogger().info("[AutoEco] Auto-listed " + posted + " new Server listings.");
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Auto-list pass failed: " + ex.getMessage());
+        }
+    }
+
+    // Popular PvP items: EcoBot keeps 100+ live listings of each (amount per listing, fallback unit price).
+    private static final java.util.LinkedHashMap<Material, int[]> ECOBOT_PVP_ITEMS = new java.util.LinkedHashMap<>();
+    static {
+        // material -> { amountPerListing, FIXED total listing price (NO markup) }
+        // These are deliberately PvP-affordable; the listing price is the total for the amount.
+        ECOBOT_PVP_ITEMS.put(Material.TOTEM_OF_UNDYING, new int[]{1, 12000});   // 1 totem = $12k
+        ECOBOT_PVP_ITEMS.put(Material.END_CRYSTAL, new int[]{1, 600});         // 1 crystal = $600
+        ECOBOT_PVP_ITEMS.put(Material.RESPAWN_ANCHOR, new int[]{1, 1200});     // 1 anchor = $1.2k
+        ECOBOT_PVP_ITEMS.put(Material.OBSIDIAN, new int[]{16, 800});           // 16 obsidian = $800
+        ECOBOT_PVP_ITEMS.put(Material.GLOWSTONE, new int[]{16, 640});          // 16 glowstone = $640
+        ECOBOT_PVP_ITEMS.put(Material.ENDER_PEARL, new int[]{16, 1600});       // 16 pearls = $1.6k
+        ECOBOT_PVP_ITEMS.put(Material.EXPERIENCE_BOTTLE, new int[]{16, 2400}); // 16 xp bottles = $2.4k
+    }
+
+    /** Keeps the auction stocked with 100+ live listings of each popular PvP item at FIXED prices. */
+    private int runAutoPvpListPass(Connection conn, java.util.Map<String, Integer> currentCounts) {
+        int posted = 0;
+        final int target = 120;     // keep well over 100 active per item
+        final int perPassCap = 60;  // spread the fill across passes
+        for (java.util.Map.Entry<Material, int[]> e : ECOBOT_PVP_ITEMS.entrySet()) {
+            Material mat = e.getKey();
+            int amt = e.getValue()[0];
+            double listingPrice = e.getValue()[1]; // FIXED total price for the whole listing
+            int current = currentCounts.getOrDefault(mat.name(), 0);
+            if (current >= target) continue;
+            int toPost = Math.min(target - current, perPassCap);
+            for (int i = 0; i < toPost; i++) {
+                this.postServerAhListing(conn, mat, listingPrice, amt);
+                posted++;
+            }
+            currentCounts.put(mat.name(), current + toPost);
+        }
+        return posted;
+    }
+
+    // (enchantment name matching Enchantment registry key, level, AH price per book)
+    private static final Object[][] ECOBOT_ENCHANT_BOOKS = {
+        {"mending",              1, 150_000.0},
+        {"fortune",              3,  80_000.0},
+        {"silk_touch",           1,  60_000.0},
+        {"efficiency",           5,  40_000.0},
+        {"efficiency",           4,  15_000.0},
+        {"unbreaking",           3,  12_000.0},
+        {"sharpness",            5,  70_000.0},
+        {"sharpness",            4,  25_000.0},
+        {"protection",           4,  50_000.0},
+        {"fire_protection",      4,  20_000.0},
+        {"blast_protection",     4,  20_000.0},
+        {"projectile_protection",4,  20_000.0},
+        {"feather_falling",      4,  25_000.0},
+        {"looting",              3,  35_000.0},
+        {"power",                5,  30_000.0},
+        {"infinity",             1,  45_000.0},
+        {"knockback",            2,   8_000.0},
+        {"flame",                1,  10_000.0},
+        {"punch",                2,   8_000.0},
+        {"sweeping_edge",        3,  15_000.0},
+        {"thorns",               3,  18_000.0},
+        {"aqua_affinity",        1,  10_000.0},
+        {"respiration",          3,  18_000.0},
+        {"depth_strider",        3,  18_000.0},
+        {"frost_walker",         2,  30_000.0},
+        {"soul_speed",           3,  40_000.0},
+        {"swift_sneak",          3,  60_000.0},
+        {"channeling",           1,  25_000.0},
+        {"riptide",              3,  35_000.0},
+        {"loyalty",              3,  20_000.0},
+        {"impaling",             5,  20_000.0},
+        {"multishot",            1,  30_000.0},
+        {"piercing",             4,  15_000.0},
+        {"quick_charge",         3,  18_000.0},
+        {"luck_of_the_sea",      3,  25_000.0},
+        {"lure",                 3,  20_000.0},
+    };
+
+    private int runAutoEnchantedBookListPass(Connection conn, java.util.Map<String, Integer> currentCounts, int maxPerMaterial) {
+        int posted = 0;
+        for (Object[] entry : ECOBOT_ENCHANT_BOOKS) {
+            String enchKey = (String) entry[0];
+            int level = (int) entry[1];
+            double price = (double) entry[2];
+            String itemKey = "ENCHANTED_BOOK_" + enchKey.toUpperCase(java.util.Locale.ROOT) + "_" + level;
+            int current = currentCounts.getOrDefault(itemKey, 0);
+            if (current >= maxPerMaterial) continue;
+            org.bukkit.enchantments.Enchantment ench = org.bukkit.Registry.ENCHANTMENT.get(
+                org.bukkit.NamespacedKey.minecraft(enchKey));
+            if (ench == null) continue;
+            ItemStack book = new ItemStack(Material.ENCHANTED_BOOK, 1);
+            org.bukkit.inventory.meta.EnchantmentStorageMeta meta =
+                (org.bukkit.inventory.meta.EnchantmentStorageMeta) book.getItemMeta();
+            meta.addStoredEnchant(ench, level, true);
+            book.setItemMeta(meta);
+            int toPost = maxPerMaterial - current;
+            double variance = 0.85 + this.ecoRandom.nextDouble() * 0.3;
+            double finalPrice = Math.round(price * variance);
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 30 DAY))")) {
+                for (int i = 0; i < toPost; i++) {
+                    ps.setString(1, SERVER_UUID);
+                    ps.setBytes(2, this.serializeItem(book));
+                    ps.setString(3, itemKey);
+                    ps.setDouble(4, finalPrice);
+                    ps.executeUpdate();
+                    posted++;
+                }
+            } catch (Exception ex) {
+                this.getLogger().warning("[AutoEco] Failed posting enchant book " + itemKey + ": " + ex.getMessage());
+            }
+        }
+        return posted;
+    }
+
+    // Generic poster for Server AH listings that carry custom meta (potions, enchanted gear,
+    // trimmed armor). item_key is a synthetic key (like the enchanted-book pass uses) so
+    // per-variant caps work via the same GROUP BY item_key counting.
+    private boolean postServerAhItem(Connection conn, ItemStack item, String itemKey, double price) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 30 DAY))")) {
+            ps.setString(1, SERVER_UUID);
+            ps.setBytes(2, this.serializeItem(item));
+            ps.setString(3, itemKey);
+            ps.setDouble(4, price);
+            ps.executeUpdate();
+            return true;
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Failed posting " + itemKey + ": " + ex.getMessage());
+            return false;
+        }
+    }
+
+    // (PotionType enum name, base price for a drinkable bottle)
+    private static final Object[][] ECOBOT_POTIONS = {
+        {"SWIFTNESS",            1_500.0}, {"STRONG_SWIFTNESS",      3_000.0}, {"LONG_SWIFTNESS",       2_500.0},
+        {"STRENGTH",             4_000.0}, {"STRONG_STRENGTH",       8_000.0}, {"LONG_STRENGTH",        6_000.0},
+        {"HEALING",              2_500.0}, {"STRONG_HEALING",        5_000.0},
+        {"REGENERATION",         4_000.0}, {"STRONG_REGENERATION",   8_000.0}, {"LONG_REGENERATION",    6_000.0},
+        {"FIRE_RESISTANCE",      3_500.0}, {"LONG_FIRE_RESISTANCE",  5_500.0},
+        {"NIGHT_VISION",         1_200.0}, {"LONG_NIGHT_VISION",     2_000.0},
+        {"WATER_BREATHING",      1_500.0}, {"LONG_WATER_BREATHING",  2_500.0},
+        {"INVISIBILITY",         5_000.0}, {"LONG_INVISIBILITY",     8_000.0},
+        {"SLOW_FALLING",         2_500.0}, {"LONG_SLOW_FALLING",     4_000.0},
+        {"LEAPING",              1_200.0}, {"STRONG_LEAPING",        2_400.0},
+        {"TURTLE_MASTER",        4_500.0}, {"STRONG_TURTLE_MASTER",  9_000.0},
+    };
+
+    // Posts real potions (drinkable / splash / lingering) and tipped arrows with proper
+    // PotionMeta. Caps: 2 listings per exact variant, ~40 new posts per pass.
+    private int runAutoPotionListPass(Connection conn, java.util.Map<String, Integer> currentCounts) {
+        int posted = 0;
+        final int maxPerVariant = 2;
+        final int batchCap = 40;
+        java.util.List<Object[]> types = new java.util.ArrayList<>(java.util.Arrays.asList(ECOBOT_POTIONS));
+        java.util.Collections.shuffle(types, this.ecoRandom);
+        // (container material, price multiplier, amount per listing)
+        Object[][] containers = {
+            {Material.POTION, 1.0, 1},
+            {Material.SPLASH_POTION, 1.5, 1},
+            {Material.LINGERING_POTION, 2.5, 1},
+            {Material.TIPPED_ARROW, 0.25, 16},
+        };
+        for (Object[] entry : types) {
+            if (posted >= batchCap) break;
+            String typeName = (String) entry[0];
+            double basePrice = (double) entry[1];
+            PotionType type;
+            try { type = PotionType.valueOf(typeName); } catch (IllegalArgumentException ex) { continue; }
+            for (Object[] container : containers) {
+                if (posted >= batchCap) break;
+                Material mat = (Material) container[0];
+                double mult = (double) container[1];
+                int amount = (int) container[2];
+                String itemKey = mat.name() + "_" + typeName;
+                if (currentCounts.getOrDefault(itemKey, 0) >= maxPerVariant) continue;
+                // Lingering only for a thinned-out selection so the AH isn't wall-to-wall lingering pots.
+                if (mat == Material.LINGERING_POTION && this.ecoRandom.nextInt(3) != 0) continue;
+                ItemStack item = new ItemStack(mat, amount);
+                PotionMeta meta = (PotionMeta) item.getItemMeta();
+                meta.setBasePotionType(type);
+                item.setItemMeta(meta);
+                double variance = 0.85 + this.ecoRandom.nextDouble() * 0.3;
+                double price = Math.max(100.0, Math.round(basePrice * mult * amount * variance));
+                if (this.postServerAhItem(conn, item, itemKey, price)) {
+                    posted++;
+                    currentCounts.merge(itemKey, 1, Integer::sum);
+                }
+            }
+        }
+        return posted;
+    }
+
+    // (material name, AH price, enchant pairs key:level) — god-tier tool/weapon kits.
+    private static final Object[][] ECOBOT_GEAR = {
+        {"DIAMOND_SWORD",       350_000.0, "sharpness:5,looting:3,sweeping_edge:3,unbreaking:3,mending:1"},
+        {"NETHERITE_SWORD",   1_200_000.0, "sharpness:5,looting:3,sweeping_edge:3,fire_aspect:2,unbreaking:3,mending:1"},
+        {"DIAMOND_PICKAXE",     400_000.0, "efficiency:5,fortune:3,unbreaking:3,mending:1"},
+        {"DIAMOND_PICKAXE",     300_000.0, "efficiency:5,silk_touch:1,unbreaking:3,mending:1"},
+        {"NETHERITE_PICKAXE", 1_300_000.0, "efficiency:5,fortune:3,unbreaking:3,mending:1"},
+        {"DIAMOND_AXE",         350_000.0, "efficiency:5,sharpness:5,unbreaking:3,mending:1"},
+        {"DIAMOND_SHOVEL",      150_000.0, "efficiency:5,unbreaking:3,mending:1"},
+        {"DIAMOND_HOE",         120_000.0, "efficiency:5,fortune:3,unbreaking:3,mending:1"},
+        {"BOW",                 250_000.0, "power:5,infinity:1,flame:1,unbreaking:3"},
+        {"CROSSBOW",            200_000.0, "quick_charge:3,multishot:1,unbreaking:3,mending:1"},
+        {"TRIDENT",             500_000.0, "loyalty:3,channeling:1,impaling:5,unbreaking:3,mending:1"},
+        {"TRIDENT",             550_000.0, "riptide:3,impaling:5,unbreaking:3,mending:1"},
+        {"MACE",                900_000.0, "breach:4,unbreaking:3,mending:1"},
+        {"MACE",                950_000.0, "density:5,wind_burst:3,unbreaking:3,mending:1"},
+        {"ELYTRA",              600_000.0, "unbreaking:3,mending:1"},
+        {"FISHING_ROD",          90_000.0, "luck_of_the_sea:3,lure:3,unbreaking:3,mending:1"},
+    };
+
+    // Posts pre-enchanted tools/weapons. item_key = MATERIAL_ENCH_<n> (index into ECOBOT_GEAR)
+    // so the silk-touch pick and the fortune pick count separately. Cap 2 each.
+    private int runAutoEnchantedGearListPass(Connection conn, java.util.Map<String, Integer> currentCounts) {
+        int posted = 0;
+        final int maxPerVariant = 2;
+        for (int idx = 0; idx < ECOBOT_GEAR.length; idx++) {
+            Object[] entry = ECOBOT_GEAR[idx];
+            Material mat = Material.matchMaterial((String) entry[0]);
+            if (mat == null) continue;
+            double basePrice = (double) entry[1];
+            String itemKey = mat.name() + "_ENCH_" + idx;
+            if (currentCounts.getOrDefault(itemKey, 0) >= maxPerVariant) continue;
+            ItemStack item = new ItemStack(mat, 1);
+            ItemMeta meta = item.getItemMeta();
+            boolean ok = true;
+            for (String pair : ((String) entry[2]).split(",")) {
+                String[] kv = pair.split(":");
+                org.bukkit.enchantments.Enchantment ench = org.bukkit.Registry.ENCHANTMENT.get(
+                    org.bukkit.NamespacedKey.minecraft(kv[0]));
+                if (ench == null) { ok = false; break; } // enchant missing on this MC version
+                meta.addEnchant(ench, Integer.parseInt(kv[1]), true);
+            }
+            if (!ok) continue;
+            item.setItemMeta(meta);
+            double variance = 0.85 + this.ecoRandom.nextDouble() * 0.3;
+            double price = Math.round(basePrice * variance);
+            if (this.postServerAhItem(conn, item, itemKey, price)) {
+                posted++;
+                currentCounts.merge(itemKey, 1, Integer::sum);
+            }
+        }
+        return posted;
+    }
+
+    private void runAutoOrderPass() {
+        if (this.autoEcoPaused) return;
+        if (this.sellConfig == null) return;
+        ConfigurationSection prices = this.sellConfig.getConfigurationSection("prices");
+        if (prices == null) return;
+        try (Connection conn = this.openSyncConnection()) {
+            java.util.Map<String, Integer> currentCounts = new java.util.HashMap<>();
+            try (PreparedStatement ps = conn.prepareStatement("SELECT item_key, COUNT(*) FROM order_listings WHERE creator_uuid=? AND status='ACTIVE' GROUP BY item_key")) {
+                ps.setString(1, SERVER_UUID);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) currentCounts.put(rs.getString(1), rs.getInt(2));
+                }
+            }
+            int posted = 0;
+            java.util.List<String> keys = new java.util.ArrayList<>(prices.getKeys(false));
+            java.util.Collections.shuffle(keys, this.ecoRandom);
+            int maxPerMaterial = 1;
+            for (String matName : keys) {
+                if (posted >= 50) break;
+                Material mat = Material.matchMaterial(matName);
+                if (this.isEcobotExcluded(mat)) continue;
+                int currentCount = currentCounts.getOrDefault(mat.name(), 0);
+                if (currentCount >= maxPerMaterial) continue;
+                double sellPrice = this.sellUnitPrice(mat);
+                if (sellPrice <= 0) continue;
+                double unitPrice = this.calcServerOrderPrice(sellPrice);
+                int stackSize = Math.max(1, mat.getMaxStackSize());
+                int totalAmt;
+                if (sellPrice <= 5)        totalAmt = 1_000_000;
+                else if (sellPrice <= 50)  totalAmt = 500_000;
+                else if (sellPrice <= 500) totalAmt = 100_000;
+                else if (sellPrice <= 5000) totalAmt = 25_000;
+                else if (sellPrice <= 50000) totalAmt = 5_000;
+                else                        totalAmt = 1_000;
+                this.postServerOrder(conn, mat, totalAmt, unitPrice);
+                posted++;
+            }
+            if (posted > 0) this.getLogger().info("[AutoEco] Auto-posted " + posted + " new Server orders.");
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Auto-order pass failed: " + ex.getMessage());
+        }
+    }
+
+    private void runAutoBuyPass(int limit) {
+        if (this.autoEcoPaused) return;
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT id, item_key, price FROM auction_listings WHERE seller_uuid != ? AND status='ACTIVE' ORDER BY created_at ASC LIMIT ?")) {
+            ps.setString(1, SERVER_UUID);
+            ps.setInt(2, limit * 3);
+            java.util.List<long[]> candidates = new java.util.ArrayList<>();
+            java.util.List<double[]> candidatePrices = new java.util.ArrayList<>();
+            java.util.List<Material> candidateMats = new java.util.ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Material mat = Material.matchMaterial(rs.getString(2) != null ? rs.getString(2) : "");
+                    if (mat == null) continue;
+                    double price = rs.getDouble(3);
+                    double sellPrice = this.sellUnitPrice(mat);
+                    if (sellPrice <= 0) continue;
+                    // Always buy at or below actual sell worth. Also buy up to
+                    // Server's own AH price (10-50× markup) so player listings
+                    // at reasonable prices get scooped up.
+                    double maxBuy = this.calcServerAhPrice(mat, sellPrice);
+                    if (price > maxBuy) continue;
+                    candidates.add(new long[]{rs.getLong(1)});
+                    candidatePrices.add(new double[]{price});
+                    candidateMats.add(mat);
+                }
+            }
+            int bought = 0;
+            for (int i = 0; i < candidates.size() && bought < limit; i++) {
+                if (this.serverBuyListing(conn, candidates.get(i)[0], candidatePrices.get(i)[0])) bought++;
+            }
+            if (bought > 0) this.getLogger().info("[AutoEco] Auto-bought " + bought + " player listings.");
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Auto-buy pass failed: " + ex.getMessage());
+        }
+    }
+
+    private void runAutoDeliverPass(int limit) {
+        if (this.autoEcoPaused) return;
+        // Only deliver to orders at least 5 minutes old so players can see their own orders first
+        String deliverSql = "SELECT ol.id, ol.item_key, ol.amount_total - ol.amount_filled AS remaining, ol.unit_price, ol.amount_total " +
+            "FROM order_listings ol " +
+            "WHERE ol.creator_uuid != ? AND ol.status='ACTIVE' " +
+            "AND (ol.expires_at IS NULL OR ol.expires_at > CURRENT_TIMESTAMP) " +
+            "AND ol.amount_filled < ol.amount_total " +
+            "AND ol.created_at < DATE_SUB(NOW(), INTERVAL 5 MINUTE) " +
+            "ORDER BY ol.unit_price DESC LIMIT ?";
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(deliverSql)) {
+            ps.setString(1, SERVER_UUID);
+            ps.setInt(2, limit);
+            java.util.List<long[]> toDeliver = new java.util.ArrayList<>();
+            java.util.List<Material> mats = new java.util.ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Material mat = Material.matchMaterial(rs.getString(2) != null ? rs.getString(2) : "");
+                    if (mat == null) continue;
+                    int remaining = rs.getInt(3);
+                    double unitPrice = rs.getDouble(4);
+                    int totalAmount = rs.getInt(5);
+                    double sellPrice = this.sellUnitPrice(mat);
+                    // Only deliver if the order's unit price >= 50% of actual sell value
+                    if (sellPrice <= 0 || unitPrice < sellPrice * 0.5) continue;
+                    // Deliver up to 25% of total per cycle to spread out delivery naturally
+                    int maxThisCycle = Math.max(1, totalAmount / 4);
+                    int deliverAmt = Math.min(remaining, maxThisCycle);
+                    if (deliverAmt <= 0) continue;
+                    toDeliver.add(new long[]{rs.getLong(1), deliverAmt});
+                    mats.add(mat);
+                }
+            }
+            int delivered = 0;
+            for (int i = 0; i < toDeliver.size(); i++) {
+                OrderDeliveryApplyResult result = this.applyOrderDeliveryAsServer(toDeliver.get(i)[0], mats.get(i), (int) toDeliver.get(i)[1]);
+                if (result != null && result.amount() > 0) delivered++;
+            }
+            if (delivered > 0) this.getLogger().info("[AutoEco] Auto-delivered to " + delivered + " player orders.");
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Auto-deliver pass failed: " + ex.getMessage());
+        }
+    }
+
+    private boolean serverBuyListing(Connection conn, long listingId, double price) {
+        try {
+            conn.setAutoCommit(false);
+            String sellerUuid;
+            String itemKey;
+            try (PreparedStatement sel = conn.prepareStatement("SELECT seller_uuid,item_key FROM auction_listings WHERE id=? AND status='ACTIVE' FOR UPDATE")) {
+                sel.setLong(1, listingId);
+                try (ResultSet rs = sel.executeQuery()) {
+                    if (!rs.next()) { conn.rollback(); return false; }
+                    sellerUuid = rs.getString(1);
+                    itemKey = rs.getString(2);
+                }
+            }
+            if (SERVER_UUID.equals(sellerUuid)) { conn.rollback(); return false; }
+            try (PreparedStatement upd = conn.prepareStatement("UPDATE auction_listings SET status='SOLD', buyer_uuid=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='ACTIVE'")) {
+                upd.setString(1, SERVER_UUID);
+                upd.setLong(2, listingId);
+                if (upd.executeUpdate() <= 0) { conn.rollback(); return false; }
+            }
+            try (PreparedStatement credit = conn.prepareStatement("INSERT INTO balances (uuid,money) VALUES (?,?) ON DUPLICATE KEY UPDATE money=money+VALUES(money)")) {
+                credit.setString(1, sellerUuid);
+                credit.setDouble(2, price);
+                credit.executeUpdate();
+            }
+            conn.commit();
+            UUID sellerId = null;
+            try { sellerId = java.util.UUID.fromString(sellerUuid); } catch (Exception ignored) {}
+            if (sellerId != null) {
+                final UUID fsid = sellerId;
+                final double fprice = price;
+                Material boughtMat = Material.matchMaterial(itemKey != null ? itemKey : "");
+                final String itemLabel = boughtMat != null ? this.humanName(boughtMat) : (itemKey != null ? itemKey : "item");
+                this.runAsyncTask(() -> {
+                    Player seller = Bukkit.getPlayer(fsid);
+                    if (seller != null && seller.isOnline()) {
+                        this.runOnPlayerThread(seller, () -> {
+                            this.applyPendingCreditNow(seller);
+                            seller.sendActionBar(this.legacyColorize("&#00BFFFThe Server bought your " + itemLabel + " §7for §a$" + this.fmtMoney(fprice)));
+                            if (this.isSettingEnabledCached(fsid, "music_sound_notifications")) {
+                                seller.playSound(seller.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.6f, 1.2f);
+                            }
+                        });
+                    } else {
+                        this.queuePlayerNotification(fsid, "§aThe Server bought your " + itemLabel + " for §f$" + this.fmtMoney(fprice) + "§a.", "", 180);
+                    }
+                });
+            }
+            return true;
+        } catch (Exception ex) {
+            try { conn.rollback(); } catch (Exception ignored) {}
+            return false;
+        } finally {
+            try { conn.setAutoCommit(true); } catch (Exception ignored) {}
+        }
+    }
+
+    private void postServerAhListing(Connection conn, Material mat, double price, int amount) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 30 DAY))")) {
+            ItemStack item = new ItemStack(mat, Math.max(1, amount));
+            ps.setString(1, SERVER_UUID);
+            ps.setBytes(2, this.serializeItem(item));
+            ps.setString(3, mat.name());
+            ps.setDouble(4, price);
+            ps.executeUpdate();
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Failed posting Server AH listing for " + mat + ": " + ex.getMessage());
+        }
+    }
+
+    private void postServerOrder(Connection conn, Material mat, int totalAmount, double unitPrice) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO order_listings (creator_uuid,item_key,amount_total,amount_filled,unit_price,status,expires_at) VALUES (?,?,?,0,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 80 DAY))")) {
+            ps.setString(1, SERVER_UUID);
+            ps.setString(2, mat.name());
+            ps.setInt(3, totalAmount);
+            ps.setDouble(4, unitPrice);
+            ps.executeUpdate();
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Failed posting Server order for " + mat + ": " + ex.getMessage());
+        }
+    }
+
+    // Server buy-orders pay FAR above true sell value so grinding/redstone-farm
+    // output is lucrative to fulfill. Cheap bulk items get a huge multiplier
+    // (e.g. $6 oak log -> ~$360/log), tapering down for high-value items.
+    private double calcServerOrderPrice(double sellPrice) {
+        // Player-favourable buy prices: cheap farm/natural mats pay BIG so players want to sell to Server.
+        // Logs/dirt/etc sell at ~$1 → Server pays ~$400 each. Gear at $200 → ~$3,200 each. Diamonds 5x.
+        double markup;
+        if (sellPrice <= 1)          markup = 400.0;
+        else if (sellPrice <= 5)     markup = 200.0;
+        else if (sellPrice <= 20)    markup = 80.0;
+        else if (sellPrice <= 100)   markup = 30.0;
+        else if (sellPrice <= 500)   markup = 16.0;
+        else if (sellPrice <= 5000)  markup = 6.0;
+        else if (sellPrice <= 50000) markup = 3.0;
+        else                         markup = 2.0;
+        return Math.max(50.0, Math.round(sellPrice * markup));
+    }
+
+    private double calcServerAhPrice(Material mat, double sellPrice) {
+        String name = mat.name().toUpperCase(Locale.ROOT);
+        double markup;
+        // Rare/endgame items: 30-50×
+        if (name.equals("ELYTRA") || name.equals("DRAGON_EGG") || name.equals("NETHER_STAR")
+                || name.equals("ENCHANTED_GOLDEN_APPLE") || name.equals("TOTEM_OF_UNDYING")
+                || name.equals("TRIDENT") || name.equals("HEART_OF_THE_SEA")
+                || name.startsWith("NETHERITE_") || name.equals("NETHERITE_INGOT")
+                || name.equals("NETHERITE_SCRAP") || name.equals("ANCIENT_DEBRIS")) {
+            markup = 30.0 + this.ecoRandom.nextDouble() * 20.0; // 30-50×
+        }
+        // Diamond tier: 20-35×
+        else if (name.startsWith("DIAMOND_") || name.equals("DIAMOND")
+                || name.equals("EMERALD") || name.equals("BEACON")
+                || name.equals("SHULKER_BOX") || name.contains("SHULKER_BOX")) {
+            markup = 20.0 + this.ecoRandom.nextDouble() * 15.0; // 20-35×
+        }
+        // Mid-value (ores, redstone, lapis, iron gear, potions): 15-25×
+        else if (sellPrice >= 100) {
+            markup = 15.0 + this.ecoRandom.nextDouble() * 10.0; // 15-25×
+        }
+        // Common mats (logs, stone, dirt, food, crops): 10-20×
+        else if (sellPrice >= 10) {
+            markup = 10.0 + this.ecoRandom.nextDouble() * 10.0; // 10-20×
+        }
+        // Cheapest bulk items (dirt, cobble, seeds): 10-15×
+        else {
+            markup = 10.0 + this.ecoRandom.nextDouble() * 5.0; // 10-15×
+        }
+        double base = sellPrice * markup;
+        return Math.max(10.0, Math.round(base));
+    }
+
+    private int postArmorSets(Connection conn) {
+        int posted = 0;
+        try {
+            // Count current Server armor listings per item_key to cap quantity per piece.
+            java.util.Map<String, Integer> currentCounts = new java.util.HashMap<>();
+            try (PreparedStatement ps = conn.prepareStatement("SELECT item_key, COUNT(*) FROM auction_listings WHERE seller_uuid=? AND status='ACTIVE' AND (item_key LIKE '%_HELMET' OR item_key LIKE '%_CHESTPLATE' OR item_key LIKE '%_LEGGINGS' OR item_key LIKE '%_BOOTS') GROUP BY item_key")) {
+                ps.setString(1, SERVER_UUID);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) currentCounts.put(rs.getString(1), rs.getInt(2));
+                }
+            }
+            // Tiers: material prefix + base price per piece.
+            String[][] tiers = {
+                {"IRON",      "8000"},
+                {"DIAMOND",   "120000"},
+                {"NETHERITE", "900000"}
+            };
+            String[] pieces = {"HELMET", "CHESTPLATE", "LEGGINGS", "BOOTS"};
+            for (String[] tier : tiers) {
+                String mat = tier[0];
+                double basePrice = Double.parseDouble(tier[1]);
+                for (String piece : pieces) {
+                    String key = mat + "_" + piece;
+                    Material material = Material.matchMaterial(key);
+                    if (material == null) continue;
+                    int have = currentCounts.getOrDefault(key, 0);
+                    // Maintain up to 2 plain + 2 enchanted of each piece.
+                    if (have >= 4) continue;
+                    boolean enchanted = (have % 2 == 1); // alternate plain / enchanted
+                    ItemStack armor = new ItemStack(material, 1);
+                    double priceMult = 1.0;
+                    if (enchanted) {
+                        this.applyPvpArmorEnchants(armor, piece);
+                        priceMult = mat.equals("NETHERITE") ? 6.0 : mat.equals("DIAMOND") ? 5.0 : 4.0;
+                    }
+                    // ~40% of pieces get a random armor trim (cosmetic premium).
+                    if (this.ecoRandom.nextInt(5) < 2 && this.applyRandomTrim(armor)) {
+                        priceMult *= 1.25;
+                    }
+                    double variance = 0.85 + this.ecoRandom.nextDouble() * 0.3;
+                    double finalPrice = Math.max(100.0, Math.round(basePrice * priceMult * variance));
+                    try (PreparedStatement ps = conn.prepareStatement(
+                            "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 30 DAY))")) {
+                        ps.setString(1, SERVER_UUID);
+                        ps.setBytes(2, this.serializeItem(armor));
+                        ps.setString(3, key);
+                        ps.setDouble(4, finalPrice);
+                        ps.executeUpdate();
+                        posted++;
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("[AutoEco] Failed posting armor: " + ex.getMessage());
+        }
+        return posted;
+    }
+
+    // Picks a random trim pattern + material from the registries and applies it.
+    // Returns false if the item can't be trimmed (no ArmorMeta) or registries are empty.
+    private boolean applyRandomTrim(ItemStack armor) {
+        if (!(armor.getItemMeta() instanceof ArmorMeta)) return false;
+        java.util.List<TrimPattern> patterns = new java.util.ArrayList<>();
+        for (TrimPattern tp : org.bukkit.Registry.TRIM_PATTERN) patterns.add(tp);
+        java.util.List<TrimMaterial> trimMats = new java.util.ArrayList<>();
+        for (TrimMaterial tm : org.bukkit.Registry.TRIM_MATERIAL) trimMats.add(tm);
+        if (patterns.isEmpty() || trimMats.isEmpty()) return false;
+        this.applyTrim(armor,
+                trimMats.get(this.ecoRandom.nextInt(trimMats.size())),
+                patterns.get(this.ecoRandom.nextInt(patterns.size())));
+        return true;
+    }
+
+    private void applyPvpArmorEnchants(ItemStack armor, String piece) {
+        armor.addUnsafeEnchantment(Enchantment.PROTECTION, 4);
+        armor.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
+        armor.addUnsafeEnchantment(Enchantment.MENDING, 1);
+        switch (piece) {
+            case "HELMET" -> armor.addUnsafeEnchantment(Enchantment.RESPIRATION, 3);
+            case "BOOTS" -> {
+                armor.addUnsafeEnchantment(Enchantment.FEATHER_FALLING, 4);
+                armor.addUnsafeEnchantment(Enchantment.DEPTH_STRIDER, 3);
+            }
+            default -> { /* chest/legs: protection set above */ }
+        }
+    }
+
+    private void handleEcobotCommand(Player p, String[] args) {
+        if (args.length == 0) {
+            p.sendMessage("§b/ecobot §7- Auto-ECO commands:");
+            p.sendMessage("§7  status | list <mat> [count] [price] | order <mat> <amt> <price>");
+            p.sendMessage("§7  buy [limit] | deliver [limit] | clear <listings|orders>");
+            p.sendMessage("§7  pause | resume");
+            return;
+        }
+        String sub = args[0].toLowerCase(Locale.ROOT);
+        switch (sub) {
+            case "pause" -> {
+                this.autoEcoPaused = true;
+                p.sendMessage("§e[AutoEco] Auto-runs §cpaused§e.");
+            }
+            case "resume" -> {
+                this.autoEcoPaused = false;
+                p.sendMessage("§a[AutoEco] Auto-runs §aresumed§a.");
+            }
+            case "status" -> this.runAsyncTask(() -> {
+                try (Connection conn = this.openSyncConnection()) {
+                    int ahCount = 0, orderCount = 0;
+                    try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM auction_listings WHERE seller_uuid=? AND status='ACTIVE'")) {
+                        ps.setString(1, SERVER_UUID); try (ResultSet rs = ps.executeQuery()) { if (rs.next()) ahCount = rs.getInt(1); }
+                    }
+                    try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM order_listings WHERE creator_uuid=? AND status='ACTIVE'")) {
+                        ps.setString(1, SERVER_UUID); try (ResultSet rs = ps.executeQuery()) { if (rs.next()) orderCount = rs.getInt(1); }
+                    }
+                    final int fAh = ahCount, fOrd = orderCount;
+                    this.runOnPlayerThread(p, () -> {
+                        p.sendMessage("§b[AutoEco Status]");
+                        p.sendMessage("§7  Active Server AH listings: §f" + fAh);
+                        p.sendMessage("§7  Active Server orders: §f" + fOrd);
+                        p.sendMessage("§7  Auto-runs: " + (autoEcoPaused ? "§cPaused" : "§aRunning"));
+                    });
+                } catch (Exception ex) { this.runOnPlayerThread(p, () -> p.sendMessage("§cStatus query failed: " + ex.getMessage())); }
+            });
+            case "list" -> {
+                if (args.length < 2) { p.sendActionBar(Component.text("§cUsage: /ecobot list <material> [count] [price]")); return; }
+                Material mat = Material.matchMaterial(args[1].toUpperCase(Locale.ROOT).replace("-", "_"));
+                if (mat == null || !mat.isItem()) { p.sendMessage("§cUnknown material: " + args[1]); return; }
+                int count = args.length >= 3 ? Math.max(1, Math.min(50, Integer.parseInt(args[2]))) : 1;
+                double sellPrice = this.sellUnitPrice(mat);
+                double price = (args.length >= 4) ? Double.parseDouble(args[3]) : (sellPrice > 0 ? this.calcServerAhPrice(mat, sellPrice) : 100.0);
+                final Material fMat = mat; final int fCount = count; final double fPrice = price;
+                this.runAsyncTask(() -> {
+                    try (Connection conn = this.openSyncConnection()) {
+                        for (int i = 0; i < fCount; i++) this.postServerAhListing(conn, fMat, fPrice, 1);
+                        this.runOnPlayerThread(p, () -> p.sendMessage("§a[AutoEco] Posted " + fCount + "x " + fMat.name() + " at $" + this.fmtMoney(fPrice) + " each."));
+                    } catch (Exception ex) { this.runOnPlayerThread(p, () -> p.sendMessage("§cFailed: " + ex.getMessage())); }
+                });
+            }
+            case "order" -> {
+                if (args.length < 4) { p.sendActionBar(Component.text("§cUsage: /ecobot order <material> <totalAmount> <unitPrice>")); return; }
+                Material mat = Material.matchMaterial(args[1].toUpperCase(Locale.ROOT).replace("-", "_"));
+                if (mat == null || !mat.isItem()) { p.sendMessage("§cUnknown material: " + args[1]); return; }
+                int totalAmt = Math.max(1, Integer.parseInt(args[2]));
+                double unitPrice = Double.parseDouble(args[3]);
+                final Material fMat = mat; final int fAmt = totalAmt; final double fUP = unitPrice;
+                this.runAsyncTask(() -> {
+                    try (Connection conn = this.openSyncConnection()) {
+                        this.postServerOrder(conn, fMat, fAmt, fUP);
+                        this.runOnPlayerThread(p, () -> p.sendMessage("§a[AutoEco] Created order: " + fAmt + "x " + fMat.name() + " @ $" + this.fmtMoney(fUP) + "/ea."));
+                    } catch (Exception ex) { this.runOnPlayerThread(p, () -> p.sendMessage("§cFailed: " + ex.getMessage())); }
+                });
+            }
+            case "listpass" -> {
+                p.sendMessage("§e[AutoEco] Running list pass...");
+                this.runAsyncTask(() -> { this.runAutoListPass(); this.runOnPlayerThread(p, () -> p.sendMessage("§a[AutoEco] List pass complete.")); });
+            }
+            case "orderpass" -> {
+                p.sendMessage("§e[AutoEco] Running order pass...");
+                this.runAsyncTask(() -> { this.runAutoOrderPass(); this.runOnPlayerThread(p, () -> p.sendMessage("§a[AutoEco] Order pass complete.")); });
+            }
+            case "cycle" -> {
+                p.sendMessage("§e[AutoEco] Running full cycle (list, order, buy, deliver)...");
+                this.runAsyncTask(() -> {
+                    this.runAutoListPass();
+                    this.runAutoOrderPass();
+                    this.runAutoBuyPass(500);
+                    this.runAutoDeliverPass(10000);
+                    this.runOnPlayerThread(p, () -> p.sendMessage("§a[AutoEco] Full cycle complete!"));
+                });
+            }
+            case "buy" -> {
+                int limit = args.length >= 2 ? Math.max(1, Math.min(100, Integer.parseInt(args[1]))) : 20;
+                final int fLimit = limit;
+                this.runAsyncTask(() -> { this.runAutoBuyPass(fLimit); this.runOnPlayerThread(p, () -> p.sendMessage("§a[AutoEco] Buy pass complete (limit=" + fLimit + ").")); });
+            }
+            case "deliver" -> {
+                int limit = args.length >= 2 ? Math.max(1, Math.min(10000, Integer.parseInt(args[1]))) : 20;
+                final int fLimit = limit;
+                this.runAsyncTask(() -> { this.runAutoDeliverPass(fLimit); this.runOnPlayerThread(p, () -> p.sendMessage("§a[AutoEco] Deliver pass complete (limit=" + fLimit + ").")); });
+            }
+            case "clear" -> {
+                if (args.length < 2) { p.sendActionBar(Component.text("§cUsage: /ecobot clear <listings|orders>")); return; }
+                boolean doListings = "listings".equalsIgnoreCase(args[1]) || "all".equalsIgnoreCase(args[1]);
+                boolean doOrders = "orders".equalsIgnoreCase(args[1]) || "all".equalsIgnoreCase(args[1]);
+                this.runAsyncTask(() -> {
+                    int cleared = 0;
+                    try (Connection conn = this.openSyncConnection()) {
+                        if (doListings) {
+                            try (PreparedStatement ps = conn.prepareStatement("UPDATE auction_listings SET status='CANCELLED' WHERE seller_uuid=? AND status='ACTIVE'")) {
+                                ps.setString(1, SERVER_UUID); cleared += ps.executeUpdate();
+                            }
+                        }
+                        if (doOrders) {
+                            try (PreparedStatement ps = conn.prepareStatement("UPDATE order_listings SET status='CANCELLED' WHERE creator_uuid=? AND status='ACTIVE'")) {
+                                ps.setString(1, SERVER_UUID); cleared += ps.executeUpdate();
+                            }
+                        }
+                    } catch (Exception ex) { this.runOnPlayerThread(p, () -> p.sendMessage("§cClear failed: " + ex.getMessage())); return; }
+                    final int fCleared = cleared;
+                    this.runOnPlayerThread(p, () -> p.sendMessage("§a[AutoEco] Cleared " + fCleared + " Server entries."));
+                });
+            }
+            default -> p.sendMessage("§cUnknown subcommand. Use /ecobot for help.");
+        }
     }
 
     private void handleTpaCommand(Player requester, String targetName, String tpaType) {
@@ -17378,7 +18755,7 @@ TabCompleter {
     // ===================== /admin server console ==========================
     // In-game server management for admin/SRADMIN/owner/dev (perm
     // pizzasmp.admin.console). Dialog-based; the panels drive existing
-    // hooks (maintenance, world access, view distance, shop).
+    // hooks (maintenance, world access, view distance, EcoBot, shop).
     // ======================================================================
 
     private void loadWorldAccess() {
@@ -17423,9 +18800,58 @@ TabCompleter {
     // /region — per-world (dimension) maintenance over the world-access engine: closing a region
     // evacuates everyone to the evac target and blocks re-entry (tp/portal/rtp/join) until reopened.
     // This is the in-process maintenance path: no restart, no limbo, other dimensions keep playing.
-    // /region is disabled by default pending a per-world-instances-over-Velocity design. The
-    // machinery (limbo hold, closed_worlds channel) stays intact; flip this to true to re-enable.
+    // TEMP (2026-07-08): /region disabled at owner request until per-world instances over Velocity
+    // are designed. All the machinery (limbo hold, closed_worlds channel) stays intact — flip this
+    // back to true to re-enable.
+    private static final boolean REGION_COMMAND_ENABLED = false;
 
+    private void handleRegionCommand(Player p, String[] args) {
+        if (!p.hasPermission(PERM_ADMIN_CONSOLE)) {
+            p.sendMessage("§cYou do not have permission to use /region.");
+            return;
+        }
+        if (!REGION_COMMAND_ENABLED) {
+            p.sendMessage(this.legacyColorize("&7/region is temporarily disabled while per-world instances over Velocity are designed."));
+            return;
+        }
+        String sub = args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "status";
+        switch (sub) {
+            case "status": case "list": {
+                p.sendMessage(this.legacyColorize("&#00BFFFRegion status &7(evac target: &f" + this.evacTargetWorld + "&7)"));
+                for (org.bukkit.World w : Bukkit.getWorlds()) {
+                    boolean closed = this.disabledWorlds.contains(w.getName());
+                    p.sendMessage(this.legacyColorize(" &7- &f" + this.friendlyWorldName(w.getName()) + "&7: "
+                        + (closed ? "&cCLOSED" : "&aopen") + " &7(" + w.getPlayers().size() + " players)"));
+                }
+                return;
+            }
+            case "start": case "close": {
+                String wn = this.resolveRegionWorld(args.length > 1 ? args[1] : null);
+                if (wn == null) { p.sendMessage("§cUsage: /region start <overworld|nether|end> [reason]"); return; }
+                if (wn.equals(this.evacTargetWorld)) { p.sendMessage("§cCannot close the evac target world (change it in /admin World Access first)."); return; }
+                if (args.length > 2) {
+                    this.worldLockMessage = "&c" + String.join(" ", Arrays.copyOfRange(args, 2, args.length));
+                }
+                if (!this.disabledWorlds.add(wn)) { p.sendMessage("§7That region is already closed."); return; }
+                this.saveWorldAccess();
+                this.publishClosedWorlds();
+                int moved = this.sendWorldToLimbo(wn);   // limbo hold (falls back to spawn-evac if limbo is down)
+                Bukkit.broadcast(this.legacyColorize("&7The &f" + this.friendlyWorldName(wn) + " &7region is closed for maintenance."));
+                p.sendMessage(this.legacyColorize("&#00BFFFClosed &f" + this.friendlyWorldName(wn) + "&7, moved &f" + moved + " &7player(s) to the limbo hold."));
+                return;
+            }
+            case "end": case "open": {
+                String wn = this.resolveRegionWorld(args.length > 1 ? args[1] : null);
+                if (wn == null) { p.sendMessage("§cUsage: /region end <overworld|nether|end>"); return; }
+                if (!this.disabledWorlds.remove(wn)) { p.sendMessage("§7That region is not closed."); return; }
+                this.saveWorldAccess();
+                this.publishClosedWorlds();   // limbo sees the reopen and returns the held players
+                Bukkit.broadcast(this.legacyColorize("&7The &f" + this.friendlyWorldName(wn) + " &7region has reopened."));
+                return;
+            }
+            default: p.sendMessage("§7Usage: §f/region <status|start|end> [world] [reason]");
+        }
+    }
 
     /** Accepts dimension shorthand (east/overworld/nether/end) or an exact loaded-world name. */
     private String resolveRegionWorld(String in) {
@@ -17468,9 +18894,9 @@ TabCompleter {
         try { from.save(); } catch (Exception ignored) {}
         int vd = Bukkit.getViewDistance() + 1;
         final java.io.File limboRegionDir = new java.io.File(this.settings.getString("limbo.region-dir",
-            "../PizzaLimbo/limbo/region"));
+            "/opt/minecraft/PizzaLimbo/limbo/region"));
         final java.io.File limboAdvDir = new java.io.File(this.settings.getString("limbo.advancements-dir",
-            "../PizzaLimbo/limbo/advancements"));
+            "/opt/minecraft/PizzaLimbo/limbo/advancements"));
         final java.io.File mainWorldFolder = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getWorldFolder();
         final java.io.File regionDir = this.regionFolder(from);
         final java.util.List<int[]> copyJobs = new java.util.ArrayList<>();
@@ -17676,7 +19102,7 @@ TabCompleter {
             this.dialogButton(Component.text("Maintenance", DIALOG_BRAND), null, 150, this::openAdminMaintenance),
             this.dialogButton(Component.text("World Access", DIALOG_BRAND), null, 150, this::openAdminWorldAccess),
             this.dialogButton(Component.text("Performance", DIALOG_BRAND), null, 150, this::openAdminPerformance),
-            this.dialogButton(Component.text("Shop", DIALOG_BRAND), null, 150, this::openAdminEcoShop),
+            this.dialogButton(Component.text("EcoBot & Shop", DIALOG_BRAND), null, 150, this::openAdminEcoShop),
             this.dialogButton(Component.text("Economy & Ranks", DIALOG_BRAND), null, 150, this::openAdminEconomy),
             this.dialogButton(Component.text("Diagnostics", DIALOG_BRAND), null, 150, this::openAdminDiagnostics),
             this.dialogButton(Component.text("Feature Flags", DIALOG_BRAND), null, 150, this::openAdminFeatureFlags),
@@ -17698,6 +19124,7 @@ TabCompleter {
         inv.setItem(11, this.namedWithLore(Material.EMERALD_BLOCK, "§aMaintenance OFF", "adm_maint_off", List.of("§7Reopen the server")));
         inv.setItem(12, this.namedWithLore(Material.HOPPER, "§fJoin Queue: " + (queueOn ? "§aON" : "§7OFF"), "adm_queue", List.of("§7Click to toggle")));
         inv.setItem(13, this.namedWithLore(Material.END_PORTAL_FRAME, "§fThe End: " + (this.endRtpClosed ? "§cCLOSED" : "§aOPEN"), "adm_end", List.of("§7Click to toggle")));
+        inv.setItem(14, this.namedWithLore(Material.EMERALD, "§fEcoBot: " + (this.autoEcoPaused ? "§cPaused" : "§aRunning"), "adm_eco", List.of("§7Click to toggle")));
         inv.setItem(15, this.namedWithLore(Material.SPYGLASS, "§fView Distance: §f" + this.currentThrottledVd, "adm_vd_info", List.of("§7Use the dye buttons")));
         inv.setItem(16, this.namedWithLore(Material.LIME_DYE, "§aView Distance +1", "adm_vd_up", List.of()));
         inv.setItem(25, this.namedWithLore(Material.RED_DYE, "§cView Distance -1", "adm_vd_down", List.of()));
@@ -17921,6 +19348,7 @@ TabCompleter {
             case "adm_maint_off" -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "maintenance off"); p.sendMessage("§7Maintenance OFF."); this.openAdminLegacy(p); }
             case "adm_queue" -> { this.settings.set("queue.enabled", !this.settings.getBoolean("queue.enabled", true)); this.saveConfig(); this.openAdminLegacy(p); }
             case "adm_end" -> { this.endRtpClosed = !this.endRtpClosed; this.saveWorldAccess(); this.openAdminLegacy(p); }
+            case "adm_eco" -> { this.autoEcoPaused = !this.autoEcoPaused; this.openAdminLegacy(p); }
             case "adm_vd_up" -> { this.currentThrottledVd = Math.min(VD_MAX, this.currentThrottledVd + 1); this.applyServerVd(this.currentThrottledVd); this.openAdminLegacy(p); }
             case "adm_vd_down" -> { this.currentThrottledVd = Math.max(VD_MIN, this.currentThrottledVd - 1); this.applyServerVd(this.currentThrottledVd); this.openAdminLegacy(p); }
             case "adm_broadcast" -> this.promptAdminInput(p, "Type the broadcast message", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "broadcast " + t); p.sendMessage("§7Broadcast sent."); this.openAdminLegacy(p); });
@@ -18065,6 +19493,11 @@ TabCompleter {
             this.dialogButton(Component.text("Frozen Maint: End", NamedTextColor.GREEN), null, 150, q -> {
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "servermaint end");
                 q.sendActionBar(Component.text("§7Frozen maintenance ended."));
+            }),
+            this.dialogButton(Component.text("Limbo Maint: Full Stop", NamedTextColor.RED), "Transfer players to limbo, then restart the SMP (behind the proxy)", 150, q -> {
+                q.closeDialog();
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "limbomaint start");
+                q.sendActionBar(Component.text("§7Limbo full-stop maintenance starting…"));
             }),
             this.dialogButton(Component.text("Set MOTD", DIALOG_BRAND), "The server-list message shown during maintenance", 150, this::openAdminMaintenanceMotdInput));
         Dialog dialog = this.buildDialog(Component.text("Maintenance", DIALOG_BRAND), body, List.of(),
@@ -18258,7 +19691,15 @@ TabCompleter {
     }
 
     private void openAdminEcoShop(Player p) {
+        java.util.List<DialogBody> body = List.of(
+            this.kv("EcoBot auto-runs:", this.autoEcoPaused ? "Paused" : "Running",
+                this.autoEcoPaused ? NamedTextColor.RED : NamedTextColor.GREEN));
         java.util.List<ActionButton> buttons = List.of(
+            this.dialogButton(Component.text(this.autoEcoPaused ? "Resume EcoBot" : "Pause EcoBot",
+                    this.autoEcoPaused ? NamedTextColor.GREEN : NamedTextColor.YELLOW), "Toggle EcoBot auto list/order/buy/deliver passes", 150, q -> {
+                this.autoEcoPaused = !this.autoEcoPaused;
+                this.openAdminEcoShop(q);
+            }),
             this.dialogButton(Component.text("Reload Sell Config", DIALOG_BRAND), "Reload sell/worth pricing", 150, q -> {
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "sell reload");
                 q.sendActionBar(Component.text("§7Reloaded sell config."));
@@ -18267,7 +19708,7 @@ TabCompleter {
                 q.closeDialog();
                 this.openShardShopMenu(q);
             }));
-        Dialog dialog = this.buildDialog(Component.text("Shop", DIALOG_BRAND), List.of(), List.of(),
+        Dialog dialog = this.buildDialog(Component.text("EcoBot & Shop", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(1)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
         p.showDialog(dialog);
@@ -18836,7 +20277,7 @@ TabCompleter {
     private void startLimboMaintenance(CommandSender by) {
         String limbo = this.settings.getString("limbo.server-name", "limbo");
         java.io.File limboRegionDir = new java.io.File(this.settings.getString("limbo.region-dir",
-            "../PizzaLimbo/limbo/region"));
+            "/opt/minecraft/PizzaLimbo/limbo/region"));
         int vd = Bukkit.getViewDistance() + 1;   // full player view distance (+1 margin)
         java.util.List<Player> online = new java.util.ArrayList<>(Bukkit.getOnlinePlayers());
         // Flush each occupied world to disk so the region files we copy are current.
@@ -18860,7 +20301,7 @@ TabCompleter {
         final java.util.List<int[]> copyJobs = new java.util.ArrayList<>();   // {rxMin,rxMax,rzMin,rzMax}
         final java.util.List<java.io.File> advSrc = new java.util.ArrayList<>();   // per-player advancements .json
         final java.io.File limboAdvDir = new java.io.File(this.settings.getString("limbo.advancements-dir",
-            "../PizzaLimbo/limbo/advancements"));
+            "/opt/minecraft/PizzaLimbo/limbo/advancements"));
         final java.io.File mainWorldFolder = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getWorldFolder();
         for (Player p : online) {
             try {
@@ -18941,32 +20382,19 @@ TabCompleter {
         }, 10L, 10L);
     }
 
-    // /branding [status] | /branding set <profile>
+    // /branding [status] | /branding set <pizzasmp|horizonsmp>
     // Writes active: into branding.yml. The swap fully applies on the next (limbo) restart;
     // a live loadBranding() refreshes colours/labels for anything rendered after the flip.
     private void handleBrandingCommand(CommandSender sender, String[] args) {
-        // Brand switching is only meaningful with more than one profile (dual branding). With a
-        // single profile there is nothing to switch to, so the command is disabled until a second
-        // profile is added to branding.yml.
-        {
-            File bf = new File(this.getDataFolder(), "branding.yml");
-            org.bukkit.configuration.file.YamlConfiguration by = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(bf);
-            int profileCount = by.isConfigurationSection("profiles") ? by.getConfigurationSection("profiles").getKeys(false).size() : 0;
-            if (profileCount < 2) {
-                sender.sendMessage(this.legacyColorize("&7Brand switching is disabled: only one brand profile is configured. "
-                    + "Add a second profile to &f" + bf.getName() + " &7to enable /branding."));
-                return;
-            }
-        }
         String sub = args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "status";
         if ("status".equals(sub) || "info".equals(sub)) {
             sender.sendMessage(this.legacyColorize("&#00BFFFBranding: &f" + this.brandActive
                 + " &7(" + this.brandDisplay + ", primary #" + this.brandColorHex("primary") + ")"));
-            sender.sendMessage(this.legacyColorize("&7Use &#00BFFF/branding set <profile>&7, then restart (limbo) to fully apply."));
+            sender.sendMessage(this.legacyColorize("&7Use &#00BFFF/branding set <pizzasmp|horizonsmp>&7, then restart (limbo) to fully apply."));
             return;
         }
         if ("set".equals(sub)) {
-            if (args.length < 2) { sender.sendMessage("§cUsage: /branding set <profile>"); return; }
+            if (args.length < 2) { sender.sendMessage("§cUsage: /branding set <pizzasmp|horizonsmp>"); return; }
             String target = args[1].toLowerCase(Locale.ROOT);
             File f = new File(this.getDataFolder(), "branding.yml");
             org.bukkit.configuration.file.YamlConfiguration y = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
@@ -18983,7 +20411,7 @@ TabCompleter {
             this.runAsyncTask(() -> {
                 try {
                     Process pr = new ProcessBuilder("bash",
-                        "scripts/apply-branding.sh", prof)
+                        "/opt/minecraft/PizzaSMP/scripts/apply-branding.sh", prof)
                         .redirectErrorStream(true).start();
                     pr.waitFor();
                 } catch (Exception ex) {
@@ -19002,7 +20430,7 @@ TabCompleter {
                 + "&7. External artifacts + limbo applied live; SMP icon/MOTD apply on its next restart."));
             return;
         }
-        sender.sendMessage("§7Usage: §f/branding [status] §7| §f/branding set <profile>");
+        sender.sendMessage("§7Usage: §f/branding [status] §7| §f/branding set <pizzasmp|horizonsmp>");
     }
 
     private void handleLimboMaintCommand(CommandSender sender, String[] args) {
@@ -19033,7 +20461,7 @@ TabCompleter {
     private void spawnRelaunch() {
         try {
             new ProcessBuilder("bash", "-c",
-                "setsid bash scripts/admin-restart.sh >/dev/null 2>&1 < /dev/null &")
+                "setsid bash /opt/minecraft/PizzaSMP/scripts/admin-restart.sh >/dev/null 2>&1 < /dev/null &")
                 .start();
         } catch (Exception ex) {
             this.getLogger().warning("Failed to spawn relaunch helper: " + ex.getMessage());
@@ -19044,6 +20472,8 @@ TabCompleter {
     private void openAdminTuning(Player p) {
         String[][] keys = {
             {"combat.tag_seconds", "Combat tag (s)", "15"},
+            {"rtp.cooldown-seconds", "RTP cooldown (s)", "0"},
+            {"rtpq.timeout-seconds", "RTP queue timeout (s)", "30"},
             {"autosave.online_interval_seconds", "Autosave online (s)", "180"},
             {"autosave.empty_interval_seconds", "Autosave empty (s)", "600"},
             {"queue.capacity_threshold", "Queue threshold", "45"},
