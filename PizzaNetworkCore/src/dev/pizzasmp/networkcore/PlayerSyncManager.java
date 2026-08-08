@@ -202,6 +202,7 @@ final class PlayerSyncManager {
             this.applyingJoinState.remove(player.getUniqueId());
             return;
         }
+        this.clearStaleDeathScreen(player);
         try {
             World world;
             if (snapshot != null) {
@@ -244,6 +245,38 @@ final class PlayerSyncManager {
         finally {
             this.applyingJoinState.remove(player.getUniqueId());
         }
+    }
+
+    /**
+     * Dismiss a death screen left behind on another backend.
+     *
+     * On a proxy network you can die on one backend and leave before clicking Respawn —
+     * by switching servers, or by quitting outright. That backend never receives the
+     * respawn packet, so it saves your player data still dead. Come back to it later and
+     * vanilla faithfully restores that state: you are greeted by the death screen you
+     * walked away from, on a server you have just joined.
+     *
+     * Respawning on arrival is the fix. The player is dead either way; the only question
+     * is whether they have to click through a stale screen to find out. Note that health
+     * restoration alone does not do this — the client is already showing the screen and
+     * needs an actual respawn to leave it.
+     */
+    private void clearStaleDeathScreen(Player player) {
+        if (player == null || !player.isOnline() || !player.isDead()) {
+            return;
+        }
+        this.plugin.getLogger().info("[sync] " + player.getName()
+            + " joined " + this.serverName + " still dead from a previous session — respawning.");
+        this.runOnPlayerLater(player, () -> {
+            if (player.isOnline() && player.isDead()) {
+                try {
+                    player.spigot().respawn();
+                } catch (Throwable t) {
+                    this.plugin.getLogger().warning("Failed clearing stale death screen for "
+                        + player.getName() + ": " + t.getMessage());
+                }
+            }
+        }, 1L);
     }
 
     private void applyPendingAction(Player player, String pendingAction) {
@@ -732,6 +765,16 @@ final class PlayerSyncManager {
         }
     }
 
+    private void reassertGameMode(Player player, GameMode desired, long delayTicks) {
+        this.runOnPlayerLater(player, () -> {
+            if (player.isOnline() && player.getGameMode() != desired) {
+                this.plugin.getLogger().info("[sync] " + player.getName() + " gamemode drifted to "
+                    + player.getGameMode().name() + " on join; restoring synced " + desired.name() + ".");
+                player.setGameMode(desired);
+            }
+        }, delayTicks);
+    }
+
     private void applyInventoryAndState(Player player, SyncSnapshot snapshot) {
         ItemStack[] ender;
         GameMode currentMode;
@@ -740,7 +783,16 @@ final class PlayerSyncManager {
                 if (this.debugStateLogging) {
                     this.plugin.getLogger().info("[sync-debug] stage=set_gamemode uuid=" + String.valueOf(player.getUniqueId()) + " server=" + this.serverName + " gm=" + snapshot.gameMode);
                 }
-                player.setGameMode(GameMode.valueOf((String)snapshot.gameMode));
+                GameMode desired = GameMode.valueOf((String)snapshot.gameMode);
+                player.setGameMode(desired);
+                // RE-ASSERT, TWICE. Setting the gamemode during join is a race: anything
+                // else with a join handler (spawn rules, Essentials, a world default, or a
+                // PlayerGameModeChangeEvent listener that cancels ours) can run after us
+                // and put the player back. Re-checking a tick later and again a second
+                // later means the synced mode is what survives, rather than whichever
+                // plugin happened to be last. A no-op when nothing fought us.
+                this.reassertGameMode(player, desired, 1L);
+                this.reassertGameMode(player, desired, 20L);
             }
             catch (IllegalArgumentException illegalArgumentException) {
                 // empty catch block

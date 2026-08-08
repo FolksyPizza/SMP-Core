@@ -75,6 +75,21 @@ alone — do not "fix" the ordering.
    ~60,000,000-wide default, and RTP derived from that drops players into ungenerated
    terrain where nothing streams in — an empty void.
 
+Rule 1 is handled in code, so the network is correct whatever your zones are. Give the
+database container the same zone as the host anyway (`configs/database-docker-compose.yml`
+takes `TZ` from `scripts/lib.sh`) so log timestamps and row timestamps line up when you
+read them side by side.
+
+### A death-screen quirk you would otherwise hit
+
+A player who dies on one backend and leaves before clicking Respawn — by switching servers
+or by quitting — leaves that backend holding them dead, because it never received the
+respawn packet. Return later and vanilla restores exactly that: the death screen they
+walked away from, on a server they just joined. PizzaNetworkCore respawns a player who
+arrives dead. Worth knowing about if you write your own join handling, because restoring
+health does not clear it — the client is already showing the screen and needs a real
+respawn.
+
 ## Requirements
 
 - Paper 1.21.x on each backend (built and run against 1.21.11)

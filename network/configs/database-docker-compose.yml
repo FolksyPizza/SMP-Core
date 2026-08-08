@@ -1,0 +1,28 @@
+services:
+  mariadb:
+    image: mariadb:11.4
+    container_name: pizzasmp-mariadb
+    restart: unless-stopped
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    environment:
+      # ONE CLOCK FOR THE WHOLE STACK.
+      #
+      # This container defaulted to UTC while the host (and therefore every JVM) ran
+      # America/New_York. Server logs and database rows then disagreed by four hours,
+      # which is not just confusing to read: any timestamp a plugin computed in Java and
+      # wrote here landed in the DB's past, so `expires_at > CURRENT_TIMESTAMP` never
+      # matched and the network read as though nobody was online anywhere.
+      #
+      # The plugins no longer depend on this - expiries are computed with the database's
+      # own clock now - but matching the host means log timestamps and row timestamps line
+      # up when you are reading them side by side. TZ is exported from /etc/timezone by
+      # scripts/lib.sh, so a machine in another zone gets its own, not a hardcoded one.
+      TZ: "${TZ:-UTC}"
+      MARIADB_ROOT_PASSWORD: "${MARIADB_ROOT_PASSWORD}"
+      MARIADB_DATABASE: "${MARIADB_DATABASE:-pizzasmp}"
+      MARIADB_USER: "${MARIADB_USER:-pizzasmp}"
+      MARIADB_PASSWORD: "${MARIADB_PASSWORD}"
+    volumes:
+      - ./data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d

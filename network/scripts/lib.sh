@@ -27,6 +27,17 @@ if [[ -f "$DB_ENV" ]]; then
 fi
 JAVA_BIN="${JAVA_BIN:-java}"
 
+# One clock across the stack: the JVMs inherit the host zone, so hand the same zone to the
+# database container instead of letting it default to UTC. See database/docker-compose.yml.
+if [[ -z "${TZ:-}" ]]; then
+  if [[ -f /etc/timezone ]]; then
+    TZ="$(cat /etc/timezone)"
+  elif command -v timedatectl >/dev/null 2>&1; then
+    TZ="$(timedatectl show -p Timezone --value 2>/dev/null)"
+  fi
+fi
+export TZ="${TZ:-UTC}"
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "Missing command: $1" >&2
