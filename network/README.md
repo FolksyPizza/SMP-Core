@@ -146,7 +146,7 @@ lists, so adding a backend there is enough to make every script aware of it.
 | --- | --- |
 | `./scripts/tui.sh` | Cursor-driven menu over everything below |
 | `./scripts/build_from_repo.sh` | Compile every plugin from source |
-| `./scripts/deploy_plugins.sh --check` | Report which backends have drifted from the build |
+| `./scripts/deploy_plugins.sh --check` | Report jar drift, missing third-party plugins, and orphaned config folders |
 | `./scripts/deploy_plugins.sh` | Deploy jars, platform-routed (Paper vs Velocity) |
 | `./scripts/deploy_plugins.sh --to dev` | Deploy to one backend — the promotion step |
 | `./scripts/backend_maint.sh plan <backend>` | Print the rolling-restart plan without doing it |
@@ -159,6 +159,20 @@ power the lobby double jump, and its `lockAllWorld` option makes the *whole worl
 zone — so on survival it hands every player flight. It installs on lobby and maintenance
 only, and is actively removed elsewhere so an older all-servers deploy cannot leave a copy
 behind.
+
+### Check that third-party plugins are actually installed
+
+`scripts/plugin-manifest.env` lists the third-party jars each backend needs, and
+`--check` reports any that are absent, plus data folders sitting there with no jar beside
+them.
+
+This is worth running after any hand-install. Our own plugins are built and copied from one
+place, so they cannot quietly drift; hand-installed third-party jars are exactly the ones
+that go missing on a single backend and stay missing. The failure that motivated it: the
+amethyst-tools plugin was absent from survival while PizzaNetworkCore still sold its tools
+for $1.5M and delivered them by dispatching a command that plugin owns. With the plugin
+gone the command did nothing, so the purchase took the money and handed over nothing — and
+no error was logged anywhere, because dispatching a non-existent command is not an error.
 
 ## Maintenance model
 

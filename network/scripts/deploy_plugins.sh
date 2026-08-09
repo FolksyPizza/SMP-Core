@@ -84,6 +84,67 @@ if (( CHECK == 1 )); then
     n="$(find "$ROOT/$b/world/datapacks/pizzasmp_menu" -type f 2>/dev/null | wc -l)"
     echo "  $(printf '%-14s' "$b") pizzasmp_menu files=$n$([[ "$n" == "0" ]] && echo '   <-- MISSING' || true)"
   done
+
+  # Third-party plugins. These are installed by hand rather than built, which is precisely
+  # why one can go missing on a single backend and stay missing: nothing rebuilds it and
+  # nothing complains. aAmethyst was absent from survival while PizzaNetworkCore happily
+  # charged $1.5M for tools it then could not deliver.
+  echo "=== third-party plugins (scripts/plugin-manifest.env) ==="
+  if [[ -f "$ROOT/scripts/plugin-manifest.env" ]]; then
+    # shellcheck disable=SC1091
+    source "$ROOT/scripts/plugin-manifest.env"
+    missing_total=0
+    for b in $(all_backends) velocity; do
+      [[ -d "$ROOT/$b/plugins" ]] || continue
+      if [[ "$b" == "velocity" ]]; then wanted="${REQUIRED_velocity:-}"
+      else
+        eval "extra=\${REQUIRED_$b:-}"
+        wanted="$REQUIRED_ALL $extra"
+      fi
+      missing=""
+      for want in $wanted; do
+        ls "$ROOT/$b/plugins/$want"*.jar >/dev/null 2>&1 || missing="$missing $want"
+      done
+      if [[ -n "$missing" ]]; then
+        echo "  $(printf '%-14s' "$b") MISSING:$missing"
+        missing_total=$((missing_total + 1))
+      else
+        echo "  $(printf '%-14s' "$b") ok"
+      fi
+    done
+    # A data folder with no jar beside it is the fingerprint of an uninstalled plugin —
+    # which is exactly how aAmethyst hid. Matching has to be case-insensitive (WorldEdit vs
+    # worldedit-bukkit.jar) and alias-aware (a plugin's data folder often does not share a
+    # name with its jar), otherwise the list is all false positives and gets ignored.
+    echo "=== orphaned data folders (config present, jar absent) ==="
+    # data-folder-name -> jar-name-stem it actually belongs to
+    folder_alias() {
+      case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+        enderchestexpander) echo "pizzaenderchest" ;;
+        punishdrop)         echo "pizzapunishment" ;;
+        aamethyst)          echo "amethyst" ;;
+        *)                  echo "$1" ;;
+      esac
+    }
+    for b in $(all_backends) velocity; do
+      [[ -d "$ROOT/$b/plugins" ]] || continue
+      # Jar stems on this backend, lowercased, for case-insensitive prefix matching.
+      jars="$(ls "$ROOT/$b/plugins"/*.jar 2>/dev/null | xargs -r -n1 basename | sed 's/\.jar$//' | tr 'A-Z' 'a-z')"
+      orphans=""
+      for d in "$ROOT/$b/plugins"/*/; do
+        n="$(basename "$d")"
+        # Shared library folders and disabled leftovers are not evidence of anything.
+        case "$n" in .paper-remapped|bStats|spark|*.disabled.*) continue ;; esac
+        key="$(folder_alias "$n" | tr 'A-Z' 'a-z')"
+        printf '%s\n' "$jars" | grep -q "^$key" || orphans="$orphans $n"
+      done
+      [[ -n "$orphans" ]] && echo "  $(printf '%-14s' "$b")$orphans"
+    done
+    echo
+    (( missing_total > 0 )) && echo "  ^ a MISSING third-party plugin means its features silently do nothing."
+  else
+    echo "  (no manifest — create scripts/plugin-manifest.env to enable this check)"
+  fi
   exit 0
 fi
 
