@@ -286,8 +286,52 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private File maintenanceTransferStateFile;
     private FileConfiguration maintenanceTransferStateConfig;
 
+    /**
+     * Shared storage for state that must follow a player between backends.
+     *
+     * Subscription tiers, staff mode and night vision used to live in this plugin's own
+     * YAML files, which means one copy per backend that no other backend can see. A paid
+     * Pizza++ granted on survival simply did not exist on the lobby. SuiteStorage keeps the
+     * same YAML-document shape but puts the document in the database when configured for
+     * it, so the migration is a change of where, not of what.
+     */
+    private dev.pizzasmp.common.SuiteStorage storage;
+
+    /**
+     * One-shot import of a legacy per-server file into shared storage.
+     *
+     * Only fires when shared storage holds nothing for that document and the old file has
+     * content, so it cannot clobber good shared data with a stale local copy — and running
+     * it on several backends is safe, because the first one to import wins and the rest
+     * find the document already populated. The file is left on disk untouched as a manual
+     * fallback.
+     */
+    private org.bukkit.configuration.file.YamlConfiguration loadSharedDoc(String docName, String legacyFileName) {
+        org.bukkit.configuration.file.YamlConfiguration shared = this.storage.loadDoc(docName);
+        if (!shared.getKeys(true).isEmpty()) {
+            return shared;
+        }
+        File legacy = new File(getDataFolder(), legacyFileName);
+        if (!legacy.isFile()) {
+            return shared;
+        }
+        org.bukkit.configuration.file.YamlConfiguration local =
+            org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(legacy);
+        if (local.getKeys(true).isEmpty()) {
+            return shared;
+        }
+        getLogger().info("[storage] importing " + legacyFileName + " into shared storage (first run).");
+        this.storage.saveDoc(docName, local);
+        return local;
+    }
+
     @Override
     public void onEnable() {
+        this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "admintools");
+        if (!this.storage.isMysql()) {
+            getLogger().warning("[storage] running on local files: subscription tiers, staff mode and "
+                + "night vision will NOT be shared between backends. Set storage.backend: mysql to share them.");
+        }
         registerCommand("gtp", true);
         registerCommand("homes", false);
         registerCommand("menu", false);
@@ -750,25 +794,36 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private File pizzaPlusSubsFile;
     private FileConfiguration pizzaPlusSubsConfig;
 
+    // Subscription tiers are an entitlement someone paid for, so they are the least
+    // acceptable thing to keep per-server: the perks simply vanished on other backends.
+    private static final String DOC_PIZZAPLUS_SUBS = "pizzaplus-subs";
+
     private void initPizzaPlusSubscriptions() {
-        pizzaPlusSubsFile = new File(getDataFolder(), "pizzaplus-subs.yml");
-        if (pizzaPlusSubsFile.getParentFile() != null && !pizzaPlusSubsFile.getParentFile().exists()) {
-            pizzaPlusSubsFile.getParentFile().mkdirs();
-        }
-        if (!pizzaPlusSubsFile.exists()) {
-            try { pizzaPlusSubsFile.createNewFile(); } catch (Exception ignored) {}
-        }
-        pizzaPlusSubsConfig = YamlConfiguration.loadConfiguration(pizzaPlusSubsFile);
+        pizzaPlusSubsConfig = loadSharedDoc(DOC_PIZZAPLUS_SUBS, "pizzaplus-subs.yml");
     }
 
     private void savePizzaPlusSubscriptions() {
-        if (pizzaPlusSubsConfig == null || pizzaPlusSubsFile == null) return;
-        try { pizzaPlusSubsConfig.save(pizzaPlusSubsFile); } catch (Exception ex) {
-            getLogger().warning("Failed saving pizzaplus-subs.yml: " + ex.getMessage());
+        if (pizzaPlusSubsConfig == null) return;
+        this.storage.saveDoc(DOC_PIZZAPLUS_SUBS, (YamlConfiguration) pizzaPlusSubsConfig);
+    }
+
+    /**
+     * Re-read tiers from shared storage.
+     *
+     * Another backend can grant or revoke a subscription at any time, and this process
+     * would otherwise keep serving whatever it read at boot. Cheap enough to call before
+     * any decision that depends on the tier.
+     */
+    private void refreshPizzaPlusSubscriptions() {
+        YamlConfiguration fresh = this.storage.loadDoc(DOC_PIZZAPLUS_SUBS);
+        if (!fresh.getKeys(true).isEmpty() || pizzaPlusSubsConfig == null) {
+            pizzaPlusSubsConfig = fresh;
         }
     }
 
     private long getPizzaPlusExpiry(UUID uuid) {
+        // Another backend may have granted or extended this since we last read it.
+        refreshPizzaPlusSubscriptions();
         return pizzaPlusSubsConfig == null ? 0L : pizzaPlusSubsConfig.getLong("expiry." + uuid.toString(), 0L);
     }
 
@@ -1954,28 +2009,19 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return true;
     }
 
-    private File nvStateFile() {
-        return new File(getDataFolder(), "nv-players.yml");
-    }
+    private static final String DOC_NV_PLAYERS = "nv-players";
 
     private void saveNvState() {
-        try {
-            File f = nvStateFile();
-            FileConfiguration cfg = new YamlConfiguration();
-            java.util.List<String> ids = new java.util.ArrayList<>();
-            for (UUID id : this.nvEnabled) ids.add(id.toString());
-            cfg.set("players", ids);
-            cfg.save(f);
-        } catch (Exception ex) {
-            getLogger().warning("Failed saving NV state: " + ex.getMessage());
-        }
+        YamlConfiguration cfg = new YamlConfiguration();
+        java.util.List<String> ids = new java.util.ArrayList<>();
+        for (UUID id : this.nvEnabled) ids.add(id.toString());
+        cfg.set("players", ids);
+        this.storage.saveDoc(DOC_NV_PLAYERS, cfg);
     }
 
     private void loadNvState() {
         try {
-            File f = nvStateFile();
-            if (!f.exists()) return;
-            FileConfiguration cfg = YamlConfiguration.loadConfiguration(f);
+            FileConfiguration cfg = loadSharedDoc(DOC_NV_PLAYERS, "nv-players.yml");
             for (String s : cfg.getStringList("players")) {
                 try { this.nvEnabled.add(UUID.fromString(s)); } catch (Exception ignored) {}
             }
@@ -4688,31 +4734,23 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return player.hasPermission(PERM_PLUGIN_ADMIN) && !staffMode.contains(player.getUniqueId());
     }
 
+    // Staff mode is a property of the person, not of the server they happen to be on;
+    // keeping it local meant /sfmode silently undid itself on every transfer.
+    private static final String DOC_STAFF_MODE = "staffmode";
+
     private void loadStaffMode() {
-        staffModeFile = new File(getDataFolder(), "staffmode.yml");
-        if (!staffModeFile.exists()) {
-            return;
-        }
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(staffModeFile);
+        FileConfiguration cfg = loadSharedDoc(DOC_STAFF_MODE, "staffmode.yml");
         for (String s : cfg.getStringList("staff-mode")) {
             try { staffMode.add(UUID.fromString(s)); } catch (Exception ignored) {}
         }
     }
 
     private void saveStaffMode() {
-        if (staffModeFile == null) {
-            staffModeFile = new File(getDataFolder(), "staffmode.yml");
-        }
-        FileConfiguration cfg = new YamlConfiguration();
+        YamlConfiguration cfg = new YamlConfiguration();
         List<String> ids = new ArrayList<>();
         for (UUID u : staffMode) ids.add(u.toString());
         cfg.set("staff-mode", ids);
-        try {
-            getDataFolder().mkdirs();
-            cfg.save(staffModeFile);
-        } catch (Exception ex) {
-            getLogger().warning("Failed saving staffmode.yml: " + ex.getMessage());
-        }
+        this.storage.saveDoc(DOC_STAFF_MODE, cfg);
     }
 
     /** /gmcbypass <player> — CONSOLE ONLY. Grants one creative-mode change that bypasses the ban. */

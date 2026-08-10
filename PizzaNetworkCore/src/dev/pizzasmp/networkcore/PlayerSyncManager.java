@@ -291,6 +291,14 @@ final class PlayerSyncManager {
             rtpCore.rtpLog("pending_apply", "player=" + player.getName()
                 + " syncServer=" + this.serverName + " action=" + pendingAction);
         }
+        // Cross-server RTP over the database: the destination was resolved while the player
+        // was in transit, so this just collects the answer. See requestCrossServerRtp.
+        if ("RTPDB".equals(pendingAction)) {
+            if (this.plugin instanceof PizzaNetworkCore core) {
+                core.applyResolvedRtp(player, 0);
+            }
+            return;
+        }
         // ORDER MATTERS. "RTPAT:" also starts with "RTP", so the search-on-arrival branch
         // below used to swallow it and run a fresh random search instead of placing the
         // player at the coordinates the destination backend had already resolved — the

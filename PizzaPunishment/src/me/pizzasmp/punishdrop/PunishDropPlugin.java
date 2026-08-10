@@ -3,9 +3,7 @@ package me.pizzasmp.punishdrop;
 /*
  * PunishDropPlugin — part of the PizzaSMP plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Licensed under the PizzaSMP Non-Commercial Source License v1.0 (see LICENSE).
- * Non-commercial use only; no sale/resale without written permission; AGPL-style
- * share-alike + network source disclosure. Provided AS IS, without warranty.
+ * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */
 
 import java.io.File;
@@ -114,12 +112,45 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     private final ConcurrentHashMap<String, PendingBulkClear> pendingBulkClearConfirms = new ConcurrentHashMap<>();
     private final SecureRandom idRandom = new SecureRandom();
 
+    /**
+     * Shared storage for moderation state.
+     *
+     * Offence counts drive the escalation ladder (7d, 30d, then a year), so keeping them
+     * per-server meant the ladder reset every time a player changed backend — a repeat
+     * offender looked like a first-timer. Ban records and pending unbans have the same
+     * problem: LibertyBans itself is already shared, but this plugin's parallel bookkeeping
+     * was not, so staff saw a partial history depending on where they were standing.
+     */
+    private dev.pizzasmp.common.SuiteStorage storage;
+    private static final String DOC_OFFENSES = "offenses";
+    private static final String DOC_RECORDS = "ban-records";
+    private static final String DOC_PENDING = "pending-unbans";
+
+    /** See PizzaAdminTools.loadSharedDoc — same one-shot, non-clobbering import. */
+    private YamlConfiguration loadSharedDoc(String docName, String legacyFileName) {
+        YamlConfiguration shared = this.storage.loadDoc(docName);
+        if (!shared.getKeys(true).isEmpty()) return shared;
+        File legacy = new File(getDataFolder(), legacyFileName);
+        if (!legacy.isFile()) return shared;
+        YamlConfiguration local = YamlConfiguration.loadConfiguration(legacy);
+        if (local.getKeys(true).isEmpty()) return shared;
+        getLogger().info("[storage] importing " + legacyFileName + " into shared storage (first run).");
+        this.storage.saveDoc(docName, local);
+        return local;
+    }
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
         reloadConfig();
         getConfig().options().copyDefaults(true);
         saveConfig();
+        this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "punishment");
+        if (!this.storage.isMysql()) {
+            getLogger().warning("[storage] running on local files: offence counts and ban records will "
+                + "NOT be shared between backends, so punishment escalation resets on a server hop. "
+                + "Set storage.backend: mysql to share them.");
+        }
         loadFlightWhitelist();
         loadPunishmentPresets();
         initLocations();
@@ -192,13 +223,13 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private void initPendingActions() {
-        pendingActionsFile = new File(getDataFolder(), "pending-unbans.yml");
-        pendingActionsConfig = YamlConfiguration.loadConfiguration(pendingActionsFile);
+        pendingActionsConfig = loadSharedDoc(DOC_PENDING, "pending-unbans.yml");
     }
 
     private void initRecords() {
-        recordsFile = new File(getDataFolder(), "ban-records.yml");
-        recordsConfig = YamlConfiguration.loadConfiguration(recordsFile);
+        recordsConfig = loadSharedDoc(DOC_RECORDS, "ban-records.yml");
+        // The audit LOG stays local on purpose: it is an append-only forensic trail of what
+        // this particular backend did, and merging those across servers would lose that.
         auditFile = new File(getDataFolder(), "ban-audit.log");
         records.clear();
 
@@ -2794,20 +2825,25 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     // pizza_combat scoreboard tag (same rule as /punish).
 
     private void initOffenses() {
-        offensesFile = new File(getDataFolder(), "offenses.yml");
-        if (offensesFile.getParentFile() != null && !offensesFile.getParentFile().exists()) {
-            offensesFile.getParentFile().mkdirs();
-        }
-        if (!offensesFile.exists()) {
-            try { offensesFile.createNewFile(); } catch (Exception ignored) {}
-        }
-        offensesConfig = YamlConfiguration.loadConfiguration(offensesFile);
+        offensesConfig = loadSharedDoc(DOC_OFFENSES, "offenses.yml");
     }
 
     private void saveOffenses() {
-        if (offensesConfig == null || offensesFile == null) return;
-        try { offensesConfig.save(offensesFile); } catch (Exception ex) {
-            getLogger().warning("Failed saving offenses.yml: " + ex.getMessage());
+        if (offensesConfig == null) return;
+        this.storage.saveDoc(DOC_OFFENSES, (YamlConfiguration) offensesConfig);
+    }
+
+    /**
+     * Re-read offence counts before making an escalation decision.
+     *
+     * Another backend may have added a strike since this process last loaded the document,
+     * and escalating on a stale count is exactly the bug that keeping these per-server
+     * caused in the first place.
+     */
+    private void refreshOffenses() {
+        YamlConfiguration fresh = this.storage.loadDoc(DOC_OFFENSES);
+        if (!fresh.getKeys(true).isEmpty() || offensesConfig == null) {
+            offensesConfig = fresh;
         }
     }
 
@@ -2817,6 +2853,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private int currentStrikes(String key) {
+        // Escalation must see strikes added on other backends, or a repeat offender reads
+        // as a first-timer purely because they changed server.
+        refreshOffenses();
         return offensesConfig == null ? 0 : Math.max(0, offensesConfig.getInt("counts." + key, 0));
     }
 
@@ -3273,19 +3312,11 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private void savePendingActions() {
-        try {
-            pendingActionsConfig.save(pendingActionsFile);
-        } catch (IOException e) {
-            getLogger().warning("Failed to save pending actions: " + e.getMessage());
-        }
+        this.storage.saveDoc(DOC_PENDING, (YamlConfiguration) pendingActionsConfig);
     }
 
     private void saveRecords() {
-        try {
-            recordsConfig.save(recordsFile);
-        } catch (IOException e) {
-            getLogger().warning("Failed to save punishment records: " + e.getMessage());
-        }
+        this.storage.saveDoc(DOC_RECORDS, (YamlConfiguration) recordsConfig);
     }
 
     private void fillInventory(Inventory inventory, Material material, String name) {

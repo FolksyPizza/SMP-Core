@@ -17,8 +17,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$ROOT/SMP"
 TOOLS="$REPO/tools"
 OUT="$ROOT/build-output"
-JAVAC="${JAVA_HOME:-/opt/.sdkman/candidates/java/current}/bin/javac"
-JAR="${JAVA_HOME:-/opt/.sdkman/candidates/java/current}/bin/jar"
+# Resolve the JDK from JAVA_HOME, else from whatever javac is on PATH. Never hardcode a
+# path: this script ships to other people's machines, where yours does not exist.
+if [ -n "${JAVA_HOME:-}" ]; then
+  JAVAC="$JAVA_HOME/bin/javac"; JAR="$JAVA_HOME/bin/jar"
+else
+  JAVAC="$(command -v javac)"; JAR="$(command -v jar)"
+fi
+[ -x "$JAVAC" ] || { echo "ERROR: no javac found. Set JAVA_HOME or put a JDK 21+ on PATH." >&2; exit 1; }
 G="$HOME/.gradle/caches/modules-2/files-2.1"
 
 [ -d "$TOOLS" ] || { echo "ERROR: $TOOLS not found — is the repo cloned at SMP/?" >&2; exit 1; }
@@ -122,9 +128,13 @@ MODULES=("$@")
 for m in "${MODULES[@]}"; do
   case "$m" in
     pizzanetworkcore) build pizzanetworkcore src resources PizzaNetworkCore.jar ;;
-    pizzaadmintools)  build pizzaadmintools  src -         PizzaAdminTools.jar ;;
+    # These three shade PizzaCommon because they store state through SuiteStorage, which
+    # is what puts subscription tiers, chat strikes and offence counts in the shared
+    # database instead of a per-server YAML file. Without the shade they load and then
+    # NoClassDefFoundError on first use.
+    pizzaadmintools)  build pizzaadmintools  src -         PizzaAdminTools.jar "$COMMON_BIN" ;;
     pizzachatguard)   build pizzachatguard   src resources PizzaChatGuard.jar "$COMMON_BIN" ;;
-    pizzapunishment)  build pizzapunishment  src resources PizzaPunishment.jar ;;
+    pizzapunishment)  build pizzapunishment  src resources PizzaPunishment.jar "$COMMON_BIN" ;;
     pizzaruleguard)   build pizzaruleguard   src resources PizzaRuleGuard.jar ;;
     # Adopted from the old plugins-src tree 2026-08-08: owns the lobby double jump and
     # the spawn-zone rules. It had no counterpart in the repo, so switching the build to

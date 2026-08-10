@@ -76,9 +76,25 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     private int capsMinLength = 8;            // only caps-check messages this long+
     private double capsThreshold = 0.7;       // >70% uppercase letters = caps violation
 
+    /**
+     * Shared storage for strike state.
+     *
+     * Strikes in a per-server file are barely moderation at all: spam on the lobby, hop to
+     * survival, and the counter starts again from zero. Chat is already network-wide, so
+     * the consequences for abusing it have to be too.
+     */
+    private dev.pizzasmp.common.SuiteStorage storage;
+    private static final String DOC_STRIKES = "strikes";
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "chatguard");
+        if (!this.storage.isMysql()) {
+            getLogger().warning("[storage] running on local files: chat strikes will NOT be shared "
+                + "between backends, so a player can shed them by changing server. "
+                + "Set storage.backend: mysql to share them.");
+        }
         loadPolicy();
         initLeet();
         loadStrikes();
@@ -99,8 +115,6 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
      */
     private synchronized void persistStrikes() {
         try {
-            java.io.File f = new java.io.File(getDataFolder(), "strikes.yml");
-            if (!f.getParentFile().exists()) f.getParentFile().mkdirs();
             org.bukkit.configuration.file.YamlConfiguration cfg = new org.bukkit.configuration.file.YamlConfiguration();
             long now = System.currentTimeMillis();
             for (Map.Entry<UUID, Integer> e : violationCount.entrySet()) {
@@ -113,17 +127,26 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
                 String name = strikeNames.get(e.getKey());
                 if (name != null) cfg.set("names." + key, name);
             }
-            cfg.save(f);
+            this.storage.saveDoc(DOC_STRIKES, cfg);
         } catch (Exception ex) {
-            getLogger().warning("Failed saving strikes.yml: " + ex.getMessage());
+            getLogger().warning("Failed saving strikes: " + ex.getMessage());
         }
     }
 
     private void loadStrikes() {
         try {
-            java.io.File f = new java.io.File(getDataFolder(), "strikes.yml");
-            if (!f.exists()) return;
-            org.bukkit.configuration.file.YamlConfiguration cfg = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
+            org.bukkit.configuration.file.YamlConfiguration cfg = this.storage.loadDoc(DOC_STRIKES);
+            // First run against shared storage: adopt whatever this backend had locally.
+            if (cfg.getKeys(true).isEmpty()) {
+                java.io.File legacy = new java.io.File(getDataFolder(), "strikes.yml");
+                if (legacy.isFile()) {
+                    cfg = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(legacy);
+                    if (!cfg.getKeys(true).isEmpty()) {
+                        getLogger().info("[storage] importing strikes.yml into shared storage (first run).");
+                        this.storage.saveDoc(DOC_STRIKES, cfg);
+                    }
+                }
+            }
             org.bukkit.configuration.ConfigurationSection counts = cfg.getConfigurationSection("counts");
             if (counts == null) return;
             long now = System.currentTimeMillis();

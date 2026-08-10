@@ -1,9 +1,7 @@
 /*
  * SuiteStorage — part of the PizzaSMP plugin suite (PizzaCommon shared library).
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Licensed under the PizzaSMP Non-Commercial Source License v1.0 (see LICENSE).
- * Non-commercial use only; no sale/resale without written permission; AGPL-style
- * share-alike + network source disclosure. Provided AS IS, without warranty.
+ * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */
 package dev.pizzasmp.common;
 
@@ -79,6 +77,13 @@ public final class SuiteStorage {
             String user = db.getString("user", "pizzasmp");
             String pass = db.getString("password", "");
             HikariConfig hc = new HikariConfig();
+            // NAME THE DRIVER EXPLICITLY. Without this, Hikari resolves the driver through
+            // DriverManager, which searches the context classloader and does not find a
+            // driver that Paper loaded into this plugin's own classloader via `libraries:`.
+            // The failure surfaces as the unhelpful "Failed to get driver instance", and
+            // because init is wrapped in a fallback, the plugin then quietly runs on local
+            // files — looking configured for MySQL while sharing nothing.
+            hc.setDriverClassName("org.mariadb.jdbc.Driver");
             hc.setJdbcUrl("jdbc:mariadb://" + host + ":" + port + "/" + name + "?useSSL=false&allowPublicKeyRetrieval=true");
             hc.setUsername(user);
             hc.setPassword(pass);

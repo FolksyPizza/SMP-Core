@@ -3,9 +3,7 @@ package dev.pizzasmp.ruleguard;
 /*
  * PizzaRuleGuardPlugin — part of the PizzaSMP plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Licensed under the PizzaSMP Non-Commercial Source License v1.0 (see LICENSE).
- * Non-commercial use only; no sale/resale without written permission; AGPL-style
- * share-alike + network source disclosure. Provided AS IS, without warranty.
+ * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */
 
 import java.io.IOException;

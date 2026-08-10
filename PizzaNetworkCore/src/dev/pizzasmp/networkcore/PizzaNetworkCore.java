@@ -732,6 +732,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.getServer().getMessenger().registerIncomingPluginChannel((Plugin)this, BRIDGE_CHANNEL, this);
         this.refreshNetworkPlayerNameCacheAsync();
         this.notificationPollTask = this.runAsyncRepeatingTask(this::pollPendingPlayerNotifications, 20L, 20L);
+        // Cross-server RTP: the destination backend answers requests on a timer, so it works
+        // with nobody connected to it. 4 ticks (~200ms) is a single indexed lookup that
+        // usually returns nothing, and it resolves during the transfer, so the player never
+        // waits on it. Only the RTP destination needs to poll.
+        if (this.isServer("survival")) {
+            this.runAsyncRepeatingTask(this::pollRtpRequests, 40L, 4L);
+            this.getLogger().info("[rtp] serving cross-server RTP requests for this backend.");
+        }
         this.startPlaytimeAndAfkTask();
         // EcoBot keeps the auction house stocked. It is not gated behind anything.
         Bukkit.getScheduler().runTaskLaterAsynchronously((Plugin)this, this::initAutoEco, 100L);
@@ -5687,23 +5695,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 player.sendActionBar(Component.text("§cRTP is unavailable right now."));
                 return;
             }
-            {
-                String dim = (dimension == null || dimension.isBlank()) ? "overworld" : dimension;
-                this.rtpLog("cross_request", "player=" + player.getName() + " dim=" + dim + " target=survival");
-                // Ask survival for a destination BEFORE moving the player. Transferring
-                // first and searching on arrival is what made cross-server /rtp look
-                // like it merely moved you to survival. The proxy relays this; if it
-                // cannot (nobody on survival, so no channel), it answers RTPFALLBACK and
-                // we use the old transfer-then-search path.
-                this.pendingCrossRtp.put(uuid, dim);
-                this.sendBridgePayload(player, out -> {
-                    out.writeUTF("RTPREQ");
-                    out.writeUTF(uuid.toString());
-                    out.writeUTF(dim);
-                    out.writeUTF(this.detectServerName());
-                    out.writeUTF("survival");
-                });
-            }
+            String dim = (dimension == null || dimension.isBlank()) ? "overworld" : dimension;
+            this.requestCrossServerRtp(player, dim);
             return;
         }
         String worldName = switch (dimension) {
@@ -5738,6 +5731,233 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.rtpLog("search_start", "player=" + player.getName() + " world=" + world.getName()
             + " radius=" + (long) plan.minRadius + ".." + (long) plan.maxRadius + " attempts=" + plan.maxAttempts);
         this.rtpAttemptAsync(uuid, plan, dimension, bypassChecks, 0);
+    }
+
+    /**
+     * Cross-server /rtp, over the database.
+     *
+     * WHY NOT THE PROXY. The first version relayed this as a Velocity plugin message. That
+     * only works while somebody is already connected to the destination, because a proxy
+     * plugin message rides inside a player's connection — there is no standalone socket to
+     * a backend. With survival empty the proxy had nothing to send through and answered
+     * RTPFALLBACK, which meant "transfer them and search on arrival": the player watched
+     * themselves land at spawn and then get moved. The one case where you most want RTP to
+     * work (an empty server) was the case it degraded in.
+     *
+     * The database has no such requirement. Survival polls for requests whether or not
+     * anyone is on it, so the pipeline behaves identically at zero players and at fifty.
+     *
+     * WHY THIS DOES NOT WAIT. The transfer costs about a second no matter what, so rather
+     * than resolve first and then transfer — paying for both in sequence — the request is
+     * filed and the transfer starts immediately. Survival resolves it while the player is
+     * still connecting, and applies it as they join. The destination is already known by
+     * the time they arrive, so they never see the arrival point, and the total cost is just
+     * the transfer that was always going to happen.
+     */
+    private void requestCrossServerRtp(Player player, String dimension) {
+        UUID uuid = player.getUniqueId();
+        String origin = this.detectServerName();
+        this.rtpLog("cross_request", "player=" + player.getName() + " dim=" + dimension + " target=survival");
+        this.runAsyncTask(() -> {
+            String sql = "INSERT INTO rtp_requests (uuid, dimension, origin_server, target_server, status, "
+                       + "world_name, x, y, z, created_at, expires_at) "
+                       + "VALUES (?, ?, ?, 'survival', 'PENDING', NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP, "
+                       + "DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 60 SECOND)) "
+                       + "ON DUPLICATE KEY UPDATE dimension=VALUES(dimension), origin_server=VALUES(origin_server), "
+                       + "target_server=VALUES(target_server), status='PENDING', world_name=NULL, x=NULL, y=NULL, "
+                       + "z=NULL, created_at=CURRENT_TIMESTAMP, expires_at=VALUES(expires_at)";
+            boolean filed = false;
+            try (Connection c = this.openSyncConnection();
+                 PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, dimension);
+                ps.setString(3, origin);
+                ps.executeUpdate();
+                filed = true;
+            } catch (Exception ex) {
+                this.getLogger().warning("rtp: could not file cross-server request: " + ex.getMessage());
+            }
+            final boolean ok = filed;
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                if (!ok) {
+                    player.sendActionBar(Component.text("§cRTP is unavailable right now."));
+                    return;
+                }
+                // The pending action is what makes survival look for the answer on arrival.
+                if (this.playerSyncManager != null) {
+                    this.playerSyncManager.queueOneTimeAction(uuid, "RTPDB", 60);
+                }
+                this.rtpLog("cross_filed", "player=" + player.getName() + " transferring to survival");
+                this.connectToServer(player, "survival");
+            });
+        });
+    }
+
+    /**
+     * Destination side: resolve queued cross-server RTP requests addressed to this backend.
+     *
+     * Runs on a timer rather than reacting to an event, because the whole point is to work
+     * when there is no player here to react to. Claiming a row with a status-guarded UPDATE
+     * means two backends answering for the same logical server cannot both resolve it.
+     */
+    private void pollRtpRequests() {
+        String claim = "UPDATE rtp_requests SET status='RESOLVING' WHERE uuid=? AND status='PENDING'";
+        String select = "SELECT uuid, dimension FROM rtp_requests WHERE target_server=? AND status='PENDING' "
+                      + "AND expires_at > CURRENT_TIMESTAMP ORDER BY created_at ASC LIMIT 8";
+        java.util.List<String[]> claimed = new ArrayList<>();
+        try (Connection c = this.openSyncConnection()) {
+            java.util.List<String[]> found = new ArrayList<>();
+            try (PreparedStatement ps = c.prepareStatement(select)) {
+                ps.setString(1, this.detectServerName());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) found.add(new String[]{rs.getString(1), rs.getString(2)});
+                }
+            }
+            if (found.isEmpty()) return;
+            try (PreparedStatement ps = c.prepareStatement(claim)) {
+                for (String[] row : found) {
+                    ps.setString(1, row[0]);
+                    if (ps.executeUpdate() > 0) claimed.add(row);
+                }
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("rtp: request poll failed: " + ex.getMessage());
+            return;
+        }
+        for (String[] row : claimed) {
+            this.resolveRtpRequest(row[0], row[1]);
+        }
+    }
+
+    private void resolveRtpRequest(String uuidRaw, String dimension) {
+        String worldName = switch (dimension == null ? "overworld" : dimension) {
+            case "nether" -> "world_nether";
+            case "end" -> "world_the_end";
+            default -> "world";
+        };
+        World world = Bukkit.getWorld(worldName);
+        if (world == null) {
+            this.rtpLog("db_no_world", "uuid=" + uuidRaw + " world=" + worldName);
+            this.failRtpRequest(uuidRaw);
+            return;
+        }
+        this.rtpLog("db_resolve_start", "uuid=" + uuidRaw + " world=" + worldName);
+        // The safe-spot search touches chunks, so it has to start on the main thread.
+        this.runOnMainThread(() -> this.findAsyncSafeLocation(world, loc -> {
+            if (loc == null) {
+                this.rtpLog("db_resolve_failed", "uuid=" + uuidRaw);
+                this.failRtpRequest(uuidRaw);
+                return;
+            }
+            this.rtpLog("db_resolved", "uuid=" + uuidRaw + " at=" + loc.getBlockX() + ","
+                + loc.getBlockY() + "," + loc.getBlockZ());
+            this.runAsyncTask(() -> {
+                String sql = "UPDATE rtp_requests SET status='RESOLVED', world_name=?, x=?, y=?, z=? WHERE uuid=?";
+                try (Connection c = this.openSyncConnection();
+                     PreparedStatement ps = c.prepareStatement(sql)) {
+                    ps.setString(1, loc.getWorld().getName());
+                    ps.setDouble(2, loc.getX());
+                    ps.setDouble(3, loc.getY());
+                    ps.setDouble(4, loc.getZ());
+                    ps.setString(5, uuidRaw);
+                    ps.executeUpdate();
+                } catch (Exception ex) {
+                    this.getLogger().warning("rtp: could not store resolved destination: " + ex.getMessage());
+                }
+                // The player may already be here waiting on it.
+                Player waiting = Bukkit.getPlayer(UUID.fromString(uuidRaw));
+                if (waiting != null && waiting.isOnline()) {
+                    this.applyResolvedRtp(waiting, 0);
+                }
+            });
+        }));
+    }
+
+    private void failRtpRequest(String uuidRaw) {
+        this.runAsyncTask(() -> {
+            try (Connection c = this.openSyncConnection();
+                 PreparedStatement ps = c.prepareStatement("UPDATE rtp_requests SET status='FAILED' WHERE uuid=?")) {
+                ps.setString(1, uuidRaw);
+                ps.executeUpdate();
+            } catch (Exception ignored) { }
+        });
+    }
+
+    /**
+     * Arrival side: place a player whose cross-server RTP destination is waiting for them.
+     *
+     * Normally the answer is already stored by the time they join, since resolution started
+     * when they ran the command and the transfer took about a second. If it is not, retry
+     * briefly rather than giving up — the alternative is dumping them at spawn with no
+     * explanation, which is the behaviour this whole path exists to remove.
+     */
+    void applyResolvedRtp(Player player, int attempt) {
+        if (player == null || !player.isOnline() || attempt > 40) {   // ~8s of retries
+            if (attempt > 40) this.rtpLog("db_apply_timeout", "player="
+                + (player == null ? "?" : player.getName()));
+            return;
+        }
+        UUID uuid = player.getUniqueId();
+        this.runAsyncTask(() -> {
+            String status = null, world = null;
+            double x = 0, y = 0, z = 0;
+            try (Connection c = this.openSyncConnection();
+                 PreparedStatement ps = c.prepareStatement(
+                     "SELECT status, world_name, x, y, z FROM rtp_requests WHERE uuid=? LIMIT 1")) {
+                ps.setString(1, uuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        status = rs.getString(1);
+                        world = rs.getString(2);
+                        x = rs.getDouble(3); y = rs.getDouble(4); z = rs.getDouble(5);
+                    }
+                }
+            } catch (Exception ex) {
+                this.getLogger().warning("rtp: could not read resolved destination: " + ex.getMessage());
+                return;
+            }
+            if (status == null) return;                       // nothing queued for them
+            if ("PENDING".equals(status) || "RESOLVING".equals(status)) {
+                // Still working. Check again shortly.
+                this.scheduleTask(() -> this.applyResolvedRtp(player, attempt + 1), 200, TimeUnit.MILLISECONDS);
+                return;
+            }
+            if (!"RESOLVED".equals(status) || world == null) {
+                this.consumeRtpRequest(uuid);
+                this.runOnPlayerThread(player, () -> player.sendActionBar(
+                    Component.text("§cCouldn't find a safe spot — try /rtp again.")));
+                return;
+            }
+            final String fWorld = world; final double fx = x, fy = y, fz = z;
+            this.consumeRtpRequest(uuid);
+            this.runOnPlayerThread(player, () -> {
+                World w = Bukkit.getWorld(fWorld);
+                if (w == null || !player.isOnline()) return;
+                Location dest = new Location(w, fx, fy, fz, player.getLocation().getYaw(), 0f);
+                this.rtpLog("db_apply", "player=" + player.getName() + " at="
+                    + dest.getBlockX() + "," + dest.getBlockY() + "," + dest.getBlockZ());
+                player.teleportAsync(dest).thenAccept(okTp -> this.runOnPlayerThread(player, () -> {
+                    if (!okTp) return;
+                    this.resetFallAfterTeleport(player);
+                    this.markRtpUsed(player);
+                    player.sendActionBar(Component.text("§7You teleported to a random location."));
+                    if (this.isSettingEnabledCached(uuid, "music_sound_notifications")) {
+                        player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 1.2f);
+                    }
+                }));
+            });
+        });
+    }
+
+    private void consumeRtpRequest(UUID uuid) {
+        this.runAsyncTask(() -> {
+            try (Connection c = this.openSyncConnection();
+                 PreparedStatement ps = c.prepareStatement("DELETE FROM rtp_requests WHERE uuid=?")) {
+                ps.setString(1, uuid.toString());
+                ps.executeUpdate();
+            } catch (Exception ignored) { }
+        });
     }
 
     // One async search attempt: pick a coord, load its chunk async, check safety.
@@ -9422,6 +9642,22 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Bukkit.getScheduler().runTask((Plugin)this, task);
     }
 
+    /**
+     * Run on the main thread with no player to anchor to.
+     *
+     * runOnPlayerThread cannot serve here: cross-server RTP resolves destinations for
+     * players who are not on this backend yet, which is the entire point of it working
+     * with an empty server. Under Folia that means the global region scheduler.
+     */
+    private void runOnMainThread(Runnable task) {
+        if (this.foliaRuntime) {
+            Bukkit.getGlobalRegionScheduler().run((Plugin)this, st -> task.run());
+            return;
+        }
+        if (Bukkit.isPrimaryThread()) { task.run(); return; }
+        Bukkit.getScheduler().runTask((Plugin)this, task);
+    }
+
     private void runAsyncTask(Runnable task) {
         if (this.foliaRuntime) {
             Bukkit.getAsyncScheduler().runNow((Plugin)this, st -> task.run());
@@ -12060,6 +12296,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         String auctionListingsSql = "CREATE TABLE IF NOT EXISTS auction_listings (id BIGINT AUTO_INCREMENT PRIMARY KEY,seller_uuid CHAR(36) NOT NULL,buyer_uuid CHAR(36) NULL,item_blob LONGBLOB NOT NULL,item_key VARCHAR(96) NOT NULL,price DOUBLE NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',expires_at TIMESTAMP NULL DEFAULT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,INDEX idx_auction_status_created (status, created_at),INDEX idx_auction_seller_status (seller_uuid, status))";
         String auctionPayoutsSql = "CREATE TABLE IF NOT EXISTS auction_payouts (id BIGINT AUTO_INCREMENT PRIMARY KEY,recipient_uuid CHAR(36) NOT NULL,listing_id BIGINT NOT NULL,amount DOUBLE NOT NULL,claimed TINYINT(1) NOT NULL DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,INDEX idx_auction_payout_recipient (recipient_uuid, claimed))";
         String orderListingsSql = "CREATE TABLE IF NOT EXISTS order_listings (id BIGINT AUTO_INCREMENT PRIMARY KEY,creator_uuid CHAR(36) NOT NULL,item_key VARCHAR(96) NOT NULL,amount_total INT NOT NULL,amount_filled INT NOT NULL DEFAULT 0,unit_price DOUBLE NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,expires_at TIMESTAMP NULL DEFAULT NULL,INDEX idx_order_status_created (status, created_at),INDEX idx_order_creator_status (creator_uuid, status))";
+        // Cross-server RTP requests. The destination backend resolves these; see
+        // requestCrossServerRtp for why this goes through the database rather than the
+        // proxy. Keyed by player so a second /rtp simply replaces the first.
+        String rtpRequestsSql = "CREATE TABLE IF NOT EXISTS rtp_requests (uuid CHAR(36) PRIMARY KEY,dimension VARCHAR(16) NOT NULL DEFAULT 'overworld',origin_server VARCHAR(32) NOT NULL,target_server VARCHAR(32) NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'PENDING',world_name VARCHAR(64) NULL,x DOUBLE NULL,y DOUBLE NULL,z DOUBLE NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,expires_at TIMESTAMP NOT NULL,INDEX idx_rtp_target_status (target_server, status, expires_at))";
         String orderDeliveriesSql = "CREATE TABLE IF NOT EXISTS order_deliveries (id BIGINT AUTO_INCREMENT PRIMARY KEY,order_id BIGINT NOT NULL,fulfiller_uuid CHAR(36) NOT NULL,amount INT NOT NULL,payout DOUBLE NOT NULL,item_blob LONGBLOB NULL,claimed TINYINT(1) NOT NULL DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,claimed_at TIMESTAMP NULL DEFAULT NULL,INDEX idx_order_delivery_order (order_id),INDEX idx_order_delivery_claimed (claimed))";
         try (Connection conn = this.openSyncConnection();
              Statement st = conn.createStatement();){
@@ -12074,6 +12314,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.execSchema(st, crateLogSql);
             this.execSchema(st, dailyClaimSql);
             this.execSchema(st, teleportRequestsSql);
+            this.execSchema(st, rtpRequestsSql);
             this.execSchema(st, notificationSql);
             this.execSchema(st, auctionListingsSql);
             this.execSchema(st, auctionPayoutsSql);

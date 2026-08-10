@@ -8,6 +8,12 @@ description: "False-positive-resistant chat filter: slurs, advertising, spam, ca
 softdepend:
   - PunishDrop
   - LibertyBans
+# SuiteStorage needs a JDBC driver and a pool to put shared state in the database.
+# Paper's runtime library loader fetches these; without the block the plugin loads and
+# then silently falls back to per-server YAML files.
+libraries:
+  - org.mariadb.jdbc:mariadb-java-client:3.5.4
+  - com.zaxxer:HikariCP:5.1.0
 commands:
   clearwarnings:
     description: "Clear PizzaChatGuard warning count for a player."
