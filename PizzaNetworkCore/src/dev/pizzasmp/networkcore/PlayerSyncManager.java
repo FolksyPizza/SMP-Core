@@ -99,7 +99,7 @@ final class PlayerSyncManager {
         String params = cfg.getString("sync.database.parameters", "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true");
         this.dbUrl = "jdbc:mariadb://" + host + ":" + port + "/" + database + "?" + params;
         this.dbUser = cfg.getString("sync.database.user", "pizzasmp");
-        this.dbPassword = cfg.getString("sync.database.password", "pizzasmp_change_me");
+        this.dbPassword = cfg.getString("sync.database.password", "CHANGE_ME");
         this.leaseSeconds = Math.max(10, cfg.getInt("sync.session.lease-seconds", 45));
         this.heartbeatTicks = Math.max(20, cfg.getInt("sync.session.heartbeat-ticks", 200));
         this.reconnectEnabled = cfg.getBoolean("sync.reconnect.enabled", true);
@@ -290,6 +290,25 @@ final class PlayerSyncManager {
                 && this.plugin instanceof PizzaNetworkCore rtpCore) {
             rtpCore.rtpLog("pending_apply", "player=" + player.getName()
                 + " syncServer=" + this.serverName + " action=" + pendingAction);
+        }
+        /*
+         * Arrive next to another player after a cross-server teleport.
+         *
+         * This used to be queued as "RUN_CMD:tp <name>", i.e. the arriving player was made to
+         * run /tp themselves — a command ordinary players have no permission for. The transfer
+         * happened, the command was silently refused, and the player was left standing at
+         * spawn wondering why an accepted /tpa did nothing. Teleporting through the API needs
+         * no permission and is what was meant all along.
+         *
+         * The target may not have been loaded yet when we arrive, so this retries briefly
+         * rather than giving up on the first miss.
+         */
+        if (pendingAction.startsWith("TPTO:")) {
+            String targetName = pendingAction.substring("TPTO:".length()).trim();
+            if (!targetName.isEmpty()) {
+                this.teleportToPlayerWhenReady(player, targetName, 0);
+            }
+            return;
         }
         // Cross-server RTP over the database: the destination was resolved while the player
         // was in transit, so this just collects the answer. See requestCrossServerRtp.
@@ -773,6 +792,43 @@ final class PlayerSyncManager {
         }
     }
 
+    /**
+     * Place an arriving player next to a named target, retrying while the target loads.
+     *
+     * A cross-server teleport lands the mover before the world around them is necessarily
+     * settled, and the target themselves may still be joining. Roughly four seconds of
+     * retries covers that without leaving the player hanging; past that they are told, rather
+     * than being silently abandoned at spawn, which is what the old /tp dispatch did.
+     */
+    private void teleportToPlayerWhenReady(Player player, String targetName, int attempt) {
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        Player target = Bukkit.getPlayerExact(targetName);
+        if (target != null && target.isOnline()) {
+            this.runOnPlayerLater(player, () -> {
+                if (player.isOnline() && target.isOnline()) {
+                    player.teleport(target.getLocation());
+                    player.sendActionBar(net.kyori.adventure.text.Component.text(
+                        "§7Teleported to §f" + target.getName() + "§7."));
+                }
+            }, 1L);
+            return;
+        }
+        if (attempt >= 20) {
+            this.plugin.getLogger().warning("[sync] cross-server teleport for " + player.getName()
+                + " gave up waiting for " + targetName + " on " + this.serverName + ".");
+            this.runOnPlayerLater(player, () -> {
+                if (player.isOnline()) {
+                    player.sendActionBar(net.kyori.adventure.text.Component.text(
+                        "§c" + targetName + " is no longer available to teleport to."));
+                }
+            }, 1L);
+            return;
+        }
+        this.runOnPlayerLater(player, () -> this.teleportToPlayerWhenReady(player, targetName, attempt + 1), 4L);
+    }
+
     private void reassertGameMode(Player player, GameMode desired, long delayTicks) {
         this.runOnPlayerLater(player, () -> {
             if (player.isOnline() && player.getGameMode() != desired) {
@@ -806,9 +862,23 @@ final class PlayerSyncManager {
                 // empty catch block
             }
         }
+        /*
+         * FLIGHT FOLLOWS GAMEMODE, NOT THE PREVIOUS SERVER.
+         *
+         * This used to be `modeAllowsFlight || (bypassFlightPolicy && snapshot.allowFlight)`,
+         * which leaked hub flight into survival. The lobby's spawn rules call
+         * setAllowFlight(true) to power the double jump while the player is still in SURVIVAL
+         * gamemode, so the snapshot recorded "allowFlight = true" for an ordinary survival
+         * player. Arriving on survival, anyone holding the bypass node — which every wildcard
+         * permission grants, so every admin and dev — had that restored and could fly.
+         *
+         * A hub's local movement mechanics are not a property of the player, so they are not
+         * carried. Flight here is whatever this player's gamemode entitles them to; a hub
+         * re-grants its own on arrival, and /fly is re-issued per server by the plugin that
+         * owns it.
+         */
         boolean modeAllowsFlight = (currentMode = player.getGameMode()) == GameMode.CREATIVE || currentMode == GameMode.SPECTATOR;
-        boolean bypassFlightPolicy = player.hasPermission("pizzasmp.gamemode.flight.bypass");
-        boolean allowFlight = modeAllowsFlight || bypassFlightPolicy && snapshot.allowFlight;
+        boolean allowFlight = modeAllowsFlight;
         boolean isFlying = allowFlight && snapshot.isFlying;
         player.setAllowFlight(allowFlight);
         player.setFlying(isFlying);
@@ -1085,7 +1155,7 @@ final class PlayerSyncManager {
             String worldName = location.getWorld() == null ? null : location.getWorld().getName();
             GameMode effectiveMode = forcedGameMode == null ? player.getGameMode() : forcedGameMode;
             boolean modeAllowsFlight = effectiveMode == GameMode.CREATIVE || effectiveMode == GameMode.SPECTATOR;
-            return new SyncSnapshot(serverName, worldName, location.getX(), location.getY(), location.getZ(), location.getYaw(), location.getPitch(), effectiveMode.name(), PlayerSyncManager.serializeItemStacks(player.getInventory().getContents()), PlayerSyncManager.serializeItemStacks(player.getEnderChest().getContents()), PlayerSyncManager.serializeStats(player), player.getHealth(), player.getFoodLevel(), player.getSaturation(), player.getExhaustion(), player.getExp(), player.getLevel(), player.getTotalExperience(), modeAllowsFlight ? true : player.getAllowFlight(), modeAllowsFlight && player.isFlying(), player.getFlySpeed(), player.getWalkSpeed(), player.getFireTicks(), player.getRemainingAir());
+            return new SyncSnapshot(serverName, worldName, location.getX(), location.getY(), location.getZ(), location.getYaw(), location.getPitch(), effectiveMode.name(), PlayerSyncManager.serializeItemStacks(player.getInventory().getContents()), PlayerSyncManager.serializeItemStacks(player.getEnderChest().getContents()), PlayerSyncManager.serializeStats(player), player.getHealth(), player.getFoodLevel(), player.getSaturation(), player.getExhaustion(), player.getExp(), player.getLevel(), player.getTotalExperience(), modeAllowsFlight, modeAllowsFlight && player.isFlying(), player.getFlySpeed(), player.getWalkSpeed(), player.getFireTicks(), player.getRemainingAir());
         }
 
         private static SyncSnapshot fromResultSet(ResultSet rs) throws SQLException {

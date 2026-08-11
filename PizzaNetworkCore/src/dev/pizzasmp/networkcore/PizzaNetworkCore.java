@@ -3510,7 +3510,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.handleMsgCommand(p, args);
                 break;
             }
-            case "reply": 
+            case "reply":
             case "r": {
                 this.handleReplyCommand(p, args);
                 break;
@@ -3957,11 +3957,22 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         String requiredSetting;
         String normalized;
         String string = normalized = label == null ? "" : label.toLowerCase(Locale.ROOT);
-        if ("tpaccept".equals(normalized) || "tpacept".equals(normalized)) {
+        // MATCH THE NAMES THAT ARE ACTUALLY REGISTERED. plugin.yml registers /tpaaccept,
+        // /tpadeny and /tpacancel, but this only matched "tpaccept"/"tpacept"/"tpdeny" — so
+        // the canonical commands never took the cross-server path at all and fell through to
+        // the local handlers, which cannot see a request filed by another backend.
+        if ("tpaccept".equals(normalized) || "tpaaccept".equals(normalized) || "tpacept".equals(normalized)) {
             return this.handleRemoteTeleportAccept(player, split.length >= 2 ? split[1] : null);
         }
-        if ("tpdeny".equals(normalized)) {
+        if ("tpdeny".equals(normalized) || "tpadeny".equals(normalized)) {
             return this.handleRemoteTeleportDeny(player, split.length >= 2 ? split[1] : null);
+        }
+        // /tpacancel had no remote path, so a cross-server request stayed PENDING for its full
+        // 60s and could still be accepted after the requester thought they had cancelled it.
+        if ("tpacancel".equals(normalized)) {
+            if (this.cancelRemoteTeleportRequest(player)) {
+                return true;
+            }
         }
         if (!"tpa".equals(normalized) && !"tpahere".equals(normalized)) {
             return false;
@@ -4047,7 +4058,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             if ("TPAHERE".equalsIgnoreCase(request.requestType())) {
                 if (this.playerSyncManager != null) {
-                    this.playerSyncManager.queueOneTimeAction(accepter.getUniqueId(), "RUN_CMD:tp " + request.requesterName(), 45);
+                    this.playerSyncManager.queueOneTimeAction(accepter.getUniqueId(), "TPTO:" + request.requesterName(), 45);
                 }
                 this.runOnPlayerThread(accepter, () -> {
                     accepter.sendMessage("\u00a7aTeleport request accepted.");
@@ -4057,7 +4068,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 return;
             }
             if (this.playerSyncManager != null) {
-                this.playerSyncManager.queueOneTimeAction(UUID.fromString(request.requesterUuid()), "RUN_CMD:tp " + accepter.getName(), 45);
+                this.playerSyncManager.queueOneTimeAction(UUID.fromString(request.requesterUuid()), "TPTO:" + accepter.getName(), 45);
             }
             this.queuePlayerNotification(UUID.fromString(request.requesterUuid()), "\u00a7a" + accepter.getName() + " accepted your teleport request.", "CONNECT:" + this.detectServerName(), 30);
             this.runOnPlayerThread(accepter, () -> accepter.sendMessage("\u00a7aTeleport request accepted."));
@@ -4115,6 +4126,33 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     /*
      * Enabled aggressive exception aggregation
      */
+    /**
+     * Cancel this player's outstanding cross-server teleport request, if they have one.
+     *
+     * Returns true when a row was cancelled, so the caller can stop and not also run the
+     * local handler. Without this, /tpacancel only cleared the in-memory map on the sender's
+     * own backend and a request filed in the database stayed live until it expired — the
+     * requester could be teleported after they had cancelled.
+     */
+    private boolean cancelRemoteTeleportRequest(Player requester) {
+        if (requester == null) {
+            return false;
+        }
+        String sql = "UPDATE network_teleport_requests SET status='CANCELLED', responded_at=CURRENT_TIMESTAMP "
+                   + "WHERE requester_uuid=? AND status='PENDING'";
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, requester.getUniqueId().toString());
+            if (ps.executeUpdate() > 0) {
+                requester.sendActionBar(Component.text("§7Teleport request cancelled."));
+                return true;
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("Failed cancelling remote teleport request: " + ex.getMessage());
+        }
+        return false;
+    }
+
     private boolean markTeleportRequestStatus(long requestId, String status) {
         String sql = "UPDATE network_teleport_requests SET status=?, responded_at=CURRENT_TIMESTAMP WHERE id=? AND status='PENDING'";
         try (Connection conn = this.openSyncConnection();){
@@ -4189,6 +4227,55 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * Enabled unnecessary exception pruning
      * Enabled aggressive exception aggregation
      */
+    /**
+     * Is this name online ANYWHERE on the network, including other backends?
+     *
+     * Bukkit.getOnlinePlayers() only knows this process, which is why anything resolving a
+     * player that way reports someone on another backend as offline. session_leases is the
+     * network-wide answer: the proxy writes a heartbeated row per connected player.
+     */
+    /**
+     * The right message when a target could not be reached.
+     *
+     * "Player not found or not online" conflated three different situations: a name that has
+     * never played here, a real player who is offline, and — before the network lookups
+     * existed — a player who was online the whole time on another backend. Telling someone
+     * their friend is not online when they are standing in the lobby is worse than unhelpful,
+     * so distinguish the cases using the shared players table.
+     */
+    private Component networkAbsenceMessage(String name) {
+        boolean known = false;
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                 "SELECT 1 FROM players WHERE LOWER(username)=LOWER(?) LIMIT 1")) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                known = rs.next();
+            }
+        } catch (Exception ignored) { }
+        return Component.text(known
+            ? "§7" + name + " is offline."
+            : "§7No player named §f" + name + "§7 has played here.");
+    }
+
+    private boolean isNetworkPlayerOnline(String name) {
+        if (name == null || name.isBlank()) {
+            return false;
+        }
+        String sql = "SELECT 1 FROM players p JOIN session_leases sl ON sl.uuid=p.uuid "
+                   + "AND sl.expires_at > CURRENT_TIMESTAMP WHERE LOWER(p.username)=LOWER(?) LIMIT 1";
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("network presence lookup failed for " + name + ": " + ex.getMessage());
+            return false;
+        }
+    }
+
     private boolean isRemoteSettingEnabled(UUID uuid, String key, boolean defaultValue) {
         if (uuid == null) return defaultValue;
         if (key == null) return defaultValue;
@@ -4562,7 +4649,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     return;
                 }
                 if (this.playerSyncManager != null) {
-                    this.playerSyncManager.queueOneTimeAction(staff.getUniqueId(), "RUN_CMD:tp " + targetName, 45);
+                    this.playerSyncManager.queueOneTimeAction(staff.getUniqueId(), "TPTO:" + targetName, 45);
                 }
                 this.connectToServer(staff, targetServer);
             });
@@ -6882,7 +6969,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         Player target = this.fuzzyOnlinePlayer(sender, targetName);   // typo-tolerant name match
         if (target == null) {
-            sender.sendMessage("\u00a7cPlayer not found or not online: " + targetName);
+            // Not on THIS backend. fuzzyOnlinePlayer only walks Bukkit.getOnlinePlayers(), so
+            // before this every /msg to someone on another server answered "not online" \u2014
+            // even though the proxy relay to deliver it was already written on both sides and
+            // simply never called. Hand it to the proxy, which sees the whole network.
+            if (this.isNetworkPlayerOnline(targetName)) {
+                this.sendBridgeDirectMessage(sender, targetName, message, false);
+                return;
+            }
+            sender.sendActionBar(this.networkAbsenceMessage(targetName));
             return;
         }
         if (!this.privacyAllows(target.getUniqueId(), "private_messages", sender.getUniqueId())) {
@@ -6912,13 +7007,17 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         UUID replyTargetId = this.localReplyTargets.get(sender.getUniqueId());
         if (replyTargetId == null) {
-            sender.sendMessage("\u00a7cNo one to reply to.");
+            // No LOCAL reply thread. The proxy keeps its own reply map spanning the whole
+            // network, so a conversation started with someone on another backend - or one
+            // that survived our own restart - is still answerable. Let it decide.
+            this.sendBridgeDirectMessage(sender, "", message, true);
             return;
         }
         Player target = Bukkit.getPlayer(replyTargetId);
         if (target == null || !target.isOnline()) {
-            sender.sendMessage("\u00a7cThat player is no longer online.");
+            // They were here and moved. The proxy still knows where they went.
             this.localReplyTargets.remove(sender.getUniqueId());
+            this.sendBridgeDirectMessage(sender, "", message, true);
             return;
         }
         if (!this.privacyAllows(target.getUniqueId(), "private_messages", sender.getUniqueId())) {
@@ -8819,7 +8918,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             hc.setDriverClassName("org.mariadb.jdbc.Driver");
             hc.setJdbcUrl(this.jdbcUrl());
             hc.setUsername(this.settings.getString("sync.database.user", "pizzasmp"));
-            hc.setPassword(this.settings.getString("sync.database.password", "pizzasmp_change_me"));
+            hc.setPassword(this.settings.getString("sync.database.password", "CHANGE_ME"));
             // Small pool: a remote 1-ECPU DB runs only a few queries truly in parallel; HikariCP guidance
             // is that a small pool beats a large one. Stays far under the server's 200-connection ceiling.
             hc.setMaximumPoolSize(this.settings.getInt("sync.database.pool.max-size", 20));
@@ -8858,7 +8957,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return DriverManager.getConnection(this.jdbcUrl(),
             this.settings.getString("sync.database.user", "pizzasmp"),
-            this.settings.getString("sync.database.password", "pizzasmp_change_me"));
+            this.settings.getString("sync.database.password", "CHANGE_ME"));
     }
 
     private boolean isTeleportCommand(String label) {
@@ -18177,7 +18276,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void handleTpaCommand(Player requester, String targetName, String tpaType) {
         Player target = this.fuzzyOnlinePlayer(requester, targetName);   // typo-tolerant name match
         if (target == null) {
-            requester.sendActionBar(Component.text("§cPlayer not found: " + targetName));
+            // Reached only when the cross-server path above already declined, so the target is
+            // genuinely not on any backend. Say which of "offline" and "never played here" it
+            // is rather than the old catch-all, which also used to fire for players who were
+            // online the whole time on another server.
+            requester.sendActionBar(this.networkAbsenceMessage(targetName));
             return;
         }
         if (target.equals(requester)) {
@@ -19135,9 +19238,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         try { from.save(); } catch (Exception ignored) {}
         int vd = Bukkit.getViewDistance() + 1;
         final java.io.File limboRegionDir = new java.io.File(this.settings.getString("limbo.region-dir",
-            "/opt/minecraft/PizzaLimbo/limbo/region"));
+            "../limbo/limbo/region"));
         final java.io.File limboAdvDir = new java.io.File(this.settings.getString("limbo.advancements-dir",
-            "/opt/minecraft/PizzaLimbo/limbo/advancements"));
+            "../limbo/limbo/advancements"));
         final java.io.File mainWorldFolder = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getWorldFolder();
         final java.io.File regionDir = this.regionFolder(from);
         final java.util.List<int[]> copyJobs = new java.util.ArrayList<>();
@@ -20518,7 +20621,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void startLimboMaintenance(CommandSender by) {
         String limbo = this.settings.getString("limbo.server-name", "limbo");
         java.io.File limboRegionDir = new java.io.File(this.settings.getString("limbo.region-dir",
-            "/opt/minecraft/PizzaLimbo/limbo/region"));
+            "../limbo/limbo/region"));
         int vd = Bukkit.getViewDistance() + 1;   // full player view distance (+1 margin)
         java.util.List<Player> online = new java.util.ArrayList<>(Bukkit.getOnlinePlayers());
         // Flush each occupied world to disk so the region files we copy are current.
@@ -20542,7 +20645,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         final java.util.List<int[]> copyJobs = new java.util.ArrayList<>();   // {rxMin,rxMax,rzMin,rzMax}
         final java.util.List<java.io.File> advSrc = new java.util.ArrayList<>();   // per-player advancements .json
         final java.io.File limboAdvDir = new java.io.File(this.settings.getString("limbo.advancements-dir",
-            "/opt/minecraft/PizzaLimbo/limbo/advancements"));
+            "../limbo/limbo/advancements"));
         final java.io.File mainWorldFolder = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getWorldFolder();
         for (Player p : online) {
             try {
@@ -20651,8 +20754,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             final String prof = target;
             this.runAsyncTask(() -> {
                 try {
+                    // Script paths are CONFIGURABLE and default to a path relative to the
+                    // server directory. They were absolute paths into one particular host's
+                    // home directory, which both leaked that layout and meant the feature
+                    // could never work on anyone else's machine.
                     Process pr = new ProcessBuilder("bash",
-                        "/opt/minecraft/PizzaSMP/scripts/apply-branding.sh", prof)
+                        this.settings.getString("scripts.branding", "scripts/apply-branding.sh"), prof)
                         .redirectErrorStream(true).start();
                     pr.waitFor();
                 } catch (Exception ex) {
@@ -20701,8 +20808,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // Detached relauncher: survives this JVM's death and re-injects start.sh into the screen session.
     private void spawnRelaunch() {
         try {
+            String relaunch = this.settings.getString("scripts.relaunch", "scripts/admin-restart.sh");
             new ProcessBuilder("bash", "-c",
-                "setsid bash /opt/minecraft/PizzaSMP/scripts/admin-restart.sh >/dev/null 2>&1 < /dev/null &")
+                "setsid bash " + relaunch + " >/dev/null 2>&1 < /dev/null &")
                 .start();
         } catch (Exception ex) {
             this.getLogger().warning("Failed to spawn relaunch helper: " + ex.getMessage());

@@ -73,7 +73,7 @@ final class MaintenanceQueueManager {
         String params = plugin.getConfig().getString("sync.database.parameters", "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true");
         this.dbUrl = "jdbc:mariadb://" + host + ":" + port + "/" + database + "?" + params;
         this.dbUser = plugin.getConfig().getString("sync.database.user", "pizzasmp");
-        this.dbPassword = plugin.getConfig().getString("sync.database.password", "pizzasmp_change_me");
+        this.dbPassword = plugin.getConfig().getString("sync.database.password", "CHANGE_ME");
         this.maintenanceMusicEnabled = plugin.getConfig().getBoolean("maintenance_music.enabled", true);
         String configuredSound = plugin.getConfig().getString("maintenance_music.sound", Sound.MUSIC_DISC_MELLOHI.name());
         try {

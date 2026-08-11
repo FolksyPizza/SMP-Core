@@ -465,7 +465,7 @@ public final class ChatRelay {
             changed |= setDefault(properties, "database.port", "3306");
             changed |= setDefault(properties, "database.name", "pizzasmp");
             changed |= setDefault(properties, "database.user", "pizzasmp");
-            changed |= setDefault(properties, "database.password", "pizzasmp_change_me");
+            changed |= setDefault(properties, "database.password", "CHANGE_ME");
             changed |= setDefault(properties, "database.parameters", "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true");
             changed |= setDefault(properties, "session.lease-seconds", "45");
             if (changed) {
@@ -480,7 +480,7 @@ public final class ChatRelay {
                 "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true");
             dbUrl = "jdbc:mariadb://" + host + ":" + port + "/" + name + "?" + parameters;
             dbUser = properties.getProperty("database.user", "pizzasmp");
-            dbPassword = properties.getProperty("database.password", "pizzasmp_change_me");
+            dbPassword = properties.getProperty("database.password", "CHANGE_ME");
             leaseSeconds = Integer.parseInt(properties.getProperty("session.lease-seconds", "45"));
         } catch (Exception ex) {
             throw new IllegalStateException("Failed loading PizzaVelocityBridge config", ex);

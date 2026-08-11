@@ -6,7 +6,7 @@ sync:
     port: 3306
     name: pizzasmp
     user: pizzasmp
-    password: pizzasmp_change_me
+    password: CHANGE_ME
     parameters: "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true"
   session:
     lease-seconds: 45
