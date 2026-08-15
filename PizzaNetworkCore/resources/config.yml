@@ -43,7 +43,7 @@ combat:
 chat_debug:
   log_bridge_payloads: false
 hud:
-  sidebar_enabled: false
+  sidebar_enabled: true
   force_ascii_icons: false
 chat:
   intercept_async_chat: false

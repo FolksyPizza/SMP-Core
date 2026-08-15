@@ -2,9 +2,19 @@ name: PizzaNetworkCore
 version: 1.0.0
 main: dev.pizzasmp.networkcore.PizzaNetworkCore
 api-version: '1.21'
+# NOT YET TRUE — this flag only controls whether Folia will let the plugin load, and it is
+# left on so a Folia boot can be TESTED. Two things must land before it is honest: the
+# ProtocolLib dependency below (ProtocolLib does not support Folia, and this plugin imports
+# its classes directly, so it cannot even class-load there), and an audit of the scheduler
+# use, which is only partly adapted. See docs/notes/CANOPY-PREP-PLAN.md.
 folia-supported: true
 authors: [PizzaSMP]
 description: PizzaSMP core UX plugin (join/quit suppression, guide/settings/stats GUIs)
+# ProtocolLib is a HARD class-load dependency: this plugin imports com.comphenix.protocol.*
+# directly for four packet listeners. Without this declaration its absence surfaced as an
+# unexplained failure inside PluginClassLoader.<init>, before any guard in the code could run
+# or report anything useful. Declaring it makes the failure name itself.
+softdepend: [ProtocolLib]
 libraries:
   - org.mariadb.jdbc:mariadb-java-client:3.5.4
   - com.zaxxer:HikariCP:5.1.0
@@ -34,7 +44,18 @@ commands:
   stats:
     usage: /stats [player]
   shop:
-    usage: /shop
+    usage: /shop [reload]
+  # /block is a separate registration rather than an alias of /ignore: onCommand switches on the
+  # registered command name, so an alias would arrive indistinguishable from /ignore and the
+  # messages back would use the wrong word.
+  ignore:
+    usage: /ignore [player|list]
+  block:
+    usage: /block [player|list]
+  unignore:
+    usage: /unignore <player>
+  unblock:
+    usage: /unblock <player>
   sell:
     usage: /sell [all|reload]
   ah:

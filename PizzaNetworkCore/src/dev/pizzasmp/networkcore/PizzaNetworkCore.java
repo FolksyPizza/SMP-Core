@@ -559,6 +559,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // Runtime End-RTP-closed flag (was a compile-time constant); toggle from the Feature Flags panel.
     private volatile boolean endRtpClosed = true;
     private static final String PERM_ADMIN_CONSOLE = "pizzasmp.admin.console";
+    /** Staff browsing another player's homes (/homes <player>, /admindelhome). */
+    private static final String PERM_ADMIN_HOMES = "pizzasmp.admin.homes";
     private volatile int currentThrottledVd = 10;
     private volatile int targetVd = 10;
     private volatile long lastVdRecoveryCheck = 0L;
@@ -663,6 +665,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.routerDebug = this.settings.getBoolean("router.debug_log", false);
         this.combatDebug = this.settings.getBoolean("combat.debug_log", false);
         this.rtpDebug = this.settings.getBoolean("rtp.debug_log", true);
+        java.util.List<String> graceCauses = this.settings.getStringList("teleport.grace.causes");
+        if (!graceCauses.isEmpty()) {
+            this.teleportGraceCauses = new java.util.HashSet<>();
+            for (String c : graceCauses) this.teleportGraceCauses.add(c.trim().toUpperCase(Locale.ROOT));
+        }
+        this.teleportGraceTicks = Math.max(0L, this.settings.getLong("teleport.grace.ticks", 60L));
         this.chatBridgeDebug = this.settings.getBoolean("chat_debug.log_bridge_payloads", false);
         this.getLogger().info("[hud] icon mode=" + (this.isAsciiHudIconsEnabled() ? "ascii-fallback" : "glyph-preferred") + " shards=" + this.hudGlyph("\u25c6", "[S]") + " kills=" + this.hudGlyph("\u2020", "[K]") + " deaths=" + this.hudGlyph("\u2620", "[D]") + " playtime=" + this.hudGlyph("\u231b", "[T]"));
         this.setupEconomy();
@@ -682,6 +690,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.registerCommand("settings", this);
         this.registerCommand("stats", this);
         this.registerCommand("shop", this);
+        this.registerCommand("ignore", this);
+        this.registerCommand("block", this);
+        this.registerCommand("unignore", this);
+        this.registerCommand("unblock", this);
         this.registerCommand("navigator", this);
         this.registerCommand("spawn", this);
         this.registerCommand("warp", this);
@@ -896,6 +908,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             File itemsDir = new File(externalDir, "items");
             if (categoriesFile.exists() && itemsDir.isDirectory()) {
                 this.shopConfig = this.loadShopConfigFromExternal(categoriesFile, itemsDir);
+                ConfigurationSection loaded = this.shopConfig.getConfigurationSection("shop.categories");
+                this.getLogger().info("[shop] Loaded " + (loaded != null ? loaded.getKeys(false).size() : 0)
+                    + " categories from " + externalDir.getAbsolutePath());
                 return;
             }
         }
@@ -906,6 +921,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.saveResource("shop.yml", false);
         }
         this.shopConfig = YamlConfiguration.loadConfiguration((File)file);
+        // Loud on purpose. This fallback is a stale bundled catalogue, and because it silently
+        // "works" it hid the fact that every backend was serving the wrong shop: the maintained
+        // categories.yml/items/ set lives at the NETWORK root, while the lookup above is relative
+        // to each backend. scripts/sync_shop_config.sh is what copies it down.
+        this.getLogger().warning("[shop] configs/shop/{categories.yml,items/} not found under "
+            + (root != null ? root.getAbsolutePath() : "?")
+            + " — falling back to the bundled shop.yml. Run scripts/sync_shop_config.sh.");
     }
 
     private void loadSellConfig() {
@@ -1186,12 +1208,36 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.playerSyncManager != null) {
             this.playerSyncManager.handleQuit(e.getPlayer());
         }
+        // Backstop the advancement save: onAdvancement covers earns during play, this covers the
+        // final state on the way out. Paper flushes the file on earn, so no saveData() is needed;
+        // read it off-thread.
+        this.runAsyncTask(() -> this.saveAdvancementsToDb(uuid));
     }
 
     @EventHandler
     public void onAdvancement(org.bukkit.event.player.PlayerAdvancementDoneEvent e) {
         // Suppress advancement broadcast messages from being shown to all players
         e.message(null);
+        // Persist the new progress now, not just on quit. Paper has already rewritten the on-disk
+        // advancements file by the time this fires, so a player who earns something and immediately
+        // switches backends carries it with them. Delayed a tick to be sure the flush has landed.
+        final UUID advUuid = e.getPlayer().getUniqueId();
+        this.runPlayerTaskLater(e.getPlayer(), () -> this.runAsyncTask(() -> this.saveAdvancementsToDb(advUuid)), 1L);
+    }
+
+    /**
+     * Put the player's synced advancements on disk before they load. AsyncPreLogin blocks the
+     * login until this returns, which is the ordering the whole file-copy approach depends on:
+     * the file has to be in place before Paper reads it when the player entity is created.
+     */
+    @EventHandler(priority = EventPriority.LOW)
+    public void onPreLoginAdvancements(org.bukkit.event.player.AsyncPlayerPreLoginEvent e) {
+        if (e.getLoginResult() != org.bukkit.event.player.AsyncPlayerPreLoginEvent.Result.ALLOWED) return;
+        try {
+            this.writeAdvancementsFromDb(e.getUniqueId());
+        } catch (Exception ex) {
+            this.getLogger().warning("[adv] pre-login write failed for " + e.getUniqueId() + ": " + ex.getMessage());
+        }
     }
 
     @EventHandler(ignoreCancelled=true)
@@ -3460,6 +3506,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 break;
             }
             case "shop": {
+                // pizzasmp.shop.admin.reload has been declared in plugin.yml all along but was
+                // never wired to anything, so editing configs/shop meant a full restart. Mirrors
+                // /sell reload.
+                if (args.length > 0 && "reload".equalsIgnoreCase(args[0])) {
+                    if (!p.hasPermission("pizzasmp.shop.admin.reload")) {
+                        p.sendMessage("§cNo permission.");
+                        return true;
+                    }
+                    this.loadShopConfig();
+                    p.sendMessage("§aShop catalogue reloaded.");
+                    return true;
+                }
                 if (!p.hasPermission("pizzasmp.use.shop")) {
                     return true;
                 }
@@ -3531,6 +3589,23 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             case "friend":
             case "friends": {
                 this.handleFriendCommand(p, args);
+                break;
+            }
+            case "ignore": {
+                this.handleIgnoreCommand(p, args, "ignore", false);
+                break;
+            }
+            case "block": {
+                // Alias, not a second system: same table, same enforcement, different word.
+                this.handleIgnoreCommand(p, args, "block", false);
+                break;
+            }
+            case "unignore": {
+                this.handleIgnoreCommand(p, args, "ignore", true);
+                break;
+            }
+            case "unblock": {
+                this.handleIgnoreCommand(p, args, "block", true);
                 break;
             }
             case "sell": {
@@ -3652,6 +3727,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 break;
             }
             case "homes": {
+                // `/homes <player>` is the staff browse. It used to live in PizzaAdminTools and
+                // read the retired SetHome plugin's per-server YAML, while `/home` read the
+                // homes table — two datasets behind two commands that look like one feature.
+                // Staff saw stale data, or none at all. One owner, one source.
+                if (args.length >= 1 && p.hasPermission(PERM_ADMIN_HOMES)) {
+                    this.openHomesOfPlayer(p, args[0]);
+                    break;
+                }
                 this.openHomesFromAnyServer(p);
                 break;
             }
@@ -4999,6 +5082,48 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return clone;
     }
 
+    /**
+     * Staff view of another player's homes, from the shared table.
+     *
+     * Replaces the PizzaAdminTools version, which read the retired SetHome plugin's
+     * per-server YAML — a different dataset from the one /home writes, so staff were shown
+     * stale homes or none at all. Text rather than a GUI: this is a lookup, and staff
+     * generally want the coordinates to act on rather than a clickable list.
+     */
+    private void openHomesOfPlayer(Player staff, String targetName) {
+        this.runAsyncTask(() -> {
+            UUID targetUuid = this.playerUuidByName(targetName);
+            if (targetUuid == null) {
+                this.runOnPlayerThread(staff, () -> staff.sendActionBar(this.networkAbsenceMessage(targetName)));
+                return;
+            }
+            java.util.List<String> lines = new ArrayList<>();
+            String sql = "SELECT home_name, world_name, x, y, z FROM homes WHERE uuid=? ORDER BY home_name";
+            try (Connection c = this.openSyncConnection();
+                 PreparedStatement ps = c.prepareStatement(sql)) {
+                ps.setString(1, targetUuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        lines.add("\u00a77 - \u00a7f" + rs.getString(1) + " \u00a78" + rs.getString(2)
+                            + " \u00a77" + Math.round(rs.getDouble(3)) + ", " + Math.round(rs.getDouble(4))
+                            + ", " + Math.round(rs.getDouble(5)));
+                    }
+                }
+            } catch (Exception ex) {
+                this.getLogger().warning("homes lookup failed for " + targetName + ": " + ex.getMessage());
+                return;
+            }
+            this.runOnPlayerThread(staff, () -> {
+                if (lines.isEmpty()) {
+                    staff.sendMessage("\u00a77" + targetName + " has no homes.");
+                    return;
+                }
+                staff.sendMessage(this.legacyColorize("&#00BFFF" + targetName + "&7's homes (" + lines.size() + ")"));
+                for (String line : lines) staff.sendMessage(line);
+            });
+        });
+    }
+
     private void openHomesFromAnyServer(Player player) {
         if (player == null || !player.hasPermission("pizzasmp.homes.open")) {
             return;
@@ -5334,6 +5459,113 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.runPlayerTaskLater(player, () -> {
             if (player.isOnline()) player.setFallDistance(0.0f);
         }, 1L);
+    }
+
+    /**
+     * Which teleport causes earn the arrival grace, and for how long.
+     *
+     * The defaults draw the line at "did the player choose to arrive here, mid-fight?".
+     *
+     *   COMMAND / PLUGIN         - /rtp, /home, /tpa, /spawn, /warp. The whole point.
+     *   NETHER_PORTAL/END_PORTAL - you materialise in terrain that is still loading, and a
+     *                              nether portal quite happily opens into lava or a ghast's
+     *                              line of sight. This is the classic chunk-load death.
+     *
+     * Deliberately absent: ENDER_PEARL and CHORUS_FRUIT are movement used DURING a fight, and
+     * three seconds of immunity would turn a mobility item into a combat one. END_GATEWAY is
+     * the same story in the end. SPECTATE, DISMOUNT and EXIT_BED are not arrivals anyone can
+     * be ambushed at.
+     */
+    private java.util.Set<String> teleportGraceCauses = java.util.Set.of(
+        "COMMAND", "PLUGIN", "NETHER_PORTAL", "END_PORTAL");
+    private long teleportGraceTicks = 60L;
+
+    /** Players inside a post-teleport grace window, keyed to when it expires. */
+    private final Map<UUID, Long> rtpGraceUntil = new ConcurrentHashMap<>();
+
+    /**
+     * Grant the grace window after ANY administrative teleport, not just RTP.
+     *
+     * Arriving somewhere is the moment you are least able to react: the world around you is
+     * still loading, you cannot see what is there yet, and anything already in that space
+     * gets a free hit. That is true of /home, /tpa, /spawn and /warp exactly as much as of
+     * /rtp.
+     *
+     * Ender pearls and chorus fruit are deliberately excluded. They are movement players use
+     * DURING a fight, and three seconds of immunity on a pearl would turn a mobility item
+     * into a combat one.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTeleportGrace(org.bukkit.event.player.PlayerTeleportEvent event) {
+        if (!this.teleportGraceCauses.contains(event.getCause().name())) {
+            return;
+        }
+        this.grantRtpGrace(event.getPlayer(), this.teleportGraceTicks);
+    }
+
+    /**
+     * Absorb damage during the grace window — except the void.
+     *
+     * Void damage is deliberately still applied. It is not something that "happens to" an
+     * arriving player the way a mob or a trap is; it means they are somewhere they cannot be,
+     * and suppressing it would leave them falling forever out of the world instead of dying
+     * and respawning. The void-rescue task is what handles that case, and it needs the damage
+     * to do its job.
+     *
+     * This replaced blanket setInvulnerable(true), which could not express the exception and
+     * also risked clearing invulnerability from someone who had it for another reason.
+     */
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onGraceDamage(org.bukkit.event.entity.EntityDamageEvent event) {
+        if (!(event.getEntity() instanceof Player player)) {
+            return;
+        }
+        if (event.getCause() == org.bukkit.event.entity.EntityDamageEvent.DamageCause.VOID) {
+            return;
+        }
+        Long until = this.rtpGraceUntil.get(player.getUniqueId());
+        if (until == null) {
+            return;
+        }
+        if (until <= System.currentTimeMillis()) {
+            this.rtpGraceUntil.remove(player.getUniqueId());
+            return;
+        }
+        event.setCancelled(true);
+    }
+
+    /**
+     * Brief invulnerability around a random teleport.
+     *
+     * RTP is what people use to LEAVE somewhere dangerous. Escaping a trap only works if the
+     * escape itself is safe: between running the command and arriving there is a transfer, a
+     * destination search and a chunk load, and for that whole window the player is still
+     * standing in whatever they were trying to get away from — or has just materialised in
+     * terrain that is still settling. Damage taken there is damage taken for using the
+     * feature correctly.
+     *
+     * Restores whatever the player's invulnerability was rather than assuming false, so this
+     * cannot quietly strip it from someone in creative or an admin who set it deliberately.
+     * Fire is extinguished too: arriving somewhere safe while still burning is the same bug
+     * wearing a different hat.
+     */
+    private void grantRtpGrace(Player player, long ticks) {
+        if (player == null || !player.isOnline()) return;
+        UUID id = player.getUniqueId();
+        // merge/max so a second teleport inside the window extends it rather than truncating.
+        this.rtpGraceUntil.merge(id, System.currentTimeMillis() + ticks * 50L, Math::max);
+        player.setFireTicks(0);
+        player.setFallDistance(0.0f);
+        // No setInvulnerable here: onGraceDamage does the filtering, which is what lets void
+        // damage through and avoids touching invulnerability the player may hold for another
+        // reason. The map entry is cleaned up lazily on the first damage after it expires,
+        // and on quit.
+        this.runPlayerTaskLater(player, () -> {
+            Long expiry = this.rtpGraceUntil.get(id);
+            if (expiry != null && expiry <= System.currentTimeMillis()) {
+                this.rtpGraceUntil.remove(id);
+            }
+        }, ticks + 2L);
     }
 
     private int homeLimit(Player player) {
@@ -5815,6 +6047,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ,
             Math.min(Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius - 1.0), borderRadius,
             Math.max(16, this.settings.getInt("rtp.search-attempts", 120)), player.getLocation().getYaw());
+        // The search is asynchronous and can take a moment; the player spends it exactly where
+        // they were when they asked to leave.
+        this.grantRtpGrace(player, 60L);
         this.rtpLog("search_start", "player=" + player.getName() + " world=" + world.getName()
             + " radius=" + (long) plan.minRadius + ".." + (long) plan.maxRadius + " attempts=" + plan.maxAttempts);
         this.rtpAttemptAsync(uuid, plan, dimension, bypassChecks, 0);
@@ -5876,6 +6111,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     this.playerSyncManager.queueOneTimeAction(uuid, "RTPDB", 60);
                 }
                 this.rtpLog("cross_filed", "player=" + player.getName() + " transferring to survival");
+                // Cover the transfer itself: until they leave, they are still standing in
+                // whatever they ran /rtp to escape.
+                this.grantRtpGrace(player, 60L);
                 this.connectToServer(player, "survival");
             });
         });
@@ -5939,6 +6177,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             this.rtpLog("db_resolved", "uuid=" + uuidRaw + " at=" + loc.getBlockX() + ","
                 + loc.getBlockY() + "," + loc.getBlockZ());
+            // Hand it to the spawn-location hook so a player still in transit materialises
+            // AT the destination rather than being teleported a tick after they land.
+            try {
+                this.resolvedRtpDestinations.put(UUID.fromString(uuidRaw), loc);
+            } catch (IllegalArgumentException ignored) { }
             this.runAsyncTask(() -> {
                 String sql = "UPDATE rtp_requests SET status='RESOLVED', world_name=?, x=?, y=?, z=? WHERE uuid=?";
                 try (Connection c = this.openSyncConnection();
@@ -5961,6 +6204,40 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }));
     }
 
+    /**
+     * Destinations resolved on this backend but not yet collected by an arriving player.
+     *
+     * Kept in memory purely so the spawn-location hook below can answer without a database
+     * round trip on the login path. The database row remains the source of truth; this is a
+     * cache that may miss (after a restart, say), and every miss falls back to the on-join
+     * apply.
+     */
+    private final Map<UUID, Location> resolvedRtpDestinations = new ConcurrentHashMap<>();
+
+    /**
+     * Place a cross-server RTP arrival BEFORE the player enters the world.
+     *
+     * Teleporting on join works, but the player is placed at their previous location first
+     * and moved a tick or two later, which can flash the arrival point — the exact thing the
+     * pre-resolved pipeline exists to avoid. This event fires while the login is still being
+     * assembled, so setting the location here means the player materialises at the RTP
+     * destination and never occupies anywhere else.
+     *
+     * This is also why holding the player on the proxy's connecting screen would be the wrong
+     * trade: it would add real waiting to hide a flash that can simply be eliminated.
+     */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onRtpArrivalSpawn(org.spigotmc.event.player.PlayerSpawnLocationEvent event) {
+        Location dest = this.resolvedRtpDestinations.remove(event.getPlayer().getUniqueId());
+        if (dest == null || dest.getWorld() == null) {
+            return;
+        }
+        event.setSpawnLocation(dest);
+        this.rtpLog("db_apply_at_spawn", "player=" + event.getPlayer().getName()
+            + " at=" + dest.getBlockX() + "," + dest.getBlockY() + "," + dest.getBlockZ());
+        this.consumeRtpRequest(event.getPlayer().getUniqueId());
+    }
+
     private void failRtpRequest(String uuidRaw) {
         this.runAsyncTask(() -> {
             try (Connection c = this.openSyncConnection();
@@ -5981,8 +6258,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      */
     void applyResolvedRtp(Player player, int attempt) {
         if (player == null || !player.isOnline() || attempt > 40) {   // ~8s of retries
-            if (attempt > 40) this.rtpLog("db_apply_timeout", "player="
-                + (player == null ? "?" : player.getName()));
+            if (attempt > 40) {
+                this.rtpLog("db_apply_timeout", "player=" + (player == null ? "?" : player.getName()));
+                // Gave up waiting — restore vision rather than leave them staring at black.
+                if (player != null && player.isOnline()) {
+                    this.runOnPlayerThread(player, () -> {
+                        player.removePotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS);
+                    });
+                }
+            }
             return;
         }
         UUID uuid = player.getUniqueId();
@@ -6006,14 +6290,33 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             if (status == null) return;                       // nothing queued for them
             if ("PENDING".equals(status) || "RESOLVING".equals(status)) {
-                // Still working. Check again shortly.
+                // The player is HERE and the destination is not ready, which is the only case
+                // that can still show them their arrival point before the teleport. Usually
+                // resolution finishes during the transfer and PlayerSpawnLocationEvent has
+                // already placed them, so this path is rare — but when it happens, black the
+                // screen out rather than let them watch the wrong place. Cleared the instant
+                // the teleport lands. Blindness rather than parking them in the sky: it hides
+                // the same thing with no chance of leaving someone falling or stranded if the
+                // search never answers.
+                if (attempt == 0) {
+                    this.runOnPlayerThread(player, () -> {
+                        if (player.isOnline()) {
+                            // Landed early: hold the grace open until the real destination
+                            // arrives, or they take damage on a spot they never chose.
+                            this.grantRtpGrace(player, 200L);
+                            player.addPotionEffect(new org.bukkit.potion.PotionEffect(
+                                org.bukkit.potion.PotionEffectType.BLINDNESS, 200, 0, false, false, false));
+                        }
+                    });
+                }
                 this.scheduleTask(() -> this.applyResolvedRtp(player, attempt + 1), 200, TimeUnit.MILLISECONDS);
                 return;
             }
             if (!"RESOLVED".equals(status) || world == null) {
                 this.consumeRtpRequest(uuid);
-                this.runOnPlayerThread(player, () -> player.sendActionBar(
-                    Component.text("§cCouldn't find a safe spot — try /rtp again.")));
+                this.runOnPlayerThread(player, () -> {
+                    player.removePotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS);
+                });
                 return;
             }
             final String fWorld = world; final double fx = x, fy = y, fz = z;
@@ -6025,8 +6328,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.rtpLog("db_apply", "player=" + player.getName() + " at="
                     + dest.getBlockX() + "," + dest.getBlockY() + "," + dest.getBlockZ());
                 player.teleportAsync(dest).thenAccept(okTp -> this.runOnPlayerThread(player, () -> {
+                    // Lift the cover-up whether or not the teleport succeeded — leaving a
+                    // player blind because a teleport failed would be a worse bug than the
+                    // flash this hides.
+                    player.removePotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS);
                     if (!okTp) return;
                     this.resetFallAfterTeleport(player);
+                    this.grantRtpGrace(player, 60L);
                     this.markRtpUsed(player);
                     player.sendActionBar(Component.text("§7You teleported to a random location."));
                     if (this.isSettingEnabledCached(uuid, "music_sound_notifications")) {
@@ -6054,7 +6362,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (attempt >= plan.maxAttempts) {
             this.activeRtpSearches.remove(uuid);
             this.rtpLog("search_exhausted", "player=" + player.getName() + " attempts=" + attempt);
-            player.sendActionBar(Component.text("\u00a7cCouldn't find a safe spot \u2014 try again."));
             this.rtpCooldowns.remove(uuid);
             return;
         }
@@ -7148,6 +7455,124 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private static final int MAX_FRIENDS = 100;
 
+    // ===================== Ignore / Block =====================
+    // /block is a pure alias for /ignore — same table, same code path, just the word players reach
+    // for first. Enforcement lives in privacyAllows (messages, tpa, payments) and notifyFollowers
+    // (activity + transaction feeds), so every gated action is covered by the one list.
+
+    /**
+     * Shared by /ignore, /block and their un- forms. {@code verb} only changes the wording shown
+     * back; {@code removeOnly} is what separates /unignore (never adds) from /ignore (toggles).
+     */
+    private void handleIgnoreCommand(Player p, String[] args, String verb, boolean removeOnly) {
+        if (args.length < 1 || args[0].isBlank()) {
+            this.runAsyncTask(() -> this.sendIgnoreList(p, verb));
+            return;
+        }
+        String sub = args[0].toLowerCase(Locale.ROOT);
+        if ("list".equals(sub)) {
+            this.runAsyncTask(() -> this.sendIgnoreList(p, verb));
+            return;
+        }
+        final String targetName = args[0];
+        this.runAsyncTask(() -> {
+            UUID lookedUp = this.playerUuidByNameLookup(targetName);
+            if (lookedUp == null) {
+                Player fz = this.fuzzyOnlinePlayer(p, targetName);
+                if (fz != null) lookedUp = fz.getUniqueId();
+            }
+            final UUID targetUuid = lookedUp;
+            if (targetUuid == null) {
+                this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cPlayer not found: " + targetName)));
+                return;
+            }
+            if (targetUuid.equals(p.getUniqueId())) {
+                this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cYou cannot " + verb + " yourself.")));
+                return;
+            }
+            String resolved = this.playerNameForUuid(targetUuid.toString());
+            final String displayName = resolved != null ? resolved : targetName;
+            try (Connection conn = this.openSyncConnection()) {
+                // Toggle. Running /ignore on someone already ignored un-ignores them, so players
+                // never have to remember whether /unignore exists.
+                if (this.isIgnoring(conn, p.getUniqueId(), targetUuid)) {
+                    try (PreparedStatement ps = conn.prepareStatement(
+                            "DELETE FROM player_ignores WHERE ignorer_uuid=? AND ignored_uuid=?")) {
+                        ps.setString(1, p.getUniqueId().toString());
+                        ps.setString(2, targetUuid.toString());
+                        ps.executeUpdate();
+                    }
+                    this.runOnPlayerThread(p, () -> p.sendActionBar(
+                        Component.text("§aYou un" + verb + "ed §f" + displayName)));
+                    return;
+                }
+                if (removeOnly) {
+                    this.runOnPlayerThread(p, () -> p.sendActionBar(
+                        Component.text("§7You have not " + verb + "ed §f" + displayName)));
+                    return;
+                }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT IGNORE INTO player_ignores (ignorer_uuid, ignored_uuid) VALUES (?,?)")) {
+                    ps.setString(1, p.getUniqueId().toString());
+                    ps.setString(2, targetUuid.toString());
+                    ps.executeUpdate();
+                }
+            } catch (Exception ex) {
+                this.getLogger().warning("handleIgnoreCommand failed: " + ex.getMessage());
+                this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cCould not update your list — try again.")));
+                return;
+            }
+            String actorName = p.getName();
+            this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§7You " + verb + "ed §f" + displayName)));
+            this.notifyIgnoredPlayer(targetUuid, actorName);
+        });
+    }
+
+    /**
+     * Tell the ignored player, on the hotbar, wherever they are on the network.
+     *
+     * Local delivery first, then the DB queue as the cross-backend path — the same split every
+     * other player-directed notice uses, because a plugin message cannot reach a backend the
+     * sender has no connection to.
+     */
+    private void notifyIgnoredPlayer(UUID targetUuid, String actorName) {
+        String line = "§7" + actorName + " ignored you";
+        Player local = Bukkit.getPlayer(targetUuid);
+        if (local != null && local.isOnline()) {
+            Player t = local;
+            this.runOnPlayerThread(t, () -> t.sendActionBar(Component.text(line)));
+            return;
+        }
+        this.queuePlayerNotification(targetUuid, line, "ACTIONBAR", 60);
+    }
+
+    private void sendIgnoreList(Player p, String verb) {
+        java.util.List<String> names = new java.util.ArrayList<>();
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                 "SELECT ignored_uuid FROM player_ignores WHERE ignorer_uuid=? ORDER BY created_at DESC")) {
+            ps.setString(1, p.getUniqueId().toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = this.playerNameForUuid(rs.getString(1));
+                    names.add(name != null ? name : rs.getString(1));
+                }
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("sendIgnoreList failed: " + ex.getMessage());
+            this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cCould not read your list — try again.")));
+            return;
+        }
+        this.runOnPlayerThread(p, () -> {
+            if (names.isEmpty()) {
+                p.sendMessage("§7You have not " + verb + "ed anyone. §f/" + verb + " <player>");
+                return;
+            }
+            p.sendMessage("§7You have " + verb + "ed §f" + names.size() + "§7: §f" + String.join("§7, §f", names));
+            p.sendMessage("§8Run §7/" + verb + " <player> §8again to remove someone.");
+        });
+    }
+
     private void handleFriendCommand(Player p, String[] args) {
         if (args.length == 0) {
             // 1.21.6+ Java players get the dialog UI; Bedrock + older Via clients get text commands.
@@ -7190,6 +7615,17 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private static final java.util.List<String> FOLLOW_SETTING_COLS = java.util.List.of(
         "see_activity", "see_transactions", "can_message", "can_tpa", "auto_accept_tpa", "can_pay");
+
+    /** True if {@code ignorer} has {@code ignored} on their ignore list. Async only. */
+    private boolean isIgnoring(Connection conn, UUID ignorer, UUID ignored) throws Exception {
+        if (ignorer == null || ignored == null || ignorer.equals(ignored)) return false;
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT 1 FROM player_ignores WHERE ignorer_uuid=? AND ignored_uuid=? LIMIT 1")) {
+            ps.setString(1, ignorer.toString());
+            ps.setString(2, ignored.toString());
+            try (ResultSet rs = ps.executeQuery()) { return rs.next(); }
+        }
+    }
 
     private boolean isFollowing(Connection conn, UUID follower, UUID target) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM follows WHERE follower_uuid=? AND target_uuid=? LIMIT 1")) {
@@ -7374,9 +7810,17 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void notifyFollowers(UUID actor, String actorName, String action, boolean transaction) {
         final String col = transaction ? "see_transactions" : "see_activity";
         this.runAsyncTask(() -> {
+            // The NOT EXISTS pair makes an ignore a two-way blackout: a follower who ignores the
+            // actor stops hearing about them, and an actor who ignores a follower stops broadcasting
+            // to them. Doing it in SQL keeps this one query no matter how many followers there are.
+            String sql = "SELECT f.follower_uuid FROM follows f WHERE f.target_uuid=? AND f." + col + "=1"
+                + " AND NOT EXISTS (SELECT 1 FROM player_ignores i WHERE i.ignorer_uuid=f.follower_uuid AND i.ignored_uuid=?)"
+                + " AND NOT EXISTS (SELECT 1 FROM player_ignores i WHERE i.ignorer_uuid=? AND i.ignored_uuid=f.follower_uuid)";
             try (Connection conn = this.openSyncConnection();
-                 PreparedStatement ps = conn.prepareStatement("SELECT follower_uuid FROM follows WHERE target_uuid=? AND " + col + "=1")) {
+                 PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, actor.toString());
+                ps.setString(2, actor.toString());
+                ps.setString(3, actor.toString());
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         UUID fid;
@@ -9480,7 +9924,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (attempt >= plan.maxAttempts) {
             this.activeRtpSearches.remove(uuid);
-            this.runOnPlayerThread(player, () -> player.sendActionBar(this.legacyColorize("§cCouldn't find a safe spot — try again.")));
             // Refund the cooldown so they can immediately retry.
             this.rtpCooldowns.remove(uuid);
             return;
@@ -9712,6 +10155,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             player.teleportAsync(dest).thenAccept(ok -> this.runOnPlayerThread(player, () -> {
                 if (ok) {
                     this.resetFallAfterTeleport(player);
+                    this.grantRtpGrace(player, 60L);
                     player.sendActionBar(Component.text("\u00a77You teleported to a random location."));
                     if (this.isSettingEnabledCached(uuid, "music_sound_notifications")) {
                         player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 1.2f);
@@ -9787,7 +10231,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 for (PlayerNotificationEntry notification : notifications) {
                     String target;
                     if (notification.message() != null && !notification.message().isBlank()) {
-                        player.sendMessage(notification.message());
+                        // ACTIONBAR routes to the hotbar instead of chat. Some notices are meant to be
+                        // seen once and not clutter the log — "X ignored you" is one of them.
+                        if ("ACTIONBAR".equals(notification.action())) {
+                            player.sendActionBar((Component)Component.text((String)notification.message()));
+                        } else {
+                            player.sendMessage(notification.message());
+                        }
                     }
                     if (notification.action() == null || notification.action().isBlank() || !notification.action().startsWith("CONNECT:") || (target = this.normalizeServerTarget(notification.action().substring("CONNECT:".length()))).isBlank() || target.equalsIgnoreCase(this.detectServerName())) continue;
                     this.connectToServer(player, target);
@@ -10570,6 +11020,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (target == null || sender == null || target.equals(sender)) return true;
         String col = this.privacyToggleColumn(key);
         try (Connection conn = this.openSyncConnection()) {
+            // Ignore outranks everything below it, including a per-friend toggle that says yes.
+            // Deliberately first: /ignore is the one control a player reaches for when someone is
+            // actually bothering them, so it must not be overridable by a relationship they set up
+            // before that started.
+            if (this.isIgnoring(conn, target, sender)) {
+                return false;
+            }
             // Per-friend override: if the target follows the sender, that relationship's toggle decides.
             if (col != null) {
                 try (PreparedStatement ps = conn.prepareStatement(
@@ -10859,65 +11316,32 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         Scoreboard board = Bukkit.getScoreboardManager().getNewScoreboard();
-        Objective objective = board.registerNewObjective("pizzahud", "dummy", this.hudTitleText());
+        // Title is the player's own name, matching the HUD design. Bold white, like the mockup.
+        Objective objective = board.registerNewObjective("pizzahud", "dummy", "\u00a7f\u00a7l" + player.getName());
         objective.setDisplaySlot(DisplaySlot.SIDEBAR);
         // Hide the score numbers on the right side of every line
         objective.numberFormat(io.papermc.paper.scoreboard.numbers.NumberFormat.blank());
         int score = 15;
         UUID hudUuid = player.getUniqueId();
-        objective.getScore(this.blankLineToken(1)).setScore(score--);
+        // Layout: coloured icon + white value, one row per enabled stat. No text labels, no team
+        // or region/ping rows \u2014 the icon carries the meaning. Icons are standard font glyphs tinted
+        // by the colour code (orange skull = tinted skull glyph, etc.), so no resource pack is needed.
         if (this.isSettingEnabledCached(hudUuid, "show_money")) {
-            objective.getScore("\u00a7a\u00a7l$ \u00a7fMoney \u00a7a" + this.formatMillions(hud.stats.money)).setScore(score--);
+            objective.getScore("\u00a7a\u00a7l$ \u00a7f" + this.formatMillions(hud.stats.money)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_shards")) {
-            objective.getScore("\u00a75" + this.hudGlyph("\u25c6", "[S]") + " \u00a7fShards \u00a75" + this.formatCompactNumber(hud.stats.shards)).setScore(score--);
+            objective.getScore("\u00a7d" + this.hudGlyph("\u2605", "[S]") + " \u00a7f" + this.formatCompactNumber(hud.stats.shards)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_kills")) {
-            objective.getScore("\u00a7c" + this.hudGlyph("\u2694", "[K]") + " \u00a7fKills \u00a7c" + this.formatCompactNumber(hud.stats.kills)).setScore(score--);
+            objective.getScore("\u00a7c" + this.hudGlyph("\u2694", "[K]") + " \u00a7f" + this.formatCompactNumber(hud.stats.kills)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_deaths")) {
-            objective.getScore("\u00a76" + this.hudGlyph("\u2620", "[D]") + " \u00a7fDeaths \u00a76" + this.formatCompactNumber(hud.stats.deaths)).setScore(score--);
+            objective.getScore("\u00a76" + this.hudGlyph("\u2620", "[D]") + " \u00a7f" + this.formatCompactNumber(hud.stats.deaths)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_playtime")) {
-            objective.getScore("\u00a7e" + this.hudGlyph("\u231a", "[T]") + " \u00a7fPlaytime \u00a7e" + this.formatPlaytimeDaysHours(hud.stats.playtimeSeconds)).setScore(score--);
+            objective.getScore("\u00a7e" + this.hudGlyph("\u231a", "[T]") + " \u00a7f" + this.formatPlaytimeDaysHours(hud.stats.playtimeSeconds)).setScore(score--);
         }
-        if (!TEAMS_DISABLED && !"NONE".equalsIgnoreCase(hud.teamName)) {
-            objective.getScore("\u00a7x\u00a70\u00a70\u00a7B\u00a7F\u00a7F\u00a7F" + this.hudGlyph("\u2692", "[AXE]") + " \u00a7x\u00a70\u00a70\u00a7B\u00a7F\u00a7F\u00a7F(" + hud.teamName + ")").setScore(score--);
-        }
-        objective.getScore(this.blankLineToken(2)).setScore(score--);
-        this.setSidebarSplitLine(board, objective, "hudregion", "\u00a71\u00a7r", score, "\u00a77NA East ", "\u00a77(" + this.brandSectionHex("primary") + Math.max(0, player.getPing()) + "ms\u00a77)");
         player.setScoreboard(board);
-    }
-
-    private void setSidebarSplitLine(Scoreboard board, Objective objective, String teamName, String entry, int score, String prefix, String suffix) {
-        Team team = board.getTeam(teamName);
-        if (team == null) {
-            team = board.registerNewTeam(teamName);
-        }
-        team.setPrefix(prefix);
-        team.setSuffix(suffix);
-        if (!team.hasEntry(entry)) {
-            team.addEntry(entry);
-        }
-        objective.getScore(entry).setScore(score);
-    }
-
-    private String hudTitleText() {
-        // Scoreboard sidebar title: the brand display name, bold, each glyph in the primary colour.
-        String prefix = this.brandSectionHex("primary") + "\u00a7l";
-        StringBuilder sb = new StringBuilder();
-        for (char c : this.brandDisplay.toCharArray()) {
-            if (c == ' ') { sb.append(' '); continue; }
-            sb.append(prefix).append(c);
-        }
-        return sb.toString();
-    }
-
-    private String blankLineToken(int idx) {
-        // Each blank line needs a unique entry (scoreboard collapses duplicates).
-        // Use a single color code per line \u2014 invisible, takes one scoreboard row, no extra width.
-        char[] codes = "0123456789abcdef".toCharArray();
-        return "\u00a7" + codes[idx % codes.length];
     }
 
     private String hudGlyph(String preferred, String fallback) {
@@ -12467,6 +12891,123 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // Follow model: created in its OWN block so an earlier failure can't skip it. One-directional
         // follow; mutual follow = friends. Per-relationship toggles live on the follower's row.
         this.ensureFollowsSchema();
+        this.ensureIgnoresSchema();
+        this.ensureAdvancementSchema();
+    }
+
+    /**
+     * Advancement sync store. One blob per player: the raw contents of that player's
+     * advancements/&lt;uuid&gt;.json, which Paper rewrites to disk every time they earn something, so
+     * it is always current. The DB is the single source of truth; each backend writes the blob to
+     * its own world folder before the player loads (AsyncPreLogin) and reads it back on save.
+     */
+    private void ensureAdvancementSchema() {
+        String sql = "CREATE TABLE IF NOT EXISTS player_advancements (" +
+            "uuid CHAR(36) NOT NULL PRIMARY KEY," +
+            "adv_blob LONGBLOB NOT NULL," +
+            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)";
+        try (Connection conn = this.openSyncConnection();
+             Statement st = conn.createStatement()) {
+            this.execSchema(st, sql);
+        } catch (Exception ex) {
+            this.getLogger().warning("Failed creating player_advancements schema: " + ex.getMessage());
+        }
+    }
+
+    /** The player's advancements JSON file in the primary world folder, or null if no world yet. */
+    private java.io.File advancementFile(UUID uuid) {
+        if (Bukkit.getWorlds().isEmpty()) return null;
+        java.io.File worldFolder = Bukkit.getWorlds().get(0).getWorldFolder();
+        return new java.io.File(worldFolder, "advancements/" + uuid + ".json");
+    }
+
+    /**
+     * Read this backend's advancement file for {@code uuid} and store it in the DB. Safe to call
+     * from any thread; does its own IO. A missing or empty file is a no-op — never overwrite the
+     * DB with nothing, or a player who joins a backend they have never earned anything on would
+     * wipe their real progress.
+     */
+    private void saveAdvancementsToDb(UUID uuid) {
+        if (uuid == null) return;
+        java.io.File file = this.advancementFile(uuid);
+        if (file == null || !file.isFile()) return;
+        byte[] bytes;
+        try {
+            bytes = java.nio.file.Files.readAllBytes(file.toPath());
+        } catch (Exception ex) {
+            this.getLogger().warning("[adv] read failed for " + uuid + ": " + ex.getMessage());
+            return;
+        }
+        if (bytes.length == 0) return;
+        String sql = "INSERT INTO player_advancements (uuid, adv_blob) VALUES (?, ?) "
+            + "ON DUPLICATE KEY UPDATE adv_blob=VALUES(adv_blob)";
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            ps.setBytes(2, bytes);
+            ps.executeUpdate();
+        } catch (Exception ex) {
+            this.getLogger().warning("[adv] save failed for " + uuid + ": " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Write the stored advancement blob to this backend's advancement file, so the server loads it
+     * as the player joins. Called from AsyncPreLogin, which blocks the login until it returns —
+     * that ordering is what guarantees the file is in place before Paper reads it. No stored row
+     * (a genuinely new player) is a no-op.
+     */
+    private void writeAdvancementsFromDb(UUID uuid) {
+        if (uuid == null) return;
+        byte[] bytes = null;
+        String sql = "SELECT adv_blob FROM player_advancements WHERE uuid=? LIMIT 1";
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) bytes = rs.getBytes(1);
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("[adv] load failed for " + uuid + ": " + ex.getMessage());
+            return;
+        }
+        if (bytes == null || bytes.length == 0) return;
+        java.io.File file = this.advancementFile(uuid);
+        if (file == null) return;
+        try {
+            java.io.File dir = file.getParentFile();
+            if (dir != null && !dir.isDirectory()) dir.mkdirs();
+            // Write to a temp file then move, so a crash mid-write can never leave a truncated
+            // advancements file that would read as lost progress.
+            java.io.File tmp = new java.io.File(file.getParentFile(), file.getName() + ".tmp");
+            java.nio.file.Files.write(tmp.toPath(), bytes);
+            java.nio.file.Files.move(tmp.toPath(), file.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception ex) {
+            this.getLogger().warning("[adv] write failed for " + uuid + ": " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Ignore list. Separate from follows on purpose: a follow toggle is "what I let people I
+     * follow do", which only exists while the follow does. Ignoring is a standalone decision and
+     * has to survive with no relationship at all.
+     *
+     * Its own block for the same reason as follows — a failure above must not skip it.
+     */
+    private void ensureIgnoresSchema() {
+        String ignoresSql = "CREATE TABLE IF NOT EXISTS player_ignores (" +
+            "ignorer_uuid CHAR(36) NOT NULL," +
+            "ignored_uuid CHAR(36) NOT NULL," +
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+            "PRIMARY KEY (ignorer_uuid, ignored_uuid)," +
+            "INDEX idx_ignored (ignored_uuid))";
+        try (Connection conn = this.openSyncConnection();
+             Statement st = conn.createStatement()) {
+            this.execSchema(st, ignoresSql);
+        } catch (Exception ex) {
+            this.getLogger().warning("Failed creating player_ignores schema: " + ex.getMessage());
+        }
     }
 
     private void ensureFollowsSchema() {
@@ -12478,7 +13019,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             "see_transactions TINYINT(1) NOT NULL DEFAULT 1," +
             "can_message TINYINT(1) NOT NULL DEFAULT 1," +
             "can_tpa TINYINT(1) NOT NULL DEFAULT 1," +
-            "auto_accept_tpa TINYINT(1) NOT NULL DEFAULT 1," +
+            // Opt-in, unlike the others: auto-accepting a teleport is PvP-relevant, so it matches
+            // the global tpa_auto_accept setting in defaulting OFF. You turn it on per person.
+            "auto_accept_tpa TINYINT(1) NOT NULL DEFAULT 0," +
             "can_pay TINYINT(1) NOT NULL DEFAULT 1," +
             "PRIMARY KEY (follower_uuid, target_uuid)," +
             "INDEX idx_follow_target (target_uuid))";
@@ -18273,6 +18816,31 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
+    /**
+     * Whether {@code target} auto-accepts a TPA from {@code requester}. Two independent ways in:
+     *
+     *   - the global "tpa_auto_accept" setting (/tpauto), which accepts from everyone; or
+     *   - the per-follow auto_accept_tpa toggle, which accepts only from people the target follows
+     *     and is set from the relationship dialog ("Auto Accept TPAs"). This is the one that was
+     *     stored and shown but never consulted.
+     *
+     * Direction matches the privacyAllows per-relationship override: the toggle lives on the
+     * TARGET's follow row toward the REQUESTER (follower_uuid=target, target_uuid=requester), i.e.
+     * "I follow you, and I auto-accept your teleport requests".
+     */
+    private boolean shouldAutoAcceptTpa(UUID target, UUID requester) {
+        if (target == null || requester == null) return false;
+        if (this.isSettingEnabledCached(target, "tpa_auto_accept")) return true;
+        try (Connection conn = this.openSyncConnection()) {
+            // getFollowSetting is already false when no follow row exists, so this is true only
+            // when the target follows the requester and left the toggle on.
+            return this.getFollowSetting(conn, target, requester, "auto_accept_tpa");
+        } catch (Exception ex) {
+            this.getLogger().warning("shouldAutoAcceptTpa failed: " + ex.getMessage());
+            return false; // fail closed: never auto-teleport on a DB error
+        }
+    }
+
     private void handleTpaCommand(Player requester, String targetName, String tpaType) {
         Player target = this.fuzzyOnlinePlayer(requester, targetName);   // typo-tolerant name match
         if (target == null) {
@@ -18304,8 +18872,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.tpaCooldowns.put(requester.getUniqueId(), now);
 
         // TPA auto-accept (/tpauto or the /settings toggle): accept immediately through the normal
-        // /tpaccept path so combat checks, countdown and sounds all still apply.
-        if (this.isSettingEnabledCached(target.getUniqueId(), "tpa_auto_accept")) {
+        // /tpaccept path so combat checks, countdown and sounds all still apply. The per-follow
+        // toggle is the second way in — see shouldAutoAcceptTpa.
+        if (this.shouldAutoAcceptTpa(target.getUniqueId(), requester.getUniqueId())) {
             this.hotbarWithSound(requester, "&#00BFFF" + target.getName() + " §7auto-accepts teleport requests",
                 Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.9f);
             this.runOnPlayerThread(target, () -> Bukkit.dispatchCommand(target, "tpaccept " + requester.getName()));
