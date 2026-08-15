@@ -505,8 +505,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private final Map<UUID, TaskHandle> sidebarTasks = new ConcurrentHashMap<UUID, TaskHandle>();
     private final Map<UUID, OrdersViewState> ordersViewState = new ConcurrentHashMap<UUID, OrdersViewState>();
     private final Map<UUID, OrderBuilderState> orderBuilderState = new ConcurrentHashMap<UUID, OrderBuilderState>();
-    private final Map<UUID, Integer> shardBonusMinutes = new ConcurrentHashMap<UUID, Integer>();   // 10-min playtime shard bonus counter
-    private static final long PLAYTIME_SHARD_BONUS = 20L;   // shards granted every 10 minutes online
+    // Global 10-minute shard slot (epochMillis/600000) most recently granted. Seeded lazily to the
+    // current slot the first time the tick runs, so a mid-slot restart does not re-grant that slot.
+    private volatile long lastShardSlot = -1L;
     private final Map<UUID, OrderFulfillmentState> orderFulfillmentState = new ConcurrentHashMap<UUID, OrderFulfillmentState>();
     private final Map<UUID, OrderConfirmState> orderConfirmState = new ConcurrentHashMap<UUID, OrderConfirmState>();
     private final Set<UUID> orderConfirmCloseBypass = ConcurrentHashMap.newKeySet();
@@ -11333,13 +11334,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             objective.getScore("\u00a75" + this.hudGlyph("\u2605", "[S]") + " \u00a7f" + this.formatCompactNumber(hud.stats.shards)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_kills")) {
-            objective.getScore("\u00a7c" + this.hudGlyph("\u2020", "[K]") + " \u00a7f" + this.formatCompactNumber(hud.stats.kills)).setScore(score--);
+            // Single sword glyph (U+1F5E1). \u2694 (two crossed) and \u2020 (dagger) were both rejected.
+            objective.getScore("\u00a7c" + this.hudGlyph("\ud83d\udde1", "[K]") + " \u00a7f" + this.formatCompactNumber(hud.stats.kills)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_deaths")) {
             objective.getScore("\u00a76" + this.hudGlyph("\u2620", "[D]") + " \u00a7f" + this.formatCompactNumber(hud.stats.deaths)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_playtime")) {
-            objective.getScore("\u00a7e" + this.hudGlyph("\u231a", "[T]") + " \u00a7f" + this.formatPlaytimeDaysHours(hud.stats.playtimeSeconds)).setScore(score--);
+            objective.getScore("\u00a7e" + this.hudGlyph("\u231a", "[T]") + " \u00a7f" + this.formatPlaytimeHud(hud.stats.playtimeSeconds)).setScore(score--);
         }
         player.setScoreboard(board);
     }
@@ -12760,15 +12762,23 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     long secs = elapsed;
                     this.updatePlaytimeSeconds(uuid, secs);
                 }
-                // Passive shards: everyone earns 1/min online (active or AFK); pizza++ earns 2/min.
-                this.depositShards(uuid, this.isPizzaPlusPlus(player) ? 2L : 1L);
-                // Every 10 minutes online: a +20 shard "thanks for playing" bonus with a chat notice.
-                int mins = this.shardBonusMinutes.merge(uuid, 1, Integer::sum);
-                if (mins >= 10) {
-                    this.shardBonusMinutes.put(uuid, 0);
-                    this.depositShards(uuid, PLAYTIME_SHARD_BONUS);
+            }
+            // Passive shards: a single global grant of +1 to everyone online, aligned to real-clock
+            // 10-minute slots (:00, :10, :20, ...), not per-minute accrual. The slot is epoch/600000,
+            // which lands on those wall-clock minutes for the host's zone; granting once per new slot
+            // means a player gets exactly one no matter which backend they are on. lastShardSlot is
+            // seeded to the current slot on boot (see field) so a restart never double-grants a slot.
+            long slot = now / 600000L;
+            if (this.lastShardSlot < 0L) {
+                // First tick after boot: adopt the current slot without granting, so the first grant
+                // lands on the next :X0 boundary rather than at a random moment after startup.
+                this.lastShardSlot = slot;
+            } else if (slot != this.lastShardSlot) {
+                this.lastShardSlot = slot;
+                for (Player player : Bukkit.getOnlinePlayers()) {
+                    this.depositShards(player.getUniqueId(), 1L);
                     this.runOnPlayerThread(player, () -> player.sendMessage(this.legacyColorize(
-                        "&7You earned &d&l" + PLAYTIME_SHARD_BONUS + " shards&r&7 for playing the server")));
+                        "&7You earned &d&l1 shard&r&7 for playing the server")));
                 }
             }
         };
@@ -16598,6 +16608,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         long days = hours / 24L;
         long remHours = hours % 24L;
         return days + "D " + remHours + "H " + mins + "M";
+    }
+
+    /**
+     * Playtime for the sidebar HUD: days+hours only, never minutes. Two reasons — the design shows
+     * "21d 14h", and the minutes made this the longest line, stretching the sidebar wider than the
+     * player's name. Under an hour there is nothing but minutes to show, so that lone case keeps them.
+     */
+    private String formatPlaytimeHud(long seconds) {
+        long totalMinutes = Math.max(0L, seconds / 60L);
+        long hours = totalMinutes / 60L;
+        if (hours < 1L) return totalMinutes + "m";
+        if (hours < 24L) return hours + "h";
+        return (hours / 24L) + "d " + (hours % 24L) + "h";
     }
 
     private String formatPlaytimeDaysHours(long seconds) {
