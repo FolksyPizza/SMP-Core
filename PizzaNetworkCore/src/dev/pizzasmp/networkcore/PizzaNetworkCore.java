@@ -11328,7 +11328,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // or region/ping rows \u2014 the icon carries the meaning. Icons are standard font glyphs tinted
         // by the colour code (orange skull = tinted skull glyph, etc.), so no resource pack is needed.
         if (this.isSettingEnabledCached(hudUuid, "show_money")) {
-            objective.getScore("\u00a7a\u00a7l$ \u00a7f" + this.formatMillions(hud.stats.money)).setScore(score--);
+            objective.getScore("\u00a7a\u00a7l$ \u00a7f" + this.formatMoneyHud(hud.stats.money)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_shards")) {
             objective.getScore("\u00a75" + this.hudGlyph("\u2605", "[S]") + " \u00a7f" + this.formatCompactNumber(hud.stats.shards)).setScore(score--);
@@ -16506,15 +16506,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (player == null || !player.isOnline()) {
             return stats;
         }
-        long liveKills = this.safeStatistic(player, Statistic.PLAYER_KILLS);
-        // Deaths come from the DB (stats.deaths) so admin resets stick — NOT the vanilla
-        // statistic, which can't be reset for an online player.
-        long deaths = stats.deaths;
+        // Kills AND deaths come from the DB (stats.kills / stats.deaths), not the vanilla
+        // statistics, so an admin set sticks. Both stay live: PlayerDeathEvent increments
+        // player_stats.kills for the killer and player_stats.deaths for the victim, and the
+        // sidebar re-reads the DB each second. Only playtime still needs a live merge, since it
+        // accrues continuously and is only flushed to the DB periodically.
         long livePlaytime = this.livePlaytimeSeconds(player, stats.playtimeSeconds);
-        if (liveKills == stats.kills && livePlaytime == stats.playtimeSeconds) {
+        if (livePlaytime == stats.playtimeSeconds) {
             return stats;
         }
-        return new StatsSnapshot(stats.money, stats.shards, liveKills, deaths, livePlaytime, stats.blocksPlaced, stats.blocksBroken, stats.mobsKilled, stats.shopSpent, stats.sellEarned);
+        return new StatsSnapshot(stats.money, stats.shards, stats.kills, stats.deaths, livePlaytime, stats.blocksPlaced, stats.blocksBroken, stats.mobsKilled, stats.shopSpent, stats.sellEarned);
     }
 
     private long safeStatistic(Player player, Statistic statistic) {
@@ -16566,6 +16567,26 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         catch (Exception ex) {
             this.getLogger().warning("Failed incrementing money stat " + column + ": " + ex.getMessage());
         }
+    }
+
+    /**
+     * Money for the sidebar HUD. Below 100K it keeps the compact form with decimals (1.5K, 99.9K);
+     * at 100K and above it drops the decimal entirely (100K, 101M, 5B). Floors rather than rounds
+     * so a balance is never displayed higher than it is, and so a value can't round up into a
+     * "1000K"-style overflow of its own suffix.
+     */
+    private String formatMoneyHud(double value) {
+        double abs = Math.abs(value);
+        if (abs < 100000.0) {
+            return this.formatCompactNumber(value);
+        }
+        String suffix;
+        double scaled;
+        if (abs >= 1.0E12) { suffix = "T"; scaled = value / 1.0E12; }
+        else if (abs >= 1.0E9) { suffix = "B"; scaled = value / 1.0E9; }
+        else if (abs >= 1.0E6) { suffix = "M"; scaled = value / 1.0E6; }
+        else { suffix = "K"; scaled = value / 1000.0; }
+        return (long) Math.floor(scaled) + suffix;
     }
 
     private String formatCompactNumber(double value) {
