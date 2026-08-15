@@ -11316,8 +11316,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         Scoreboard board = Bukkit.getScoreboardManager().getNewScoreboard();
-        // Title is the player's own name, matching the HUD design. Bold white, like the mockup.
-        Objective objective = board.registerNewObjective("pizzahud", "dummy", "\u00a7f\u00a7l" + player.getName());
+        // Title is the player's own name, white and NOT bold.
+        Objective objective = board.registerNewObjective("pizzahud", "dummy", "\u00a7f" + player.getName());
         objective.setDisplaySlot(DisplaySlot.SIDEBAR);
         // Hide the score numbers on the right side of every line
         objective.numberFormat(io.papermc.paper.scoreboard.numbers.NumberFormat.blank());
@@ -11330,10 +11330,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             objective.getScore("\u00a7a\u00a7l$ \u00a7f" + this.formatMillions(hud.stats.money)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_shards")) {
-            objective.getScore("\u00a7d" + this.hudGlyph("\u2605", "[S]") + " \u00a7f" + this.formatCompactNumber(hud.stats.shards)).setScore(score--);
+            objective.getScore("\u00a75" + this.hudGlyph("\u2605", "[S]") + " \u00a7f" + this.formatCompactNumber(hud.stats.shards)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_kills")) {
-            objective.getScore("\u00a7c" + this.hudGlyph("\u2694", "[K]") + " \u00a7f" + this.formatCompactNumber(hud.stats.kills)).setScore(score--);
+            objective.getScore("\u00a7c" + this.hudGlyph("\u2020", "[K]") + " \u00a7f" + this.formatCompactNumber(hud.stats.kills)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_deaths")) {
             objective.getScore("\u00a76" + this.hudGlyph("\u2620", "[D]") + " \u00a7f" + this.formatCompactNumber(hud.stats.deaths)).setScore(score--);
