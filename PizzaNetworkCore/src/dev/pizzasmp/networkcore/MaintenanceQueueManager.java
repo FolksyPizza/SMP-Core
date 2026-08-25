@@ -53,6 +53,9 @@ final class MaintenanceQueueManager {
     private final boolean maintenanceQueueDebug;
     private final int returnBatchSize;
     private final long returnDrainIntervalTicks;
+    // The fixed hold-screen line, shown green on the hotbar. Separate from the DB `message`
+    // (which backend_maint.sh never sets, so it kept a stale "please wait in lobby" default).
+    private final String holdMessage;
     private volatile boolean active;
     private volatile String message = "This server is currently under maintenance. Please try again later.";
     private volatile Set<String> targets = Set.of("survival", "pvp");
@@ -91,6 +94,8 @@ final class MaintenanceQueueManager {
         this.maintenanceQueueDebug = plugin.getConfig().getBoolean("maintenance_queue.debug_log", false);
         this.returnBatchSize = Math.max(1, plugin.getConfig().getInt("maintenance_queue.return_batch_size", 2));
         this.returnDrainIntervalTicks = Math.max(1L, plugin.getConfig().getLong("maintenance_queue.return_drain_interval_ticks", 20L));
+        this.holdMessage = plugin.getConfig().getString("maintenance_hold.message",
+            "The Server Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost. You Will Be Put Back After Your Region Restarts.");
     }
 
     void start() {
@@ -203,9 +208,8 @@ final class MaintenanceQueueManager {
         long now = System.currentTimeMillis();
         for (Player player : Bukkit.getOnlinePlayers()) {
             this.enqueue(player);
-            int pos = this.queuePosition(player.getUniqueId());
-            String holdMessage = this.message == null ? "This server is currently under maintenance. Please try again later." : this.message;
-            player.sendActionBar((Component)Component.text((String)(holdMessage + " \u00a78| \u00a77Queue: \u00a79#" + pos)));
+            // Green, fixed wording, no queue suffix \u2014 the hold line the player should see.
+            player.sendActionBar((Component)Component.text((String)("\u00a7a" + this.holdMessage)));
             if (!this.maintenanceMusicEnabled) continue;
             player.stopSound(SoundCategory.MUSIC);
             player.stopSound(SoundCategory.AMBIENT);
@@ -320,30 +324,29 @@ final class MaintenanceQueueManager {
         return 1;
     }
 
-    /*
-     * Exception decompiling
+    /**
+     * True if this player already has a WAITING row in the maintenance queue.
+     *
+     * Reconstructed: the decompiler (CFR) failed on this method and left a stub that THREW
+     * IllegalStateException at runtime. Because handleJoin() calls it on every join to the
+     * maintenance backend, every such join threw — which is why held players were not being
+     * managed or returned correctly.
      */
     private boolean isQueued(UUID uuid) {
-        /*
-         * This method has failed to decompile.  When submitting a bug report, please provide this stack trace, and (if you hold appropriate legal rights) the relevant class file.
-         * 
-         * org.benf.cfr.reader.util.ConfusedCFRException: Started 2 blocks at once
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement.getStartingBlocks(Op04StructuredStatement.java:412)
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement.buildNestedBlocks(Op04StructuredStatement.java:487)
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op03SimpleStatement.createInitialStructuredBlock(Op03SimpleStatement.java:736)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysisInner(CodeAnalyser.java:850)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysisOrWrapFail(CodeAnalyser.java:278)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysis(CodeAnalyser.java:201)
-         *     at org.benf.cfr.reader.entities.attributes.AttributeCode.analyse(AttributeCode.java:94)
-         *     at org.benf.cfr.reader.entities.Method.analyse(Method.java:531)
-         *     at org.benf.cfr.reader.entities.ClassFile.analyseMid(ClassFile.java:1055)
-         *     at org.benf.cfr.reader.entities.ClassFile.analyseTop(ClassFile.java:942)
-         *     at org.benf.cfr.reader.Driver.doJarVersionTypes(Driver.java:257)
-         *     at org.benf.cfr.reader.Driver.doJar(Driver.java:139)
-         *     at org.benf.cfr.reader.CfrDriverImpl.analyse(CfrDriverImpl.java:76)
-         *     at org.benf.cfr.reader.Main.main(Main.java:54)
-         */
-        throw new IllegalStateException("Decompilation failed");
+        if (uuid == null) {
+            return false;
+        }
+        String sql = "SELECT 1 FROM maintenance_queue WHERE uuid = ? AND status = 'WAITING' LIMIT 1";
+        try (Connection connection = this.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql);) {
+            ps.setString(1, uuid.toString());
+            try (ResultSet rs = ps.executeQuery();) {
+                return rs.next();
+            }
+        }
+        catch (SQLException ex) {
+            return false;
+        }
     }
 
     private boolean shouldHoldPlayer(UUID uuid) {

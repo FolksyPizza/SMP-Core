@@ -28,7 +28,7 @@ sync:
 maintenance_music:
   enabled: true
   sound: MUSIC_DISC_MELLOHI
-  interval_seconds: 177
+  interval_seconds: 96
   volume: 0.6
   pitch: 1.0
   debug_log: false
@@ -36,6 +36,10 @@ maintenance_queue:
   debug_log: false
   return_batch_size: 2
   return_drain_interval_ticks: 20
+maintenance_hold:
+  # Green hotbar line shown to held players. backend_maint does not set the DB message,
+  # so this is the single source for the hold wording.
+  message: "The Server Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost. You Will Be Put Back After Your Region Restarts."
 router:
   debug_log: false
 combat:
