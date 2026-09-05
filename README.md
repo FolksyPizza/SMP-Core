@@ -1,6 +1,6 @@
 # SMP-Core
 
-SMP-Core is a plugin suite for a survival Minecraft server on Paper. I run a server on it, and it grew out of what that server actually needed over a couple of years, so it leans practical and opinionated rather than being a generic framework. If you run a Paper survival server and want a player-driven economy, a tidy set of quality-of-life commands, and staff tooling that stays out of players' way, most of that work is already done here.
+SMP-Core is a plugin suite for a survival Minecraft server on Paper. If you run a Paper survival server and want a player-driven economy, a tidy set of quality-of-life commands, and staff tooling that stays out of players' way, most of that work is already done here.
 
 It is fully open source under the MIT license. You can use it, change it, and ship it in commercial projects. The only ask is that you keep the license file.
 
@@ -12,9 +12,7 @@ A full list of commands is in [COMMANDS.md](COMMANDS.md). What I want to build n
 - More than 100 commands
 - Built and run on Paper 1.21.x, currently 1.21.11
 - Made by one person
-
-A note on the history. I built this privately over those couple of years and only recently decided to open it up and track it in public. That is why the repository starts as a single commit with the whole codebase already in place, rather than years of granular history. From here on, changes are tracked normally, one commit at a time, and issues are used to plan and follow work.
-
+  
 One honest note. I lost the source for part of PizzaNetworkCore at some point and had to recover it by decompiling an old build, then rewrite it back into normal code. A few spots still look like they came out of a decompiler, mostly some awkward labeled loops, and I clean those up as I touch them. It all builds and runs fine, it is just not pretty yet in those corners.
 
 ## Plugins
