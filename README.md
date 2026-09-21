@@ -6,6 +6,10 @@ It is fully open source under the MIT license. You can use it, change it, and sh
 
 A full list of commands is in [COMMANDS.md](COMMANDS.md). What I want to build next is in [UPCOMING.md](UPCOMING.md).
 
+## Architecture
+
+[ARCHITECTURE.md](ARCHITECTURE.md) explains plugin lifecycles, command and event routing, persistence, gameplay flows, and Velocity integration. It includes source references, data-flow diagrams, and implementation constraints for developers joining the project.
+
 ## About
 
 - Around 32,000 lines of Java across 7 plugins
