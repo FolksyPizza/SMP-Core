@@ -206,10 +206,10 @@ sequenceDiagram
     participant V as Vault / balance connection
     U->>C: Confirm listing purchase
     C->>C: Local in-flight guard and capacity check
-    C->>A: Begin transaction; SELECT listing FOR UPDATE
+    C->>A: Begin transaction, SELECT listing FOR UPDATE
     C->>V: Withdraw buyer funds
     V-->>C: Debit result
-    C->>A: Mark sold; record payout; credit seller
+    C->>A: Mark sold, record payout, credit seller
     C->>A: Commit
     C->>U: Scheduled inventory delivery
     C->>C: Audit, notification, local GUI refresh
