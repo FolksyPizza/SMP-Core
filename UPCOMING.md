@@ -7,6 +7,7 @@ Things I want to build for SMP-Core. This is a direction and a wishlist, not a p
 - **Folia support.** The plugins currently use the classic Bukkit scheduler, so they are not Folia-safe yet, and the plugin metadata says so honestly. Folia's region threading is the real way to run a large world across many cores, so making the whole suite region-aware is a major goal.
 - **Clustered Folia.** Further out: spread Folia's regions across more than one machine, so a single logical server runs on a cluster of compute instances with the region threads living on real separate hardware, not just separate cores. This is a big research-and-build effort, not a config flag.
 - **Multiple connection regions.** Geo-distributed entry points (NA-East, NA-West, EU, Asia) so players connect to something close to them while the world and economy stay shared behind it. This builds on the cross-server layer that is Alpha today.
+- **Canopy integration.** First-class support for deploying the suite alongside [Canopy](https://github.com/folksypizza/canopy), so its gateway and session handling can front SMP-Core cleanly. The aim is a supported, well-documented path rather than a bespoke glue layer.
 
 ## Gameplay and UX
 

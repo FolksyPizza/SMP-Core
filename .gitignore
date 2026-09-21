@@ -18,3 +18,8 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Branding is private — not shipped in the public repo
+PizzaNetworkCore/resources/branding.yml
+setup/apply-branding.sh
+branding.yml

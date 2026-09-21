@@ -10,7 +10,7 @@
 #   4. writes a NEW profile into plugins/PizzaNetworkCore/branding.yml and sets
 #      it active — tiers auto-become "<Brand>+" / "<Brand>++" (e.g. HappyLand+/++)
 #   5. configures rank colours + staff group hierarchy (LuckPerms)
-#   6. runs apply-branding.sh so icon/MOTD/menus/tab all reflect the brand
+#   6. writes the active brand; PizzaNetworkCore themes tab/MOTD/menus on next start
 #
 # Idempotent: re-run any time to re-brand. Non-destructive to worlds/player data.
 # Usage:  ./scripts/setup-server.sh          (interactive)
@@ -176,13 +176,10 @@ open(p,'w').write(s)
 print(f"  profile '{prof}' written and set active")
 PY
 
-# ---- 7. apply everywhere (icon/MOTD/tab/menus/ranks + proxy reload) --------
-if [ -x "$ROOT/scripts/apply-branding.sh" ]; then
-  say "Applying brand artifacts (icon, MOTD, TAB, menus, LuckPerms rank colours) ..."
-  bash "$ROOT/scripts/apply-branding.sh" "$PROFILE" || warn "apply-branding reported issues (server may be offline — will apply on next boot)"
-else
-  warn "apply-branding.sh not found/executable; skipping live apply."
-fi
+# ---- 7. brand applies on next server start ---------------------------------
+# The active profile is written above; PizzaNetworkCore themes tab, scoreboard, menus and MOTD
+# from branding.yml when it enables, so (re)start the server to apply the new brand.
+say "Brand profile written. Restart the server to apply the icon, MOTD, TAB, menus and colours."
 
 cat <<EOF
 
