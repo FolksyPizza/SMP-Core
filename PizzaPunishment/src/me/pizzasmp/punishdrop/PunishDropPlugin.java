@@ -2536,7 +2536,8 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private boolean canUseSurvivalFlight(Player player) {
-        if (player.getGameMode() == GameMode.CREATIVE) {
+        // Spectators must keep flight: stripping it makes them sink through the world.
+        if (player.getGameMode() == GameMode.CREATIVE || player.getGameMode() == GameMode.SPECTATOR) {
             return true;
         }
         return flightOwnerWhitelist.contains(player.getName().toLowerCase(Locale.ROOT));

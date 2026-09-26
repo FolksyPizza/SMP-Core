@@ -25,7 +25,8 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/sethome [name]` | Set a home at your location. |
 | `/delhome [name]` | Delete a home. |
 | `/rtp [east\|nether\|end]` | Random teleport. |
-| `/rtpq` (`/rtpqueue`) | Queue for a gear-matched RTP duel: get teleported to a random spot with a matched opponent. |
+| `/rtpq [cancel]` (`/rtpqueue`) | Queue for a gear-matched RTP duel: get teleported to a random spot with a matched opponent. |
+| `/spawn`, `/warp <spawn\|afk>`, `/afk` | Teleport to the spawn hub or the AFK area. |
 | `/tpa <player>` | Ask to teleport to a player. |
 | `/tpahere <player>` | Ask a player to teleport to you. |
 | `/tpaaccept [player]` (`/tpaccept`) | Accept a teleport request. |
@@ -40,6 +41,14 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/friend [add\|accept\|deny\|remove\|list\|requests]` (`/friends`) | Manage friends, or open the friends menu. |
 | `/follow <player>` | Follow a player. A mutual follow is a friendship. |
 | `/unfollow <player>` | Stop following a player. |
+| `/ignore [player\|list]` (`/block`), `/unignore <player>` (`/unblock`) | Ignore a player: their messages, teleport requests, payments and activity no longer reach you. With no player, lists who you ignore. |
+
+## Duels
+
+| Command | What it does |
+| --- | --- |
+| `/duel <player> [wager] [rounds] [loadout] [arena]` (`/1v1`) | Challenge a player to a multi-round duel. `/duel accept\|deny\|cancel\|again` manage requests. |
+| `/spectate <player>` (`/spec`) | Watch a player or a duel in fly mode, without passing through blocks. |
 
 ## Info and quality of life
 
@@ -98,11 +107,8 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 
 | Command | What it does |
 | --- | --- |
-| `/admin` | In-game admin console (staff tools). |
-| `/manage` | Backend management console (dev and granted admins). |
 | `/branding [status\|set <profile>]` | Switch the active brand profile. |
 | `/servermaint <start\|end\|status>` | Frozen-in-place maintenance. |
-| `/maintenancemotd <text>` (`/maintmotd`) | Set the maintenance server-list MOTD. |
 | `/viewdistance <n>`, `/vdthrottle [...]` | View distance controls. |
 | `/shards give <player> <amount>` | Grant shards. |
 | `/reset <deaths\|kills\|playtime\|money> <player>` | Reset a player stat. |
@@ -112,6 +118,7 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/gmcbypass <player>` | Console only. Grant a one-time creative-mode bypass. |
 | `/queuetest` | Force-enqueue yourself to test the join queue. |
 | `/pizzaplugins` | Show the plugin stack. |
+| `/setmoneyboard` | Place the spawn money leaderboard at your location. |
 
 ## Staff: network and maintenance (Alpha, off by default)
 

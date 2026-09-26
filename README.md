@@ -12,9 +12,9 @@ A full list of commands is in [COMMANDS.md](COMMANDS.md). What I want to build n
 
 ## About
 
-- Around 32,000 lines of Java across 7 plugins
+- Around 47,000 lines of Java across 11 plugins and a shared library
 - More than 100 commands
-- Built and run on Paper 1.21.x, currently 1.21.11
+- Built and run on Paper 1.21.x (1.21.6 or newer), currently 1.21.11
 - Made by one person
   
 One honest note. I lost the source for part of PizzaNetworkCore at some point and had to recover it by decompiling an old build, then rewrite it back into normal code. A few spots still look like they came out of a decompiler, mostly some awkward labeled loops, and I clean those up as I touch them. It all builds and runs fine, it is just not pretty yet in those corners.
@@ -23,17 +23,17 @@ One honest note. I lost the source for part of PizzaNetworkCore at some point an
 
 | Plugin | Version | What it does |
 | --- | --- | --- |
-| PizzaNetworkCore | 1.0.0 | The core plugin. Economy (auction house, player buy orders, shop), homes, random teleport, teleport requests, a follow/friends social system, per-player settings GUIs, leaderboards, and the scoreboard HUD. |
+| PizzaNetworkCore | 1.0.0 | The core plugin. Economy (auction house, player buy orders, shop), homes, random teleport with an arrival animation, teleport requests, a follow/friends social system, `/ignore` and `/block`, duels (`/duel`, the RTP duel queue, spectating), protected spawn and AFK hub worlds, chat item and player icons, per-player settings, leaderboards, and the scoreboard HUD. |
 | PizzaAdminTools | 1.1.0 | Staff tooling. Admin console GUIs, home administration, opt-in staff mode, moderation helpers, and subscription tier management. |
 | PizzaChatGuard | 2.0.0 | Chat protection. Rate limiting, duplicate and near-duplicate detection, and configurable word lists. |
 | PizzaPunishment | 1.0.0 | Punishment system with bans, mutes, strike tracking, and death-drop mechanics. |
 | PizzaRuleGuard | 1.0.0 | Rule enforcement and anti-abuse guard. |
-| PizzaLimbo | 0.1.0 | A lightweight limbo backend that holds players during maintenance when you run behind a Velocity proxy. |
+| PizzaLimbo | 0.2.0 | A lightweight limbo backend that holds players during maintenance when you run behind a Velocity proxy. |
 | PizzaProxyGuard | 1.0.0 | A small Velocity proxy plugin: denies new joins while the backend is down (with a maintenance message) and turns moderation kicks/bans into a clean disconnect instead of dropping the player into the limbo fallback. |
-| PizzaCommon | 1.0.0 | Shared storage library (YAML or MySQL). Currently used by PizzaChatGuard and shaded into it; the plan is to migrate the other plugins onto it over time. |
+| PizzaCommon | 1.0.0 | Shared library, compiled into the plugins that use it: storage (YAML or MySQL) and a scheduler facade over Paper's region-aware schedulers. |
 | PizzaSpawnRules | 1.0.0 | Lobby spawn protections and a silent unlimited double jump. Hub servers only — its protected zone grants creative flight, and with `lockAllWorld` the zone is the whole world, so on a survival server it hands everyone flight. |
-| EnderchestExpander | 1.0.0 | Expands the ender chest from 27 to 54 slots, with persistent storage. |
-| PizzaUtils | 1.0.0 | Small utility commands: night vision, ping, view distance. |
+| EnderchestExpander | 1.0.0 | Expands the ender chest from 27 to 54 slots, with persistent storage and exclusive staff inspection (`/endersee`). |
+| PizzaUtils | 1.0.0 | `/ping`. Night vision lives in PizzaNetworkCore and view distance in PizzaTune. |
 | PizzaTune | 1.0.0 | Live-tunes view distance and chunk send/load rates without a restart. |
 
 ## Status
@@ -50,7 +50,7 @@ It stays dormant unless you set `sync.enabled: true` in the core config, and a s
 
 ## Requirements
 
-Designed around and tested on Paper 1.21.11 (Minecraft 1.21.x, api-version 1.21). Java 21 is required. PizzaNetworkCore also needs a MySQL or MariaDB database (local or remote); point it at one in the core config.
+Paper 1.21.6 or newer; tested on Paper 1.21.11. Java 21 is required. PizzaNetworkCore also needs a MySQL or MariaDB database (local or remote); point it at one in the core config.
 
 Minimum: 2 CPU cores, 4 GB RAM (allocate roughly 3 GB to the server), and any modern disk.
 
@@ -90,7 +90,7 @@ Branding lives in `plugins/PizzaNetworkCore/branding.yml`. It ships with an exam
 
 The setup script does the same thing interactively and also configures the LuckPerms rank colors and staff hierarchy for you. Either path gets you a fully rebranded server; the config route just means editing `branding.yml` by hand.
 
-Economy, shop, and gameplay tuning live in `plugins/PizzaNetworkCore/config.yml` (and `shop.yml` for the shop). Set the database connection there under `sync.database`. Leave `sync.enabled` false for a single server; turn it on only to run the Alpha cross-server network.
+Economy, shop, and gameplay tuning live in `plugins/PizzaNetworkCore/config.yml` (and `shop.yml` for the shop). Set the database connection there under `sync.database`. Leave `sync.enabled` false for a single server; turn it on only to run the Beta cross-server network.
 
 Chat filtering is configured in `plugins/PizzaChatGuard/` (config plus the word list files). Punishment and rule settings live in their own plugin folders the same way.
 

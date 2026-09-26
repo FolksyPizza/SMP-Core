@@ -44,6 +44,43 @@ router:
   debug_log: false
 combat:
   debug_log: false
+  # CPVP damage tuning — scale end-crystal / respawn-anchor explosion damage to players.
+  # 1.0 = vanilla (standard crystal PvP). <1.0 nerfs, 0 = no damage. Reloadable via /admin.
+  crystal_damage_multiplier: 1.0
+  anchor_damage_multiplier: 1.0
+duel:
+  # Duels use existing chunks in this private world; matchmaking never generates new arena chunks.
+  world-name: duel_arena
+  source-world: world
+  border-radius: 64.0
+  spacing: 6
+  countdown-seconds: 5
+  round-reset-seconds: 3
+  reconnect-grace-seconds: 10
+  arena-search-timeout-seconds: 20
+  # Search the eight most complete saved region files; adjacent chunks must also exist.
+  pre-generated-region-count: 8
+  pre-generated-search-attempts: 400
+  open-arena-scan-radius: 24
+  open-arena-max-height-difference: 7
+# Performance optimizations. 'profile' sets defaults; uncomment a feature to override it.
+# Profiles: off | conservative | balanced (default) | aggressive. Every optimization can be turned off.
+optimizations:
+  profile: balanced
+  # bandwidth-aware-vd: true
+  # join-send-ramp: true
+  # deferred-join-work: true
+
+# Bandwidth-aware view distance: when uplink egress nears the cap, PNC trims per-player view
+# distance (chunk-send volume ~ VD^2) and trims recent RTP/teleport bursts one extra chunk.
+# egress-cap-mbps: 0 disables it. Applies on restart or config reload.
+network:
+  # Route /spawn, /hub and /lobby to the lobby backend (network deployments only).
+  route-spawn-to-lobby: false
+  egress-iface: eth0
+  egress-cap-mbps: 0
+  egress-throttle-percent: 80
+  egress-recover-percent: 55
 chat_debug:
   log_bridge_payloads: false
 hud:
@@ -52,5 +89,6 @@ hud:
 chat:
   intercept_async_chat: false
   global_chat_enabled: false
+  icon-aliases-enabled: true
   cross_server_msg_enabled: true
   cross_server_team_chat_enabled: true

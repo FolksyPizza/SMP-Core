@@ -1,4 +1,5 @@
-# PizzaLimbo v0.1 config
+# PizzaLimbo runtime configuration template.
+# Supply database credentials only in the ignored runtime config; never commit them here.
 db:
   host: "127.0.0.1"
   port: 3306
@@ -6,13 +7,10 @@ db:
   user: "pizzasmp"
   password: "changeme"
 smp:
-  # Local liveness probe of the SMP BACKEND (limbo + SMP are on the same box).
   probe-host: "127.0.0.1"
   probe-port: 25566
-  # Velocity server name to send players back to.
   server-name: "smp"
-  # Wait this long after the SMP port returns before sending players home (let it finish booting).
-  return-grace-seconds: 8
+  return-grace-seconds: 45
 messages:
-  chat: "&cYour Region Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost. You Will Be Put Back After Your Region Restarts."
-  hotbar: "&cRegion under maintenance — do not teleport. You will be returned automatically."
+  chat: "&bMaintenance is in progress. You will return automatically."
+  hotbar: "&7Maintenance in progress. Returning shortly."

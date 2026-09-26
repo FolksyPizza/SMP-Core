@@ -98,3 +98,7 @@ world_access:
   lock_message: '&cThis region is down for maintenance'
 flags:
   end_closed: false
+
+network:
+  # On a proxy network, /spawn, /hub and /lobby go to the lobby backend.
+  route-spawn-to-lobby: true

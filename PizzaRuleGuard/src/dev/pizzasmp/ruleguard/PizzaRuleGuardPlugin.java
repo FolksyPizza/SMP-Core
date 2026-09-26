@@ -6,6 +6,7 @@ package dev.pizzasmp.ruleguard;
  * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */
 
+import dev.pizzasmp.common.scheduler.PlatformScheduler;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -52,10 +53,12 @@ import org.bukkit.inventory.CraftingInventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.Recipe;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitTask;
 
 public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
    private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
+   private static final int MAX_PENDING_OFFENSE_LINES = 8192;
+   private static final int MAX_OFFENSE_LINES_PER_DRAIN = 256;
+   private static final System.Logger OFFENSE_LOGGER = System.getLogger(PizzaRuleGuardPlugin.class.getName());
    private final Map<UUID, PizzaRuleGuardPlugin.MovementSnapshot> recentMovement = new ConcurrentHashMap<>();
    private final Map<UUID, PizzaRuleGuardPlugin.CounterWindow> inventoryMoveWindows = new ConcurrentHashMap<>();
    private final Map<UUID, Deque<Long>> scaffoldSamples = new ConcurrentHashMap<>();
@@ -64,8 +67,15 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
    private final Map<UUID, PizzaRuleGuardPlugin.CounterWindow> dupeWindows = new ConcurrentHashMap<>();
    private final Map<String, Long> alertCooldowns = new ConcurrentHashMap<>();
    private final Map<String, Long> punishmentCooldowns = new ConcurrentHashMap<>();
+   private final Object offenseQueueLock = new Object();
+   private final Object offenseFileLock = new Object();
+   private final Deque<String> pendingOffenseLines = new ArrayDeque<>();
+   private PlatformScheduler.TaskHandle offenseLogTask;
+   private boolean offenseLogDrainScheduled;
+   private boolean offenseLogClosing;
+   private long droppedOffenseLogLines;
    private Path offenseLogPath;
-   private BukkitTask dupeSweepTask;
+   private PlatformScheduler.TaskHandle dupeSweepTask;
 
    public void onEnable() {
       this.saveDefaultConfig();
@@ -81,6 +91,18 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
          this.dupeSweepTask.cancel();
          this.dupeSweepTask = null;
       }
+
+      PlatformScheduler.TaskHandle offenseTask;
+      synchronized (this.offenseQueueLock) {
+         this.offenseLogClosing = true;
+         offenseTask = this.offenseLogTask;
+         this.offenseLogTask = null;
+         this.offenseLogDrainScheduled = false;
+      }
+      if (offenseTask != null) {
+         offenseTask.cancel();
+      }
+      this.drainOffenseLogOnDisable();
 
       this.recentMovement.clear();
       this.inventoryMoveWindows.clear();
@@ -152,7 +174,8 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
       if (var1.getWhoClicked() instanceof Player var2) {
          this.handleInventoryMoveCheck(var2, var1);
          if (this.isDupeSweepEnabled()) {
-            Bukkit.getScheduler().runTask(this, () -> this.scanInventoryForIllegalStacks(var2, "inventory-click"));
+            PlatformScheduler.entityLater(this, var2,
+               () -> this.scanInventoryForIllegalStacks(var2, "inventory-click"), null, 1L);
          }
       }
    }
@@ -230,30 +253,67 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
       ignoreCancelled = true
    )
    public void onCombatClick(EntityDamageByEntityEvent var1) {
-      if (!(var1.getDamager() instanceof Player var2) || !(var1.getEntity() instanceof Entity)) {
+      if (!(var1.getDamager() instanceof Player attacker) || !(var1.getEntity() instanceof Entity)) {
          return;
       }
 
-      if (this.isSurvivalLike(var2) && this.getConfig().getBoolean("checks.autoclicker.enabled", true)) {
-         long var13 = System.currentTimeMillis();
-         Deque var5 = this.combatClickSamples.computeIfAbsent(var2.getUniqueId(), var0 -> new ArrayDeque<>());
-         trimOlderThan(var5, var13 - this.getConfig().getLong("checks.autoclicker.sample-window-ms", 3000L));
-         var5.addLast(var13);
-         int var6 = this.getConfig().getInt("checks.autoclicker.minimum-samples", 12);
-         if (var5.size() >= var6) {
-            PizzaRuleGuardPlugin.ClickStats var7 = summarize(var5);
-            double var8 = this.getConfig().getDouble("checks.autoclicker.alert-cps", 15.0);
-            double var10 = this.getConfig().getDouble("checks.autoclicker.alert-max-stddev-ms", 8.0);
-            if (!(var7.cps < var8) && !(var7.stddevMs > var10)) {
-               String var12 = "cps=" + formatDouble(var7.cps) + ", stddevMs=" + formatDouble(var7.stddevMs) + ", samples=" + var5.size();
-               this.alert(var2, "autoclicker", "Low-variance combat clicks detected (" + var12 + ")", true);
-               if (var7.cps >= this.getConfig().getDouble("checks.autoclicker.punish-cps", 18.5)
-                  && var7.stddevMs <= this.getConfig().getDouble("checks.autoclicker.punish-max-stddev-ms", 4.5)) {
-                  this.maybePunish(var2, "autoclicker", (int)Math.round(var7.cps), var12);
-               }
+      long eventTimestamp = System.currentTimeMillis();
+      try {
+         if (attacker.getScheduler().run(this,
+               task -> this.recordCombatClick(attacker, eventTimestamp), () -> { }) == null) {
+            this.getLogger().warning("Could not queue a RuleGuard combat sample because the attacker scheduler rejected it.");
+         }
+      } catch (RuntimeException ex) {
+         this.getLogger().warning("Could not queue a RuleGuard combat sample ("
+               + ex.getClass().getSimpleName() + ").");
+      }
+   }
+
+   private void recordCombatClick(Player attacker, long eventTimestamp) {
+      if (!this.isSurvivalLike(attacker) || !this.getConfig().getBoolean("checks.autoclicker.enabled", true)) {
+         return;
+      }
+
+      Deque<Long> samples = this.combatClickSamples.computeIfAbsent(attacker.getUniqueId(), ignored -> new ArrayDeque<>());
+      long latestTimestamp = samples.isEmpty() ? eventTimestamp : Math.max(eventTimestamp, samples.peekLast());
+      addCombatClickSampleInTimeOrder(samples, eventTimestamp);
+      trimOlderThan(samples, latestTimestamp - this.getConfig().getLong("checks.autoclicker.sample-window-ms", 3000L));
+
+      int minimumSamples = this.getConfig().getInt("checks.autoclicker.minimum-samples", 12);
+      if (samples.size() >= minimumSamples) {
+         ClickStats stats = summarize(samples);
+         double alertCps = this.getConfig().getDouble("checks.autoclicker.alert-cps", 15.0);
+         double alertMaxStddevMs = this.getConfig().getDouble("checks.autoclicker.alert-max-stddev-ms", 8.0);
+         if (!(stats.cps < alertCps) && !(stats.stddevMs > alertMaxStddevMs)) {
+            String detail = "cps=" + formatDouble(stats.cps) + ", stddevMs=" + formatDouble(stats.stddevMs)
+                  + ", samples=" + samples.size();
+            this.alert(attacker, "autoclicker", "Low-variance combat clicks detected (" + detail + ")", true);
+            if (stats.cps >= this.getConfig().getDouble("checks.autoclicker.punish-cps", 18.5)
+                  && stats.stddevMs <= this.getConfig().getDouble("checks.autoclicker.punish-max-stddev-ms", 4.5)) {
+               this.maybePunish(attacker, "autoclicker", (int)Math.round(stats.cps), detail);
             }
          }
       }
+   }
+
+   private static void addCombatClickSampleInTimeOrder(Deque<Long> samples, long timestamp) {
+      if (samples.isEmpty() || timestamp >= samples.peekLast()) {
+         samples.addLast(timestamp);
+         return;
+      }
+
+      ArrayList<Long> ordered = new ArrayList<>(samples);
+      int insertionPoint = java.util.Collections.binarySearch(ordered, timestamp);
+      if (insertionPoint < 0) {
+         insertionPoint = -insertionPoint - 1;
+      } else {
+         while (insertionPoint < ordered.size() && ordered.get(insertionPoint) <= timestamp) {
+            insertionPoint++;
+         }
+      }
+      ordered.add(insertionPoint, timestamp);
+      samples.clear();
+      samples.addAll(ordered);
    }
 
    @EventHandler(
@@ -428,14 +488,34 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
             long var7 = System.currentTimeMillis();
             long var9 = this.getConfig().getLong(var5 + "cooldown-ms", 300000L);
             String var11 = var2 + ":" + var1.getUniqueId();
-            long var12 = this.punishmentCooldowns.getOrDefault(var11, 0L);
-            if (var7 - var12 >= var9) {
-               this.punishmentCooldowns.put(var11, var7);
-               String var14 = var6.replace("%player%", var1.getName())
+             long var12 = this.punishmentCooldowns.getOrDefault(var11, 0L);
+             if (var7 - var12 >= var9) {
+                this.punishmentCooldowns.put(var11, var7);
+               String playerName = var1.getName();
+               String detail = var4.replace('\n', ' ').replace('\r', ' ');
+               String var14 = var6.replace("%player%", playerName)
                   .replace("%score%", Integer.toString(var3))
-                  .replace("%detail%", var4.replace('\n', ' ').replace('\r', ' '));
-               Bukkit.dispatchCommand(Bukkit.getConsoleSender(), var14);
-               this.logOffense("PUNISH " + var2 + " player=" + var1.getName() + " score=" + var3 + " detail=" + var4);
+                  .replace("%detail%", detail);
+               PlatformScheduler.TaskHandle dispatch;
+               try {
+                  dispatch = PlatformScheduler.globalNow(this, () -> {
+                     boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), var14);
+                     if (dispatched) {
+                        this.logOffense("PUNISH " + var2 + " player=" + playerName + " score=" + var3 + " detail=" + detail);
+                     } else {
+                        this.getLogger().warning("Configured punishment command was not dispatched for check " + var2 + ".");
+                     }
+                  });
+               } catch (RuntimeException failure) {
+                  this.punishmentCooldowns.remove(var11, var7);
+                  this.getLogger().warning("Could not schedule punishment command for check " + var2
+                     + "; cooldown released (" + failure.getClass().getSimpleName() + ").");
+                  return;
+               }
+               if (!dispatch.wasAccepted()) {
+                  this.punishmentCooldowns.remove(var11, var7);
+                  this.getLogger().warning("Could not schedule punishment command for check " + var2 + "; cooldown released.");
+               }
             }
          }
       }
@@ -450,15 +530,31 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
          this.alertCooldowns.put(var7, var8);
          String var12 = color("&c[RuleGuard]&7 " + var1.getName() + " &f" + var3);
          String var13 = this.getConfig().getString("alerts.permission", "pizzaruleguard.alerts");
+         boolean alertConsole = this.getConfig().getBoolean("alerts.console", true);
+         String alertMessage = var12;
+         String alertPermission = var13;
+         try {
+            PlatformScheduler.TaskHandle alertTask = PlatformScheduler.globalNow(this, () -> {
+               for (Player recipient : Bukkit.getOnlinePlayers()) {
+                  PlatformScheduler.entityNow(this, recipient, () -> {
+                     if (recipient.isOp() || recipient.hasPermission(alertPermission)) {
+                        recipient.sendMessage(alertMessage);
+                     }
+                  }, null);
+               }
 
-         for (Player var15 : Bukkit.getOnlinePlayers()) {
-            if (var15.isOp() || var15.hasPermission(var13)) {
-               var15.sendMessage(var12);
+               if (alertConsole) {
+                  Bukkit.getConsoleSender().sendMessage(alertMessage);
+               }
+            });
+            if (!alertTask.wasAccepted()) {
+               this.alertCooldowns.remove(var7, var8);
+               this.getLogger().warning("Could not schedule alert for check " + var2 + "; alert cooldown released.");
             }
-         }
-
-         if (this.getConfig().getBoolean("alerts.console", true)) {
-            Bukkit.getConsoleSender().sendMessage(var12);
+         } catch (RuntimeException failure) {
+            this.alertCooldowns.remove(var7, var8);
+            this.getLogger().warning("Could not schedule alert for check " + var2
+               + "; alert cooldown released (" + failure.getClass().getSimpleName() + ").");
          }
 
          if (var4 && this.getConfig().getBoolean("logging.offense-log", true)) {
@@ -468,31 +564,169 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
    }
 
    private void logOffense(String var1) {
-      try {
-         Files.createDirectories(this.offenseLogPath.getParent());
-         Files.writeString(
-            this.offenseLogPath,
-            LOG_TIME.format(Instant.now()) + " " + ChatColor.stripColor(var1) + System.lineSeparator(),
-            StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE,
-            StandardOpenOption.APPEND
-         );
-      } catch (IOException var3) {
-         this.getLogger().warning("Failed to write offense log: " + var3.getMessage());
+      synchronized (this.offenseQueueLock) {
+         if (this.offenseLogClosing) return;
+         String line = LOG_TIME.format(Instant.now()) + " " + ChatColor.stripColor(var1) + System.lineSeparator();
+         if (this.pendingOffenseLines.size() < MAX_PENDING_OFFENSE_LINES) {
+            this.pendingOffenseLines.addLast(line);
+         } else {
+            this.droppedOffenseLogLines++;
+         }
+
+         if (!this.offenseLogDrainScheduled && !this.pendingOffenseLines.isEmpty()) {
+            this.scheduleOffenseLogDrain();
+         }
       }
+   }
+
+   private void scheduleOffenseLogDrain() {
+      this.offenseLogDrainScheduled = true;
+      try {
+         PlatformScheduler.TaskHandle task = PlatformScheduler.asyncNow(this, this::drainOffenseLogBatch);
+         if (!task.wasAccepted()) {
+            this.offenseLogDrainScheduled = false;
+            this.offenseLogTask = null;
+            OFFENSE_LOGGER.log(System.Logger.Level.WARNING,
+               "Could not schedule the RuleGuard offense log writer; entries remain queued.");
+            return;
+         }
+         this.offenseLogTask = task;
+      } catch (RuntimeException ex) {
+         this.offenseLogDrainScheduled = false;
+         this.offenseLogTask = null;
+         OFFENSE_LOGGER.log(System.Logger.Level.WARNING,
+            "Could not schedule the RuleGuard offense log writer; entries remain queued.", ex);
+      }
+   }
+
+   private void drainOffenseLogBatch() {
+      String failure = null;
+      synchronized (this.offenseFileLock) {
+         for (int written = 0; written < MAX_OFFENSE_LINES_PER_DRAIN; written++) {
+            String line;
+            synchronized (this.offenseQueueLock) {
+               line = this.pendingOffenseLines.peekFirst();
+            }
+            if (line == null) {
+               break;
+            }
+
+            try {
+               this.appendOffenseLine(line);
+            } catch (IOException | RuntimeException ex) {
+               failure = ex.getClass().getSimpleName();
+               break;
+            }
+
+            synchronized (this.offenseQueueLock) {
+               this.pendingOffenseLines.removeFirst();
+            }
+         }
+      }
+
+      long dropped;
+      synchronized (this.offenseQueueLock) {
+         dropped = this.droppedOffenseLogLines;
+         this.droppedOffenseLogLines = 0L;
+         if (failure != null || this.offenseLogClosing || this.pendingOffenseLines.isEmpty()) {
+            this.offenseLogDrainScheduled = false;
+            this.offenseLogTask = null;
+         } else {
+            this.scheduleOffenseLogDrain();
+         }
+      }
+
+      if (failure != null) {
+         OFFENSE_LOGGER.log(System.Logger.Level.WARNING,
+            "Could not append a RuleGuard offense log entry (" + failure + "); entries remain queued.");
+      }
+      if (dropped > 0L) {
+         OFFENSE_LOGGER.log(System.Logger.Level.WARNING,
+            "Dropped " + dropped + " RuleGuard offense log entr" + (dropped == 1L ? "y" : "ies")
+               + " because the pending log queue reached its limit.");
+      }
+   }
+
+   private void drainOffenseLogOnDisable() {
+      String failure = null;
+      synchronized (this.offenseFileLock) {
+         while (true) {
+            String line;
+            synchronized (this.offenseQueueLock) {
+               line = this.pendingOffenseLines.peekFirst();
+            }
+            if (line == null) {
+               break;
+            }
+
+            try {
+               this.appendOffenseLine(line);
+            } catch (IOException | RuntimeException ex) {
+               failure = ex.getClass().getSimpleName();
+               break;
+            }
+
+            synchronized (this.offenseQueueLock) {
+               this.pendingOffenseLines.removeFirst();
+            }
+         }
+      }
+
+      long dropped;
+      int remaining;
+      synchronized (this.offenseQueueLock) {
+         dropped = this.droppedOffenseLogLines;
+         this.droppedOffenseLogLines = 0L;
+         remaining = this.pendingOffenseLines.size();
+      }
+      if (failure != null) {
+         OFFENSE_LOGGER.log(System.Logger.Level.WARNING,
+            "Could not drain " + remaining + " queued RuleGuard offense log entr"
+               + (remaining == 1 ? "y" : "ies") + " during disable (" + failure + ").");
+      }
+      if (dropped > 0L) {
+         OFFENSE_LOGGER.log(System.Logger.Level.WARNING,
+            "Dropped " + dropped + " RuleGuard offense log entr" + (dropped == 1L ? "y" : "ies")
+               + " because the pending log queue reached its limit.");
+      }
+   }
+
+   private void appendOffenseLine(String line) throws IOException {
+      Files.createDirectories(this.offenseLogPath.getParent());
+      Files.writeString(
+         this.offenseLogPath,
+         line,
+         StandardCharsets.UTF_8,
+         StandardOpenOption.CREATE,
+         StandardOpenOption.WRITE,
+         StandardOpenOption.APPEND
+      );
    }
 
    private void startDupeSweepTask() {
       if (this.isDupeSweepEnabled()) {
          long var1 = Math.max(20L, this.getConfig().getLong("checks.dupe.periodic-scan-ticks", 1200L));
-         this.dupeSweepTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
-            for (Player var2 : Bukkit.getOnlinePlayers()) {
-               if (this.isSurvivalLike(var2)) {
-                  this.scanInventoryForIllegalStacks(var2, "periodic-scan");
+         PlatformScheduler.TaskHandle sweep;
+         try {
+            sweep = PlatformScheduler.globalRepeating(this, () -> {
+               for (Player player : Bukkit.getOnlinePlayers()) {
+                  PlatformScheduler.entityNow(this, player, () -> {
+                     if (this.isSurvivalLike(player)) {
+                        this.scanInventoryForIllegalStacks(player, "periodic-scan");
+                     }
+                  }, null);
                }
-            }
-         }, var1, var1);
+            }, var1, var1);
+         } catch (RuntimeException failure) {
+            this.getLogger().warning("Periodic dupe scan could not be scheduled; the configured scan is inactive ("
+               + failure.getClass().getSimpleName() + ").");
+            return;
+         }
+         if (sweep.wasAccepted()) {
+            this.dupeSweepTask = sweep;
+         } else {
+            this.getLogger().warning("Periodic dupe scan could not be scheduled; the configured scan is inactive.");
+         }
       }
    }
 
@@ -528,7 +762,14 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
       int var3 = Math.max(0, this.getConfig().getInt("checks.mining.max-exposed-faces", 1));
 
       for (BlockFace var5 : List.of(BlockFace.UP, BlockFace.DOWN, BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST)) {
-         Material var6 = var1.getRelative(var5).getType();
+         int x = var1.getX() + var5.getModX();
+         int y = var1.getY() + var5.getModY();
+         int z = var1.getZ() + var5.getModZ();
+         if (!Bukkit.isOwnedByCurrentRegion(new Location(var1.getWorld(), x, y, z))) {
+            // Mining events cannot wait for neighboring regions; skip this sample rather than read across owners.
+            return true;
+         }
+         Material var6 = var1.getWorld().getBlockAt(x, y, z).getType();
          if (var6 == Material.AIR || var6 == Material.CAVE_AIR || var6 == Material.VOID_AIR || var6 == Material.WATER || var6 == Material.LAVA) {
             if (++var2 > var3) {
                return true;

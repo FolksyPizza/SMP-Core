@@ -1,33 +1,15 @@
 name: PizzaUtils
 main: dev.pizzasmp.utils.PizzaUtils
 version: 1.0.0
-api-version: "1.21"
+api-version: "1.21.6"
 author: PizzaSMP
-description: Lightweight utility commands (night vision, ping, view distance).
+description: Lightweight ping utility.
 commands:
-  nv:
-    description: Toggle night vision for yourself or another player.
-    usage: /nv [player]
-    aliases: [nightvision]
-    permission: pizzasmp.nv
   ping:
     description: Show your current ping.
     usage: /ping
     permission: pizzasmp.ping
-  viewdistance:
-    description: Set the server view distance.
-    usage: /viewdistance <distance>
-    permission: pizzasmp.admin.viewdistance
 permissions:
-  pizzasmp.nv:
-    description: Toggle night vision.
-    default: true
-  pizzasmp.nv.others:
-    description: Toggle night vision on other players.
-    default: op
   pizzasmp.ping:
     description: View your ping.
     default: true
-  pizzasmp.admin.viewdistance:
-    description: Change server view distance.
-    default: op

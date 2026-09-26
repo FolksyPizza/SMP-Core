@@ -543,7 +543,8 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
 
     @EventHandler
     public void onRiptide(PlayerRiptideEvent e) {
-        if (inProtectedZone(e.getPlayer().getLocation())) e.setCancelled(true);
+        // Riptide is only cancellable on some Paper versions; cancel where the API allows it.
+        if (inProtectedZone(e.getPlayer().getLocation()) && e instanceof org.bukkit.event.Cancellable c) c.setCancelled(true);
     }
 
     @EventHandler
