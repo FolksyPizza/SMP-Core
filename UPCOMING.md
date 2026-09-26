@@ -11,7 +11,7 @@ Things I want to build for SMP-Core. This is a direction and a wishlist, not a p
 
 ## Gameplay and UX
 
-- **Owner-configurable features.** Config switches so each server decides what it runs: teams, friends, or both; the legacy inventory menus or the newer dialog menus; and similar toggles. Anything PizzaSMP retired should stay available to everyone else, not forced off.
+- **Owner-configurable features.** Config switches so each server decides what it runs: teams, friends, or both; the legacy inventory menus or the newer dialog menus; and similar toggles. Anything the live server retired should stay available to everyone else, not forced off.
 - **Visual effects.** A player-facing effects layer: subtle ambient effects for teleports and sales, bigger celebratory ones for milestones and advancements, and cosmetic trails as a perk. A few of the big-moment effects are meant to fill the screen, not just be small particles.
 - **Local storage.** A flat-file or SQLite option so PizzaNetworkCore can run without a MySQL database. The database requirement is the biggest thing standing between someone and just trying it.
 - **Finish the order-matching engine.** Route selling through the best available player order when it beats the base sell price, and sweep matching listings when an order is created.

@@ -12,7 +12,7 @@ A full list of commands is in [COMMANDS.md](COMMANDS.md). What I want to build n
 
 ## About
 
-- Around 47,000 lines of Java across 11 plugins and a shared library
+- Around 49,000 lines of Java across 11 plugins and a shared library, plus two datapacks
 - More than 100 commands
 - Built and run on Paper 1.21.x (1.21.6 or newer), currently 1.21.11
 - Made by one person
@@ -24,7 +24,7 @@ One honest note. I lost the source for part of PizzaNetworkCore at some point an
 | Plugin | Version | What it does |
 | --- | --- | --- |
 | PizzaNetworkCore | 1.0.0 | The core plugin. Economy (auction house, player buy orders, shop), homes, random teleport with an arrival animation, teleport requests, a follow/friends social system, `/ignore` and `/block`, duels (`/duel`, the RTP duel queue, spectating), protected spawn and AFK hub worlds, chat item and player icons, per-player settings, leaderboards, and the scoreboard HUD. |
-| PizzaAdminTools | 1.1.0 | Staff tooling. Admin console GUIs, home administration, opt-in staff mode, moderation helpers, and subscription tier management. |
+| PizzaAdminTools | 1.1.0 | Staff tooling. Admin console GUIs, home administration, opt-in staff mode with an audit log, `/atrack` spectator tracking, frozen maintenance, transfers, `/stash` camps, `/nuke`, moderation helpers, and subscription tier management. |
 | PizzaChatGuard | 2.0.0 | Chat protection. Rate limiting, duplicate and near-duplicate detection, and configurable word lists. |
 | PizzaPunishment | 1.0.0 | Punishment system with bans, mutes, strike tracking, and death-drop mechanics. |
 | PizzaRuleGuard | 1.0.0 | Rule enforcement and anti-abuse guard. |
@@ -93,6 +93,10 @@ The setup script does the same thing interactively and also configures the LuckP
 Economy, shop, and gameplay tuning live in `plugins/PizzaNetworkCore/config.yml` (and `shop.yml` for the shop). Set the database connection there under `sync.database`. Leave `sync.enabled` false for a single server; turn it on only to run the Beta cross-server network.
 
 Chat filtering is configured in `plugins/PizzaChatGuard/` (config plus the word list files). Punishment and rule settings live in their own plugin folders the same way.
+
+## Datapacks
+
+`datapacks/pizzasmp-menu` adds the pause-screen game menu dialogs used by `/menu`, and `datapacks/pizzalimbo-menu` adds the maintenance dialog for the limbo backend. Copy them into your world's `datapacks/` folder (and the limbo world's, for the second one).
 
 ## Building from source
 

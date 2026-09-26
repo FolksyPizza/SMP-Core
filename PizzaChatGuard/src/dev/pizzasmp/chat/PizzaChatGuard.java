@@ -1,7 +1,7 @@
 package dev.pizzasmp.chat;
 
 /*
- * PizzaChatGuard — part of the PizzaSMP plugin suite.
+ * PizzaChatGuard — part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */
@@ -190,6 +190,11 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         saveDefaultConfig();
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "chatguard");
         this.storage.importFromYamlOnce(java.util.List.of("strikes"), false);
+        if (!this.storage.isMysql()) {
+            getLogger().warning("[storage] running on local files: chat strikes will NOT be shared "
+                + "between backends, so a player can shed them by changing server. "
+                + "Set storage.backend: mysql to share them.");
+        }
         loadPolicy();
         initLeet();
         loadStrikes();

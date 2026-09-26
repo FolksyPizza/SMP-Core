@@ -2,7 +2,7 @@ name: PizzaUtils
 main: dev.pizzasmp.utils.PizzaUtils
 version: 1.0.0
 api-version: "1.21.6"
-author: PizzaSMP
+author: FolksyPizza
 description: Lightweight ping utility.
 commands:
   ping:

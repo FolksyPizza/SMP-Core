@@ -1,0 +1,21 @@
+{
+  "type": "minecraft:multi_action",
+  "title": { "text": "Pay", "color": "#00BFFF", "bold": true },
+  "external_title": "Pay",
+  "pause": false,
+  "can_close_with_escape": true,
+  "after_action": "close",
+  "columns": 1,
+  "inputs": [
+    { "type": "minecraft:text", "key": "player", "label": "Player Name", "width": 300, "max_length": 16 },
+    { "type": "minecraft:text", "key": "amount", "label": "Amount", "width": 300, "max_length": 13 }
+  ],
+  "actions": [
+    {
+      "label": { "text": "Pay", "color": "green" },
+      "width": 220,
+      "action": { "type": "dynamic/run_command", "template": "pay $(player) $(amount)" }
+    }
+  ],
+  "exit_action": { "label": "Back", "width": 220, "action": { "type": "show_dialog", "dialog": "pizzasmp:menu" } }
+}

@@ -1,11 +1,21 @@
 package me.pizzasmp.punishdrop;
 
 /*
- * PunishDropPlugin — part of the PizzaSMP plugin suite.
+ * PunishDropPlugin — part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */
 
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -85,7 +95,22 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     private static final long DUPLICATE_WINDOW_MS = 2500L;
     private static final long SHORT_LIBERTY_FALLBACK_MS = 60_000L;
     private static final String ID_PREFIX = "#";
-    private static final String DISCORD_INVITE = "discord.gg/example";
+    // Brand identity comes from PizzaNetworkCore's branding.yml (see loadBranding); these are neutral defaults.
+    private static String BRAND_DISPLAY = "ExampleSMP";
+    private static String BRAND_DISCORD = "";
+
+    /** Reads the active brand profile's display name and Discord link from PizzaNetworkCore's branding.yml. */
+    private void loadBranding() {
+        try {
+            YamlConfiguration branding = YamlConfiguration.loadConfiguration(
+                new File(getConfig().getString("branding.file", "plugins/PizzaNetworkCore/branding.yml")));
+            String active = branding.getString("active", "example");
+            BRAND_DISPLAY = branding.getString("profiles." + active + ".display", "ExampleSMP");
+            BRAND_DISCORD = branding.getString("profiles." + active + ".discord", "");
+        } catch (Exception ex) {
+            getLogger().warning("[brand] branding.yml could not be read; using defaults: " + ex.getMessage());
+        }
+    }
     private static final ZoneId BAN_DATE_ZONE = ZoneId.of("America/New_York");
     private static final DateTimeFormatter DATE_FORMAT =
         DateTimeFormatter.ofPattern("MM/dd/yyyy").withZone(BAN_DATE_ZONE);
@@ -95,6 +120,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     private File locationsFile;
     private FileConfiguration locationsConfig;
+    private final Object locationsLock = new Object();
     private File pendingActionsFile;
     private FileConfiguration pendingActionsConfig;
     private File recordsFile;
@@ -102,15 +128,29 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     private File auditFile;
     private File offensesFile;
     private FileConfiguration offensesConfig;
+    private final Object offensesLock = new Object();
+    private final Object offensesWriteLock = new Object();
+    private final AtomicBoolean offenseWriteScheduled = new AtomicBoolean();
+    private final AtomicBoolean offenseWriteRetryScheduled = new AtomicBoolean();
+    private final AtomicLong offenseRevision = new AtomicLong();
+    private final AtomicReference<OffenseFileSnapshot> pendingOffenseSnapshot = new AtomicReference<>();
     private final Set<String> flightOwnerWhitelist = new HashSet<>();
+    private final ConcurrentHashMap<UUID, String> onlinePlayerNames = new ConcurrentHashMap<>();
     private final Set<String> activeLocks = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Long> recentActionTimes = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, BukkitTask> pendingReleaseTasks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ScheduledTask> pendingReleaseTasks = new ConcurrentHashMap<>();
+    private final Map<String, Object> pendingReleaseTokens = new HashMap<>();
     private final ConcurrentHashMap<String, PunishmentRecord> records = new ConcurrentHashMap<>();
     private final Map<String, PunishmentPreset> presetsByKey = new HashMap<>();
     private final List<String> presetSuggestions = new ArrayList<>();
     private final ConcurrentHashMap<String, PendingBulkClear> pendingBulkClearConfirms = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, PendingKickOperation> pendingKickOperations = new ConcurrentHashMap<>();
     private final SecureRandom idRandom = new SecureRandom();
+
+    private volatile boolean shuttingDown;
+
+    private record OffenseCount(String name, int count) { }
+    private record OffenseFileSnapshot(long revision, String yaml) { }
 
     /**
      * Shared storage for moderation state.
@@ -141,9 +181,11 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        shuttingDown = false;
         saveDefaultConfig();
         reloadConfig();
         getConfig().options().copyDefaults(true);
+        loadBranding();
         saveConfig();
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "punishment");
         if (!this.storage.isMysql()) {
@@ -185,20 +227,36 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         initOffenses();
 
         Bukkit.getPluginManager().registerEvents(this, this);
-        Bukkit.getScheduler().runTask(this, () -> Bukkit.getOnlinePlayers().forEach(this::enforceFlightRules));
-        Bukkit.getScheduler().runTaskTimer(this, () -> Bukkit.getOnlinePlayers().forEach(this::enforceFlightRules), 20L, 20L);
+        Bukkit.getOnlinePlayers().forEach(player -> {
+            scheduleFlightEnforcement(player);
+            scheduleOnlinePlayerNameSnapshot(player);
+        });
 
         getLogger().info("PunishDrop enabled.");
     }
 
     @Override
-    public void onDisable() {
+    public synchronized void onDisable() {
+        shuttingDown = true;
+        for (PendingKickOperation operation : new ArrayList<>(pendingKickOperations.values())) {
+            if (operation.finished.compareAndSet(false, true)) {
+                pendingKickOperations.remove(operation.lockKey, operation);
+                activeLocks.remove(operation.lockKey);
+                if (operation.actionApplied.get()) {
+                    getLogger().warning("A kick was handed off during shutdown before its local record could be finalized.");
+                } else {
+                    recentActionTimes.remove(operation.lockKey, operation.issuedAt);
+                }
+            }
+        }
         pendingReleaseTasks.values().forEach(task -> {
             if (task != null) {
                 task.cancel();
             }
         });
         pendingReleaseTasks.clear();
+        pendingReleaseTokens.clear();
+        onlinePlayerNames.clear();
         savePendingActions();
         saveRecords();
         saveOffenses();
@@ -294,29 +352,38 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onJoin(PlayerJoinEvent event) {
         event.setJoinMessage(null);
-        UUID uuid = event.getPlayer().getUniqueId();
-        Location location = consumeStoredLocation(uuid);
+        Player player = event.getPlayer();
+        UUID uuid = player.getUniqueId();
+        Location location = getStoredLocation(uuid);
+        scheduleOnlinePlayerNameSnapshot(player);
 
-        Bukkit.getScheduler().runTask(this, () -> {
-            Player player = event.getPlayer();
-            if (!player.isOnline()) {
-                return;
-            }
+        player.getScheduler().runDelayed(this, task -> {
             if (location != null && location.getWorld() != null) {
-                player.teleport(location);
+                try {
+                    player.teleportAsync(location.clone()).whenComplete((teleported, failure) -> {
+                        if (failure == null && Boolean.TRUE.equals(teleported)) {
+                            clearStoredLocationAfterTeleport(uuid, location);
+                        }
+                    });
+                } catch (RuntimeException ignored) {
+                    // Keep the saved location so the return can be retried on the next join.
+                }
             }
             enforceFlightRules(player);
-        });
+        }, () -> {}, 1L);
+        scheduleFlightEnforcement(player);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onQuit(PlayerQuitEvent event) {
         event.setQuitMessage(null);
+        onlinePlayerNames.remove(event.getPlayer().getUniqueId());
     }
 
     @EventHandler
     public void onGameModeChange(PlayerGameModeChangeEvent event) {
-        Bukkit.getScheduler().runTask(this, () -> enforceFlightRules(event.getPlayer()));
+        Player player = event.getPlayer();
+        player.getScheduler().runDelayed(this, task -> enforceFlightRules(player), () -> {}, 1L);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -522,13 +589,19 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             return true;
         }
 
+        String[] payload = Arrays.copyOfRange(args, 1, args.length);
+        ParsedPunishment parsed = parsePunishArgs(PunishmentType.BAN, payload, false, true);
+        if (parsed != null && parsed.type == PunishmentType.KICK) {
+            schedulePresetKickCommand(sender, args[0], parsed.reason);
+            return true;
+        }
+
         ResolvedTarget target = resolvePlayerTarget(args[0], false);
         if (!target.found()) {
             sender.sendMessage(ChatColor.RED + "Player not found: " + args[0]);
             return true;
         }
 
-        ParsedPunishment parsed = parsePunishArgs(PunishmentType.BAN, Arrays.copyOfRange(args, 1, args.length), false, true);
         if (parsed == null) {
             sender.sendMessage(ChatColor.RED + "Usage: /punish <player> <category|duration|reason...> [duration]");
             return true;
@@ -555,6 +628,12 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
         if (args.length < 2) {
             sender.sendMessage(ChatColor.RED + "Usage: " + usageForType(forcedType, forcePermanent));
+            return true;
+        }
+
+        if (forcedType == PunishmentType.KICK) {
+            List<String> payload = List.copyOf(Arrays.asList(args).subList(1, args.length));
+            scheduleKickCommand(sender, args[0], payload, commandLabelForType(forcedType));
             return true;
         }
 
@@ -641,9 +720,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             }
 
             if (record.type == PunishmentType.KICK) {
-                record.active = false;
                 record.clearedAt = System.currentTimeMillis();
                 record.clearedBy = sender.getName();
+                record.active = false;
                 persistRecord(record);
                 saveRecords();
             }
@@ -950,7 +1029,335 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         return true;
     }
 
-    private boolean releaseRecord(PunishmentRecord record, String actor, boolean notifyAndPersist) {
+    private void scheduleKickCommand(
+        CommandSender sender,
+        String targetName,
+        List<String> payload,
+        String sourceCommand
+    ) {
+        KickIssuer issuer = sender instanceof Player player
+            ? new KickIssuer(player.getUniqueId(), null)
+            : new KickIssuer(null, sender);
+        KickSubmission submission = new KickSubmission(
+            targetName,
+            List.copyOf(payload),
+            sender.getName(),
+            sourceCommand,
+            issuer,
+            null
+        );
+
+        submitKickCommand(sender, submission);
+    }
+
+    private void schedulePresetKickCommand(CommandSender sender, String targetName, String reason) {
+        KickIssuer issuer = sender instanceof Player player
+            ? new KickIssuer(player.getUniqueId(), null)
+            : new KickIssuer(null, sender);
+        KickSubmission submission = new KickSubmission(
+            targetName,
+            List.of(),
+            sender.getName(),
+            "punish",
+            issuer,
+            reason
+        );
+
+        submitKickCommand(sender, submission);
+    }
+
+    private void submitKickCommand(CommandSender sender, KickSubmission submission) {
+        if (!scheduleGlobalTask(() -> beginKickCommand(submission))) {
+            sender.sendMessage(ChatColor.RED + "Failed to apply Kick to " + submission.targetName + ".");
+        }
+    }
+
+    private void beginKickCommand(KickSubmission submission) {
+        if (shuttingDown) {
+            sendKickFeedback(submission.issuer, ChatColor.RED + "Failed to apply Kick to " + submission.targetName + ".");
+            return;
+        }
+
+        Player target = Bukkit.getPlayerExact(submission.targetName);
+        if (target == null) {
+            if (submission.presetReason == null) {
+                sendKickFeedback(submission.issuer,
+                    ChatColor.RED + "Unable to resolve target: " + submission.targetName + ".");
+            } else {
+                try {
+                    OfflinePlayer offline = Bukkit.getOfflinePlayer(submission.targetName);
+                    if (offline.hasPlayedBefore()) {
+                        String offlineName = offline.getName() == null ? submission.targetName : offline.getName();
+                        sendKickFeedback(submission.issuer,
+                            ChatColor.RED + "Failed to apply Kick to " + offlineName + ".");
+                    } else {
+                        sendKickFeedback(submission.issuer,
+                            ChatColor.RED + "Player not found: " + submission.targetName);
+                    }
+                } catch (RuntimeException exception) {
+                    sendKickFeedback(submission.issuer,
+                        ChatColor.RED + "Failed to apply Kick to " + submission.targetName + ".");
+                }
+            }
+            return;
+        }
+
+        String reason = submission.presetReason;
+        if (reason == null) {
+            ParsedPunishment parsed = parsePunishArgs(
+                PunishmentType.KICK,
+                submission.payload.toArray(String[]::new),
+                false,
+                false
+            );
+            if (parsed == null) {
+                sendKickFeedback(submission.issuer,
+                    ChatColor.RED + "Usage: " + usageForType(PunishmentType.KICK, false));
+                return;
+            }
+            reason = parsed.reason;
+        }
+
+        String lockKey = PunishmentType.KICK.name() + ":" + submission.targetName.toLowerCase(Locale.ROOT);
+        if (!activeLocks.add(lockKey)) {
+            return;
+        }
+
+        long issuedAt = System.currentTimeMillis();
+        Long previous = recentActionTimes.get(lockKey);
+        if (previous != null && issuedAt - previous < DUPLICATE_WINDOW_MS) {
+            activeLocks.remove(lockKey);
+            return;
+        }
+        recentActionTimes.put(lockKey, issuedAt);
+
+        PendingKickOperation operation = new PendingKickOperation(
+            submission,
+            reason,
+            lockKey,
+            issuedAt,
+            Bukkit.getPluginManager().isPluginEnabled("LibertyBans")
+        );
+        pendingKickOperations.put(lockKey, operation);
+        scheduleKickTargetPreflight(target, operation);
+    }
+
+    private void scheduleKickTargetPreflight(Player target, PendingKickOperation operation) {
+        try {
+            ScheduledTask task = target.getScheduler().run(this, ignored -> {
+                if (operation.finished.get()) {
+                    return;
+                }
+                try {
+                    if (shuttingDown || !target.isOnline()) {
+                        finishKickFailure(operation);
+                        return;
+                    }
+
+                    KickRequest request = new KickRequest(
+                        target.getUniqueId(),
+                        target.getName(),
+                        operation.reason,
+                        operation.submission.issuerName,
+                        operation.issuedAt,
+                        operation.submission.sourceCommand,
+                        operation.submission.issuer
+                    );
+
+                    if (operation.libertyBansEnabled) {
+                        if (!scheduleGlobalTask(() -> runLibertyBansKick(target, operation, request))) {
+                            finishKickFailure(operation);
+                        }
+                    } else {
+                        kickTargetOnCurrentEntity(target, operation, request);
+                    }
+                } catch (RuntimeException exception) {
+                    getLogger().warning("Could not prepare the target-owned /kick operation.");
+                    finishKickFailure(operation);
+                }
+            }, () -> finishKickFailure(operation));
+            if (task == null) {
+                finishKickFailure(operation);
+            }
+        } catch (RuntimeException exception) {
+            getLogger().warning("Could not schedule the target-owned /kick preflight.");
+            finishKickFailure(operation);
+        }
+    }
+
+    private void runLibertyBansKick(Player target, PendingKickOperation operation, KickRequest request) {
+        if (operation.finished.get()) {
+            return;
+        }
+        if (shuttingDown) {
+            finishKickFailure(operation);
+            return;
+        }
+
+        boolean applied = dispatchNativeCommand("kick " + request.targetName + " " + request.reason);
+        if (applied) {
+            operation.actionApplied.set(true);
+            finishKickSuccess(operation, request);
+            return;
+        }
+
+        scheduleKickTargetMutation(target, operation, request);
+    }
+
+    private void scheduleKickTargetMutation(Player target, PendingKickOperation operation, KickRequest request) {
+        try {
+            ScheduledTask task = target.getScheduler().run(this, ignored -> {
+                if (operation.finished.get()) {
+                    return;
+                }
+                kickTargetOnCurrentEntity(target, operation, request);
+            }, () -> finishKickFailure(operation));
+            if (task == null) {
+                finishKickFailure(operation);
+            }
+        } catch (RuntimeException exception) {
+            getLogger().warning("Could not schedule the target-owned /kick mutation.");
+            finishKickFailure(operation);
+        }
+    }
+
+    private void kickTargetOnCurrentEntity(Player target, PendingKickOperation operation, KickRequest request) {
+        if (operation.finished.get()) {
+            return;
+        }
+        if (shuttingDown || !target.isOnline()) {
+            finishKickFailure(operation);
+            return;
+        }
+
+        try {
+            target.kickPlayer(ChatColor.RED + request.reason);
+            operation.actionApplied.set(true);
+        } catch (RuntimeException exception) {
+            getLogger().warning("Could not apply a target-owned /kick mutation.");
+            finishKickFailure(operation);
+            return;
+        }
+
+        if (!scheduleGlobalTask(() -> finishKickSuccess(operation, request))) {
+            finishKickAppliedWithoutRecord(operation, request.targetName);
+        }
+    }
+
+    private void finishKickSuccess(PendingKickOperation operation, KickRequest request) {
+        if (!operation.finished.compareAndSet(false, true)) {
+            return;
+        }
+
+        try {
+            if (shuttingDown) {
+                getLogger().warning("A kick was applied during shutdown before its local record could be finalized.");
+                return;
+            }
+
+            PunishmentRecord record = new PunishmentRecord(
+                generateId(),
+                PunishmentType.KICK,
+                TargetKind.PLAYER,
+                request.targetName,
+                request.targetUuid.toString(),
+                null,
+                request.reason,
+                request.issuerName,
+                request.issuedAt,
+                "",
+                0L,
+                false,
+                0L,
+                null,
+                request.sourceCommand
+            );
+
+            storeRecord(record);
+            appendAuditLine("APPLY", record, request.issuerName);
+            removePendingAction(record.id);
+            record.clearedAt = System.currentTimeMillis();
+            record.clearedBy = request.issuerName;
+            record.active = false;
+            persistRecord(record);
+            saveRecords();
+            sendKickFeedback(
+                request.issuer,
+                ChatColor.GREEN + record.type.displayName + " applied to "
+                    + record.displayTarget() + ". ID: " + record.id + "."
+            );
+        } catch (RuntimeException exception) {
+            getLogger().warning("A kick was applied but its local record could not be finalized.");
+            sendKickFeedback(
+                request.issuer,
+                ChatColor.RED + "Kick was sent to " + request.targetName + ", but its record could not be saved."
+            );
+        } finally {
+            clearKickOperation(operation);
+        }
+    }
+
+    private void finishKickFailure(PendingKickOperation operation) {
+        if (!operation.finished.compareAndSet(false, true)) {
+            return;
+        }
+        clearKickOperation(operation);
+        if (!operation.actionApplied.get()) {
+            recentActionTimes.remove(operation.lockKey, operation.issuedAt);
+        }
+        sendKickFeedback(
+            operation.submission.issuer,
+            ChatColor.RED + "Failed to apply Kick to " + operation.submission.targetName + "."
+        );
+    }
+
+    private void finishKickAppliedWithoutRecord(PendingKickOperation operation, String targetName) {
+        if (!operation.finished.compareAndSet(false, true)) {
+            return;
+        }
+        clearKickOperation(operation);
+        getLogger().warning("A kick was applied but the global scheduler rejected its record finalization.");
+        sendKickFeedback(
+            operation.submission.issuer,
+            ChatColor.RED + "Kick was sent to " + targetName + ", but its record could not be saved."
+        );
+    }
+
+    private void clearKickOperation(PendingKickOperation operation) {
+        pendingKickOperations.remove(operation.lockKey, operation);
+        activeLocks.remove(operation.lockKey);
+    }
+
+    private boolean scheduleGlobalTask(Runnable action) {
+        if (shuttingDown) {
+            return false;
+        }
+        try {
+            return Bukkit.getGlobalRegionScheduler().run(this, ignored -> action.run()) != null;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private void sendKickFeedback(KickIssuer issuer, String message) {
+        if (shuttingDown) {
+            return;
+        }
+        if (issuer.playerUuid != null) {
+            scheduleGlobalTask(() -> {
+                Player player = Bukkit.getPlayer(issuer.playerUuid);
+                if (player != null) {
+                    runOnPlayerScheduler(player, () -> player.sendMessage(message));
+                }
+            });
+            return;
+        }
+        if (issuer.globalSender != null) {
+            scheduleGlobalTask(() -> issuer.globalSender.sendMessage(message));
+        }
+    }
+
+    private synchronized boolean releaseRecord(PunishmentRecord record, String actor, boolean notifyAndPersist) {
         boolean changed = switch (record.type) {
             case BAN -> performGenericUnban(record.targetName, record.getTargetUuid(), record.targetAddress);
             case IP_BAN -> performGenericIpUnban(record.targetAddress);
@@ -960,9 +1367,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
         if (notifyAndPersist && changed) {
             removePendingAction(record.id);
-            record.active = false;
             record.clearedAt = System.currentTimeMillis();
             record.clearedBy = actor;
+            record.active = false;
             persistRecord(record);
             saveRecords();
             appendAuditLine("CLEAR", record, actor);
@@ -1030,7 +1437,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         return changed;
     }
 
-    private void schedulePendingActions() {
+    private synchronized void schedulePendingActions() {
         for (String key : pendingActionsConfig.getKeys(false)) {
             long expiresAt = pendingActionsConfig.getLong(key + ".expires-at", 0L);
             if (expiresAt <= 0L) {
@@ -1046,24 +1453,36 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         savePendingActions();
     }
 
-    private void scheduleRelease(PunishmentRecord record) {
+    private synchronized void scheduleRelease(PunishmentRecord record) {
         pendingActionsConfig.set(record.id + ".record-id", record.id);
         pendingActionsConfig.set(record.id + ".expires-at", record.expiresAt);
         savePendingActions();
         schedulePendingAction(record.id, record.expiresAt, record.id);
     }
 
-    private void schedulePendingAction(String key, long expiresAt, String recordId) {
-        BukkitTask existing = pendingReleaseTasks.remove(key);
+    private synchronized void schedulePendingAction(String key, long expiresAt, String recordId) {
+        if (shuttingDown) {
+            return;
+        }
+        ScheduledTask existing = pendingReleaseTasks.remove(key);
         if (existing != null) {
             existing.cancel();
         }
         long delayTicks = Math.max(1L, (expiresAt - System.currentTimeMillis() + 49L) / 50L);
-        BukkitTask task = Bukkit.getScheduler().runTaskLater(this, () -> runPendingAction(key, recordId), delayTicks);
+        Object token = new Object();
+        pendingReleaseTokens.put(key, token);
+        ScheduledTask task = Bukkit.getGlobalRegionScheduler().runDelayed(
+            this,
+            scheduledTask -> runPendingAction(key, recordId, token),
+            delayTicks
+        );
         pendingReleaseTasks.put(key, task);
     }
 
-    private void runPendingAction(String key, String recordId) {
+    private synchronized void runPendingAction(String key, String recordId, Object token) {
+        if (shuttingDown || pendingReleaseTokens.get(key) != token) {
+            return;
+        }
         PunishmentRecord record = records.get(normalizeId(recordId));
         if (record == null || !record.active) {
             removePendingAction(key);
@@ -1082,8 +1501,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    private void removePendingAction(String key) {
-        BukkitTask task = pendingReleaseTasks.remove(key);
+    private synchronized void removePendingAction(String key) {
+        pendingReleaseTokens.remove(key);
+        ScheduledTask task = pendingReleaseTasks.remove(key);
         if (task != null) {
             task.cancel();
         }
@@ -1091,13 +1511,13 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         savePendingActions();
     }
 
-    private void storeRecord(PunishmentRecord record) {
+    private synchronized void storeRecord(PunishmentRecord record) {
         records.put(record.id, record);
         persistRecord(record);
         saveRecords();
     }
 
-    private void persistRecord(PunishmentRecord record) {
+    private synchronized void persistRecord(PunishmentRecord record) {
         String base = "records." + record.id;
         recordsConfig.set(base + ".type", record.type.name());
         recordsConfig.set(base + ".target-kind", record.targetKind.name());
@@ -1115,7 +1535,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         recordsConfig.set(base + ".source-command", record.sourceCommand);
     }
 
-    private void appendAuditLine(String action, PunishmentRecord record, String actor) {
+    private synchronized void appendAuditLine(String action, PunishmentRecord record, String actor) {
         if (auditFile == null) {
             return;
         }
@@ -1170,9 +1590,176 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     private DialogAction dialogClick(java.util.function.Consumer<Player> handler) {
         return DialogAction.customClick((view, audience) -> {
             if (audience instanceof Player p) {
-                Bukkit.getScheduler().runTask(this, () -> handler.accept(p));
+                runOnPlayerScheduler(p, () -> handler.accept(p));
             }
         }, ClickCallback.Options.builder().build());
+    }
+
+    private void runOnPlayerScheduler(Player player, Runnable action) {
+        try {
+            player.getScheduler().run(this, task -> {
+                if (!shuttingDown && player.isOnline()) {
+                    action.run();
+                }
+            }, () -> {});
+        } catch (RuntimeException ignored) {
+            // The viewer may retire or the plugin may begin shutting down before scheduling.
+        }
+    }
+
+    private void requestOnlinePlayerSnapshots(Player viewer, Consumer<List<ModerationPlayerSnapshot>> onReady) {
+        try {
+            ScheduledTask globalTask = Bukkit.getGlobalRegionScheduler().run(this, task -> {
+                if (shuttingDown) {
+                    return;
+                }
+
+                List<CompletableFuture<ModerationPlayerSnapshot>> pending = new ArrayList<>();
+                for (Player target : Bukkit.getOnlinePlayers()) {
+                    pending.add(snapshotOnlinePlayer(target));
+                }
+
+                CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new))
+                    .completeOnTimeout(null, 3L, TimeUnit.SECONDS)
+                    .whenComplete((ignored, failure) -> {
+                        if (shuttingDown) {
+                            return;
+                        }
+
+                        List<ModerationPlayerSnapshot> snapshots = new ArrayList<>();
+                        for (CompletableFuture<ModerationPlayerSnapshot> result : pending) {
+                            ModerationPlayerSnapshot snapshot = result.getNow(null);
+                            if (snapshot != null && snapshot.online()) {
+                                snapshots.add(snapshot);
+                            }
+                        }
+                        snapshots.sort(Comparator.comparing(snapshot -> snapshot.name().toLowerCase(Locale.ROOT)));
+                        List<ModerationPlayerSnapshot> immutableSnapshots = List.copyOf(snapshots);
+                        runOnPlayerScheduler(viewer, () -> onReady.accept(immutableSnapshots));
+                    });
+            });
+            if (globalTask == null) {
+                runOnPlayerScheduler(viewer, () -> onReady.accept(List.of()));
+            }
+        } catch (RuntimeException exception) {
+            runOnPlayerScheduler(viewer, () -> onReady.accept(List.of()));
+        }
+    }
+
+    private CompletableFuture<ModerationPlayerSnapshot> snapshotOnlinePlayer(Player target) {
+        CompletableFuture<ModerationPlayerSnapshot> result = new CompletableFuture<>();
+        try {
+            ScheduledTask entityTask = target.getScheduler().run(this, task -> {
+                try {
+                    if (!target.isOnline()) {
+                        result.complete(null);
+                        return;
+                    }
+
+                    String worldName = target.getWorld() == null ? "" : target.getWorld().getName();
+                    result.complete(new ModerationPlayerSnapshot(
+                        target.getUniqueId(),
+                        target.getName(),
+                        target.getPing(),
+                        worldName,
+                        target.getGameMode().name().toLowerCase(Locale.ROOT),
+                        true
+                    ));
+                } catch (RuntimeException exception) {
+                    result.complete(null);
+                }
+            }, () -> result.complete(null));
+            if (entityTask == null) {
+                result.complete(null);
+            }
+        } catch (RuntimeException exception) {
+            result.complete(null);
+        }
+        return result;
+    }
+
+    private void requestPlayerSnapshot(
+        Player viewer,
+        UUID targetUuid,
+        String fallbackName,
+        Consumer<ModerationPlayerSnapshot> onReady
+    ) {
+        ModerationPlayerSnapshot offline = new ModerationPlayerSnapshot(targetUuid, fallbackName, 0, "", "", false);
+        try {
+            ScheduledTask globalTask = Bukkit.getGlobalRegionScheduler().run(this, task -> {
+                if (shuttingDown) {
+                    return;
+                }
+
+                Player target = Bukkit.getPlayer(targetUuid);
+                if (target == null) {
+                    runOnPlayerScheduler(viewer, () -> onReady.accept(offline));
+                    return;
+                }
+
+                snapshotOnlinePlayer(target)
+                    .completeOnTimeout(offline, 3L, TimeUnit.SECONDS)
+                    .whenComplete((snapshot, failure) -> {
+                        ModerationPlayerSnapshot result = failure == null && snapshot != null ? snapshot : offline;
+                        runOnPlayerScheduler(viewer, () -> onReady.accept(result));
+                    });
+            });
+            if (globalTask == null) {
+                runOnPlayerScheduler(viewer, () -> onReady.accept(offline));
+            }
+        } catch (RuntimeException exception) {
+            runOnPlayerScheduler(viewer, () -> onReady.accept(offline));
+        }
+    }
+
+    private void teleportModeratorToTarget(Player viewer, UUID targetUuid, String targetName) {
+        try {
+            ScheduledTask globalTask = Bukkit.getGlobalRegionScheduler().run(this, task -> {
+                if (shuttingDown) return;
+
+                Player target = Bukkit.getPlayer(targetUuid);
+                if (target == null) {
+                    runOnPlayerScheduler(viewer,
+                        () -> viewer.sendMessage(ChatColor.RED + targetName + " is no longer online."));
+                    return;
+                }
+
+                try {
+                    ScheduledTask targetTask = target.getScheduler().run(this, entityTask -> {
+                        if (!target.isOnline()) {
+                            runOnPlayerScheduler(viewer,
+                                () -> viewer.sendMessage(ChatColor.RED + targetName + " is no longer online."));
+                            return;
+                        }
+
+                        Location destination = target.getLocation().clone();
+                        runOnPlayerScheduler(viewer, () -> viewer.teleportAsync(destination).whenComplete((success, failure) ->
+                            runOnPlayerScheduler(viewer, () -> {
+                                if (failure != null || !Boolean.TRUE.equals(success)) {
+                                    viewer.sendMessage(ChatColor.RED + "Could not teleport to " + targetName + ".");
+                                } else {
+                                    viewer.sendMessage(ChatColor.GREEN + "Teleported to " + targetName + ".");
+                                }
+                            })));
+                    }, () -> runOnPlayerScheduler(viewer,
+                        () -> viewer.sendMessage(ChatColor.RED + targetName + " is no longer online.")));
+                    if (targetTask == null) {
+                        runOnPlayerScheduler(viewer,
+                            () -> viewer.sendMessage(ChatColor.RED + targetName + " is no longer online."));
+                    }
+                } catch (RuntimeException exception) {
+                    runOnPlayerScheduler(viewer,
+                        () -> viewer.sendMessage(ChatColor.RED + "Could not schedule a teleport to " + targetName + "."));
+                }
+            });
+            if (globalTask == null) {
+                runOnPlayerScheduler(viewer,
+                    () -> viewer.sendMessage(ChatColor.RED + "Could not schedule a teleport to " + targetName + "."));
+            }
+        } catch (RuntimeException exception) {
+            runOnPlayerScheduler(viewer,
+                () -> viewer.sendMessage(ChatColor.RED + "Could not schedule a teleport to " + targetName + "."));
+        }
     }
 
     private ActionButton dialogButton(Component label, String tooltip, int width, java.util.function.Consumer<Player> click) {
@@ -1216,11 +1803,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             if (r.isActiveBanLike()) activeBans++;
             else if (r.active && r.type == PunishmentType.MUTE) activeMutes++;
         }
-        int offenders = 0;
-        if (offensesConfig != null) {
-            ConfigurationSection counts = offensesConfig.getConfigurationSection("counts");
-            if (counts != null) offenders = counts.getKeys(false).size();
-        }
+        int offenders = offenseCountsSnapshot().size();
         int chatStrikes = readChatStrikes().size();
         double tps = 20.0;
         try { tps = Bukkit.getTPS()[0]; } catch (Throwable ignored) {}
@@ -1240,21 +1823,21 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         buttons.add(dialogButton(Component.text("Anticheat Flags", DIALOG_BRAND), null, 150, p -> { p.closeDialog(); p.performCommand("sus"); }));
         buttons.add(dialogButton(Component.text("Clear All Bans", NamedTextColor.RED), null, 150, p -> openBulkClearDialog(p, ViewMode.ACTIVE_BANS)));
         buttons.add(dialogButton(Component.text("Clear All Mutes", NamedTextColor.YELLOW), null, 150, p -> openBulkClearDialog(p, ViewMode.ACTIVE_MUTES)));
-        player.showDialog(buildDialog(Component.text("Server Moderation", DIALOG_BRAND), body,
+        player.showDialog(buildDialog(Component.text(BRAND_DISPLAY + " Moderation", DIALOG_BRAND), body,
             DialogType.multiAction(buttons).columns(3).exitAction(dialogButton(Component.text("Close"), null, 150, null)).build()));
     }
 
     private void openOnlinePlayersDialog(Player viewer) {
-        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
-        online.sort(Comparator.comparing(p -> p.getName().toLowerCase(Locale.ROOT)));
+        requestOnlinePlayerSnapshots(viewer, snapshots -> showOnlinePlayersDialog(viewer, snapshots));
+    }
+
+    private void showOnlinePlayersDialog(Player viewer, List<ModerationPlayerSnapshot> online) {
         List<ActionButton> buttons = new ArrayList<>();
-        for (Player target : online) {
-            UUID id = target.getUniqueId();
-            String nm = target.getName();
-            int strikes = currentStrikes(id.toString());
-            buttons.add(dialogButton(Component.text(nm, NamedTextColor.GREEN),
+        for (ModerationPlayerSnapshot target : online) {
+            int strikes = currentStrikes(target.uuid().toString());
+            buttons.add(dialogButton(Component.text(target.name(), NamedTextColor.GREEN),
                 strikes > 0 ? (strikes + " offense strikes") : "Quick actions", 150,
-                p -> openPlayerActionsDialog(p, id, nm)));
+                p -> openPlayerActionsDialog(p, target.uuid(), target.name())));
         }
         ensureButtons(buttons);
         List<DialogBody> body = online.isEmpty() ? List.of(line("Nobody online.", NamedTextColor.GRAY)) : List.of();
@@ -1263,17 +1846,21 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private void openPlayerActionsDialog(Player viewer, UUID targetUuid, String targetName) {
-        Player target = Bukkit.getPlayer(targetUuid);
-        boolean online = target != null && target.isOnline();
+        requestPlayerSnapshot(viewer, targetUuid, targetName,
+            snapshot -> showPlayerActionsDialog(viewer, snapshot));
+    }
+
+    private void showPlayerActionsDialog(Player viewer, ModerationPlayerSnapshot target) {
+        String targetName = target.name();
+        UUID targetUuid = target.uuid();
         int strikes = currentStrikes(targetUuid.toString());
         List<DialogBody> body = List.of(
-            line(online ? "Online" : "Offline", online ? NamedTextColor.GREEN : NamedTextColor.GRAY),
+            line(target.online() ? "Online" : "Offline", target.online() ? NamedTextColor.GREEN : NamedTextColor.GRAY),
             line("Offense strikes: " + strikes, strikes > 0 ? NamedTextColor.RED : NamedTextColor.GRAY));
         List<ActionButton> buttons = new ArrayList<>();
         buttons.add(dialogButton(Component.text("Teleport", NamedTextColor.AQUA), null, 150, p -> {
-            Player t = Bukkit.getPlayer(targetUuid);
-            if (t == null || !t.isOnline()) { p.sendMessage(ChatColor.RED + targetName + " is no longer online."); return; }
-            p.closeDialog(); p.teleport(t.getLocation()); p.sendMessage(ChatColor.GREEN + "Teleported to " + targetName + ".");
+            p.closeDialog();
+            teleportModeratorToTarget(p, targetUuid, targetName);
         }));
         buttons.add(dialogButton(Component.text("Freeze", NamedTextColor.BLUE), null, 150, p -> { p.closeDialog(); p.performCommand("freeze " + targetName); }));
         buttons.add(dialogButton(Component.text("Unfreeze", NamedTextColor.DARK_AQUA), null, 150, p -> { p.closeDialog(); p.performCommand("unfreeze " + targetName); }));
@@ -1288,15 +1875,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     private void openOffensesDialog(Player viewer) {
         List<String[]> rows = new ArrayList<>();
-        if (offensesConfig != null) {
-            ConfigurationSection counts = offensesConfig.getConfigurationSection("counts");
-            if (counts != null) {
-                for (String key : counts.getKeys(false)) {
-                    int n = counts.getInt(key, 0);
-                    if (n <= 0) continue;
-                    rows.add(new String[] {key, offensesConfig.getString("names." + key, key), String.valueOf(n)});
-                }
-            }
+        for (Map.Entry<String, OffenseCount> entry : offenseCountsSnapshot().entrySet()) {
+            OffenseCount offense = entry.getValue();
+            rows.add(new String[] {entry.getKey(), offense.name(), String.valueOf(offense.count())});
         }
         rows.sort((a, b) -> Integer.parseInt(b[2]) - Integer.parseInt(a[2]));
         List<ActionButton> buttons = new ArrayList<>();
@@ -1317,7 +1898,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         int strikes = currentStrikes(key);
         List<DialogBody> body = new ArrayList<>();
         body.add(line("Strikes: " + strikes + "/3", NamedTextColor.RED));
-        List<String> hist = offensesConfig == null ? List.of() : offensesConfig.getStringList("history." + key);
+        List<String> hist = offenseHistorySnapshot(key);
         int from = Math.max(0, hist.size() - 5);
         for (int i = from; i < hist.size(); i++) {
             String[] parts = hist.get(i).split("\\|", 4);
@@ -1345,7 +1926,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             buttons.add(dialogButton(Component.text(nm + " (" + entry.count + "/5)", NamedTextColor.YELLOW), "Click to clear strikes", 250, p -> {
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "clearwarnings " + nm);
                 p.sendMessage(ChatColor.GREEN + "Cleared chat strikes for " + nm + ".");
-                Bukkit.getScheduler().runTaskLater(this, () -> { if (p.isOnline()) openChatStrikesDialog(p); }, 2L);
+                p.getScheduler().runDelayed(this, task -> openChatStrikesDialog(p), () -> {}, 2L);
             }));
         }
         ensureButtons(buttons);
@@ -1429,7 +2010,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             return;
         }
         ModerationMenuHolder holder = new ModerationMenuHolder();
-        Inventory inventory = Bukkit.createInventory(holder, MENU_GUI_SIZE, ChatColor.DARK_RED + "Server Moderation");
+        Inventory inventory = Bukkit.createInventory(holder, MENU_GUI_SIZE, ChatColor.DARK_RED + BRAND_DISPLAY + " Moderation");
         holder.inventory = inventory;
 
         fillInventory(inventory, Material.BLACK_STAINED_GLASS_PANE, ChatColor.BLACK.toString());
@@ -1524,13 +2105,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
                 activeMutes++;
             }
         }
-        int offenders = 0;
-        if (offensesConfig != null) {
-            ConfigurationSection counts = offensesConfig.getConfigurationSection("counts");
-            if (counts != null) {
-                offenders = counts.getKeys(false).size();
-            }
-        }
+        int offenders = offenseCountsSnapshot().size();
         int chatStrikes = readChatStrikes().size();
         double tps = 20.0;
         try {
@@ -1595,28 +2170,30 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     private void openOnlinePlayersGui(Player viewer) {
         if (useDialogUi(viewer)) { openOnlinePlayersDialog(viewer); return; }
+        requestOnlinePlayerSnapshots(viewer, snapshots -> showOnlinePlayersGui(viewer, snapshots));
+    }
+
+    private void showOnlinePlayersGui(Player viewer, List<ModerationPlayerSnapshot> online) {
         OnlinePlayersHolder holder = new OnlinePlayersHolder();
         Inventory inventory = Bukkit.createInventory(holder, LIST_GUI_SIZE, ChatColor.DARK_RED + "Online Players");
         holder.inventory = inventory;
         fillInventory(inventory, Material.BLACK_STAINED_GLASS_PANE, ChatColor.BLACK.toString());
 
-        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
-        online.sort(Comparator.comparing(p -> p.getName().toLowerCase(Locale.ROOT)));
         int slot = 0;
-        for (Player target : online) {
+        for (ModerationPlayerSnapshot target : online) {
             if (slot >= LIST_PAGE_SIZE) {
                 break;
             }
             ItemStack item = new ItemStack(Material.PLAYER_HEAD);
             ItemMeta rawMeta = item.getItemMeta();
             if (rawMeta instanceof SkullMeta meta) {
-                meta.setOwningPlayer(target);
-                meta.setDisplayName(ChatColor.GREEN + target.getName());
+                meta.setOwningPlayer(Bukkit.getOfflinePlayer(target.uuid()));
+                meta.setDisplayName(ChatColor.GREEN + target.name());
                 List<String> lore = new ArrayList<>();
-                lore.add(ChatColor.GRAY + "Ping: " + ChatColor.WHITE + target.getPing() + "ms");
-                lore.add(ChatColor.GRAY + "World: " + ChatColor.WHITE + target.getWorld().getName());
-                lore.add(ChatColor.GRAY + "Gamemode: " + ChatColor.WHITE + target.getGameMode().name().toLowerCase(Locale.ROOT));
-                int strikes = currentStrikes(target.getUniqueId().toString());
+                lore.add(ChatColor.GRAY + "Ping: " + ChatColor.WHITE + target.ping() + "ms");
+                lore.add(ChatColor.GRAY + "World: " + ChatColor.WHITE + target.worldName());
+                lore.add(ChatColor.GRAY + "Gamemode: " + ChatColor.WHITE + target.gameMode());
+                int strikes = currentStrikes(target.uuid().toString());
                 if (strikes > 0) {
                     lore.add(ChatColor.GRAY + "Offense strikes: " + ChatColor.RED + strikes);
                 }
@@ -1626,7 +2203,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
                 item.setItemMeta(meta);
             }
             inventory.setItem(slot, item);
-            holder.slotTargets.put(slot, target.getUniqueId());
+            holder.slotTargets.put(slot, target);
             slot++;
         }
         if (online.isEmpty()) {
@@ -1652,40 +2229,42 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             viewer.closeInventory();
             return;
         }
-        UUID targetUuid = holder.slotTargets.get(rawSlot);
-        if (targetUuid == null) {
+        ModerationPlayerSnapshot target = holder.slotTargets.get(rawSlot);
+        if (target == null) {
             return;
         }
-        Player target = Bukkit.getPlayer(targetUuid);
-        if (target == null || !target.isOnline()) {
-            viewer.sendMessage(ChatColor.RED + "That player is no longer online.");
-            openOnlinePlayersGui(viewer);
-            return;
-        }
-        openPlayerActionsGui(viewer, target.getUniqueId(), target.getName());
+        openPlayerActionsGui(viewer, target.uuid(), target.name());
     }
 
     private void openPlayerActionsGui(Player viewer, UUID targetUuid, String targetName) {
         if (useDialogUi(viewer)) { openPlayerActionsDialog(viewer, targetUuid, targetName); return; }
+        requestPlayerSnapshot(viewer, targetUuid, targetName, snapshot -> {
+            if (!snapshot.online()) {
+                viewer.sendMessage(ChatColor.RED + targetName + " is no longer online.");
+                openOnlinePlayersGui(viewer);
+                return;
+            }
+            showPlayerActionsGui(viewer, snapshot);
+        });
+    }
+
+    private void showPlayerActionsGui(Player viewer, ModerationPlayerSnapshot targetSnapshot) {
+        UUID targetUuid = targetSnapshot.uuid();
+        String targetName = targetSnapshot.name();
         PlayerActionsHolder holder = new PlayerActionsHolder(targetUuid, targetName);
         Inventory inventory = Bukkit.createInventory(holder, 27, ChatColor.DARK_RED + "Actions: " + targetName);
         holder.inventory = inventory;
         fillInventory(inventory, Material.GRAY_STAINED_GLASS_PANE, ChatColor.BLACK.toString());
 
-        Player target = Bukkit.getPlayer(targetUuid);
         ItemStack head = new ItemStack(Material.PLAYER_HEAD);
         ItemMeta rawMeta = head.getItemMeta();
         if (rawMeta instanceof SkullMeta meta) {
             meta.setOwningPlayer(Bukkit.getOfflinePlayer(targetUuid));
             meta.setDisplayName(ChatColor.GREEN + targetName);
             List<String> lore = new ArrayList<>();
-            if (target != null && target.isOnline()) {
-                lore.add(ChatColor.GRAY + "Ping: " + ChatColor.WHITE + target.getPing() + "ms");
-                lore.add(ChatColor.GRAY + "World: " + ChatColor.WHITE + target.getWorld().getName());
-                lore.add(ChatColor.GRAY + "Gamemode: " + ChatColor.WHITE + target.getGameMode().name().toLowerCase(Locale.ROOT));
-            } else {
-                lore.add(ChatColor.RED + "Offline");
-            }
+            lore.add(ChatColor.GRAY + "Ping: " + ChatColor.WHITE + targetSnapshot.ping() + "ms");
+            lore.add(ChatColor.GRAY + "World: " + ChatColor.WHITE + targetSnapshot.worldName());
+            lore.add(ChatColor.GRAY + "Gamemode: " + ChatColor.WHITE + targetSnapshot.gameMode());
             int strikes = currentStrikes(targetUuid.toString());
             lore.add(ChatColor.GRAY + "Offense strikes: " + (strikes > 0 ? ChatColor.RED : ChatColor.WHITE) + strikes);
             meta.setLore(lore);
@@ -1711,16 +2290,10 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     private void handlePlayerActionsClick(Player viewer, int rawSlot, PlayerActionsHolder holder) {
         String name = holder.targetName;
-        Player target = Bukkit.getPlayer(holder.targetUuid);
         switch (rawSlot) {
             case 10:
-                if (target == null || !target.isOnline()) {
-                    viewer.sendMessage(ChatColor.RED + name + " is no longer online.");
-                    return;
-                }
                 viewer.closeInventory();
-                viewer.teleport(target.getLocation());
-                viewer.sendMessage(ChatColor.GREEN + "Teleported to " + name + ".");
+                teleportModeratorToTarget(viewer, holder.targetUuid, name);
                 break;
             case 11:
                 viewer.closeInventory();
@@ -1771,18 +2344,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         fillInventory(inventory, Material.BLACK_STAINED_GLASS_PANE, ChatColor.BLACK.toString());
 
         List<String[]> rows = new ArrayList<>();
-        if (offensesConfig != null) {
-            ConfigurationSection counts = offensesConfig.getConfigurationSection("counts");
-            if (counts != null) {
-                for (String key : counts.getKeys(false)) {
-                    int n = counts.getInt(key, 0);
-                    if (n <= 0) {
-                        continue;
-                    }
-                    String display = offensesConfig.getString("names." + key, key);
-                    rows.add(new String[] {key, display, String.valueOf(n)});
-                }
-            }
+        for (Map.Entry<String, OffenseCount> entry : offenseCountsSnapshot().entrySet()) {
+            OffenseCount offense = entry.getValue();
+            rows.add(new String[] {entry.getKey(), offense.name(), String.valueOf(offense.count())});
         }
         rows.sort((a, b) -> Integer.parseInt(b[2]) - Integer.parseInt(a[2]));
 
@@ -1849,7 +2413,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         int strikes = currentStrikes(key);
         List<String> lore = new ArrayList<>();
         lore.add(ChatColor.GRAY + "Strikes: " + ChatColor.RED + strikes + ChatColor.GRAY + "/3");
-        List<String> hist = offensesConfig == null ? List.of() : offensesConfig.getStringList("history." + key);
+        List<String> hist = offenseHistorySnapshot(key);
         if (!hist.isEmpty()) {
             lore.add("");
             lore.add(ChatColor.GRAY + "Recent history:");
@@ -2015,11 +2579,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "clearwarnings " + name);
         viewer.sendMessage(ChatColor.GREEN + "Cleared chat strikes for " + name + ".");
         // Re-open after a tick so ChatGuard has persisted the cleared state.
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (viewer.isOnline()) {
-                openChatStrikesGui(viewer);
-            }
-        }, 2L);
+        viewer.getScheduler().runDelayed(this, task -> openChatStrikesGui(viewer), () -> {}, 2L);
     }
 
     private void openListGui(Player player, ViewMode mode, int requestedPage) {
@@ -2555,6 +3115,21 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    private void scheduleFlightEnforcement(Player player) {
+        player.getScheduler().runAtFixedRate(
+            this,
+            ignored -> enforceFlightRules(player),
+            () -> {},
+            1L,
+            20L
+        );
+    }
+
+    private void scheduleOnlinePlayerNameSnapshot(Player player) {
+        runOnPlayerScheduler(player, () ->
+            onlinePlayerNames.put(player.getUniqueId(), player.getName()));
+    }
+
     private void dropAndClearInventory(Player player, Location location) {
         PlayerInventory inventory = player.getInventory();
         inventory.clear();
@@ -2606,6 +3181,51 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all flush");
         } catch (Exception ex) {
             getLogger().warning("Failed to flush world saves: " + ex.getMessage());
+        }
+    }
+
+    private record KickIssuer(UUID playerUuid, CommandSender globalSender) { }
+
+    private record KickSubmission(
+        String targetName,
+        List<String> payload,
+        String issuerName,
+        String sourceCommand,
+        KickIssuer issuer,
+        String presetReason
+    ) { }
+
+    private record KickRequest(
+        UUID targetUuid,
+        String targetName,
+        String reason,
+        String issuerName,
+        long issuedAt,
+        String sourceCommand,
+        KickIssuer issuer
+    ) { }
+
+    private static final class PendingKickOperation {
+        private final KickSubmission submission;
+        private final String reason;
+        private final String lockKey;
+        private final long issuedAt;
+        private final boolean libertyBansEnabled;
+        private final AtomicBoolean finished = new AtomicBoolean();
+        private final AtomicBoolean actionApplied = new AtomicBoolean();
+
+        private PendingKickOperation(
+            KickSubmission submission,
+            String reason,
+            String lockKey,
+            long issuedAt,
+            boolean libertyBansEnabled
+        ) {
+            this.submission = submission;
+            this.reason = reason;
+            this.lockKey = lockKey;
+            this.issuedAt = issuedAt;
+            this.libertyBansEnabled = libertyBansEnabled;
         }
     }
 
@@ -2674,9 +3294,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private String buildBanScreenMessage(PunishmentRecord record) {
-        return ChatColor.RED + "You are banned from this server. If you believe this was a mistake please make a ticket in the Example SMP Discord"
+        return ChatColor.RED + "You are banned from " + BRAND_DISPLAY + ". If you believe this was a mistake please make a ticket in the " + BRAND_DISPLAY + " Discord"
             + "\n"
-            + ChatColor.YELLOW + DISCORD_INVITE
+            + ChatColor.YELLOW + BRAND_DISCORD
             + "\n\n"
             + ChatColor.GRAY + "Date: " + ChatColor.WHITE + formatDate(record.issuedAt)
             + "\n"
@@ -2686,7 +3306,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             + "\n"
             + ChatColor.GRAY + "Reason: " + ChatColor.WHITE + record.reason
             + "\n"
-            + ChatColor.GRAY + "You may be able to appeal this ban on " + ChatColor.WHITE + DISCORD_INVITE + ChatColor.GRAY + ".";
+            + ChatColor.GRAY + "You may be able to appeal this ban on " + ChatColor.WHITE + BRAND_DISCORD + ChatColor.GRAY + ".";
     }
 
     private String formatDate(long timestamp) {
@@ -2830,8 +3450,93 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private void saveOffenses() {
-        if (offensesConfig == null) return;
-        this.storage.saveDoc(DOC_OFFENSES, (YamlConfiguration) offensesConfig);
+        OffenseFileSnapshot snapshot;
+        synchronized (offensesLock) {
+            if (offensesConfig == null) return;
+            snapshot = new OffenseFileSnapshot(offenseRevision.incrementAndGet(), offensesConfig.saveToString());
+            pendingOffenseSnapshot.set(snapshot);
+        }
+        if (shuttingDown) {
+            try {
+                flushOffenseSnapshot(snapshot);
+            } catch (IOException ex) {
+                getLogger().warning("Failed saving offences during shutdown: " + ex.getMessage());
+            }
+            return;
+        }
+        scheduleOffenseWriter();
+    }
+
+    private void scheduleOffenseWriter() {
+        if (shuttingDown || pendingOffenseSnapshot.get() == null
+                || !offenseWriteScheduled.compareAndSet(false, true)) return;
+        try {
+            ScheduledTask task = Bukkit.getAsyncScheduler().runNow(this, ignored -> drainOffenseSnapshots());
+            if (task == null) {
+                offenseWriteScheduled.set(false);
+                getLogger().warning("Async offense save was rejected; the latest state remains queued.");
+                scheduleOffenseWriterRetry();
+            }
+        } catch (RuntimeException ex) {
+            offenseWriteScheduled.set(false);
+            getLogger().warning("Could not schedule async offense save; the latest state remains queued.");
+            scheduleOffenseWriterRetry();
+        }
+    }
+
+    private void drainOffenseSnapshots() {
+        boolean failed = false;
+        try {
+            while (!shuttingDown) {
+                OffenseFileSnapshot snapshot = pendingOffenseSnapshot.get();
+                if (snapshot == null) break;
+                try {
+                    flushOffenseSnapshot(snapshot);
+                } catch (IOException ex) {
+                    failed = true;
+                    getLogger().warning("Failed saving offenses.yml; the latest state remains queued: " + ex.getMessage());
+                    break;
+                }
+            }
+        } finally {
+            offenseWriteScheduled.set(false);
+            if (!shuttingDown && pendingOffenseSnapshot.get() != null) {
+                if (failed) scheduleOffenseWriterRetry();
+                else scheduleOffenseWriter();
+            }
+        }
+    }
+
+    private void scheduleOffenseWriterRetry() {
+        if (shuttingDown || pendingOffenseSnapshot.get() == null
+                || !offenseWriteRetryScheduled.compareAndSet(false, true)) return;
+        try {
+            ScheduledTask retry = Bukkit.getAsyncScheduler().runDelayed(this, ignored -> {
+                offenseWriteRetryScheduled.set(false);
+                scheduleOffenseWriter();
+            }, 1L, TimeUnit.SECONDS);
+            if (retry == null) offenseWriteRetryScheduled.set(false);
+        } catch (RuntimeException ex) {
+            offenseWriteRetryScheduled.set(false);
+            getLogger().warning("Could not schedule offense-save retry.");
+        }
+    }
+
+    private void flushOffenseSnapshot(OffenseFileSnapshot snapshot) throws IOException {
+        synchronized (offensesWriteLock) {
+            if (snapshot.revision() < offenseRevision.get()) return;
+            YamlConfiguration document = new YamlConfiguration();
+            try {
+                document.loadFromString(snapshot.yaml());
+            } catch (org.bukkit.configuration.InvalidConfigurationException ex) {
+                throw new IOException("offence snapshot is not valid YAML", ex);
+            }
+            // Shared storage (MySQL when configured, else the local file) so escalation follows players across backends.
+            if (!this.storage.saveDocResult(DOC_OFFENSES, document)) {
+                throw new IOException("offence storage write failed");
+            }
+            pendingOffenseSnapshot.compareAndSet(snapshot, null);
+        }
     }
 
     /**
@@ -2842,9 +3547,15 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
      * caused in the first place.
      */
     private void refreshOffenses() {
-        YamlConfiguration fresh = this.storage.loadDoc(DOC_OFFENSES);
-        if (!fresh.getKeys(true).isEmpty() || offensesConfig == null) {
-            offensesConfig = fresh;
+        // Never replace in-memory counts that are still waiting to be written, and keep live state if the read fails.
+        if (pendingOffenseSnapshot.get() != null) return;
+        dev.pizzasmp.common.SuiteStorage.DocumentLoadResult fresh = this.storage.loadDocResult(DOC_OFFENSES);
+        if (fresh.status() == dev.pizzasmp.common.SuiteStorage.DocumentLoadStatus.FAILED) return;
+        synchronized (offensesLock) {
+            if (pendingOffenseSnapshot.get() != null) return;
+            if (!fresh.document().getKeys(true).isEmpty() || offensesConfig == null) {
+                offensesConfig = fresh.document();
+            }
         }
     }
 
@@ -2857,26 +3568,53 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         // Escalation must see strikes added on other backends, or a repeat offender reads
         // as a first-timer purely because they changed server.
         refreshOffenses();
-        return offensesConfig == null ? 0 : Math.max(0, offensesConfig.getInt("counts." + key, 0));
+        synchronized (offensesLock) {
+            return offensesConfig == null ? 0 : Math.max(0, offensesConfig.getInt("counts." + key, 0));
+        }
     }
 
     private void setStrikes(String key, int n, String nameDisplay) {
-        if (offensesConfig == null) return;
-        if (n <= 0) {
-            offensesConfig.set("counts." + key, null);
-        } else {
-            offensesConfig.set("counts." + key, n);
-            if (nameDisplay != null) offensesConfig.set("names." + key, nameDisplay);
+        synchronized (offensesLock) {
+            if (offensesConfig == null) return;
+            if (n <= 0) {
+                offensesConfig.set("counts." + key, null);
+            } else {
+                offensesConfig.set("counts." + key, n);
+                if (nameDisplay != null) offensesConfig.set("names." + key, nameDisplay);
+            }
         }
     }
 
     private void appendOffenseHistory(String key, String entry) {
-        if (offensesConfig == null) return;
-        List<String> hist = new ArrayList<>(offensesConfig.getStringList("history." + key));
-        hist.add(entry);
-        // Cap history at 20 entries per player so the file doesn't grow unbounded.
-        while (hist.size() > 20) hist.remove(0);
-        offensesConfig.set("history." + key, hist);
+        synchronized (offensesLock) {
+            if (offensesConfig == null) return;
+            List<String> hist = new ArrayList<>(offensesConfig.getStringList("history." + key));
+            hist.add(entry);
+            // Cap history at 20 entries per player so the file doesn't grow unbounded.
+            while (hist.size() > 20) hist.remove(0);
+            offensesConfig.set("history." + key, hist);
+        }
+    }
+
+    private Map<String, OffenseCount> offenseCountsSnapshot() {
+        synchronized (offensesLock) {
+            if (offensesConfig == null) return Map.of();
+            ConfigurationSection counts = offensesConfig.getConfigurationSection("counts");
+            if (counts == null) return Map.of();
+            Map<String, OffenseCount> snapshot = new LinkedHashMap<>();
+            for (String key : counts.getKeys(false)) {
+                int count = Math.max(0, counts.getInt(key, 0));
+                if (count > 0) snapshot.put(key, new OffenseCount(
+                    offensesConfig.getString("names." + key, key), count));
+            }
+            return Map.copyOf(snapshot);
+        }
+    }
+
+    private List<String> offenseHistorySnapshot(String key) {
+        synchronized (offensesLock) {
+            return offensesConfig == null ? List.of() : List.copyOf(offensesConfig.getStringList("history." + key));
+        }
     }
 
     private boolean handleOffendCommand(CommandSender sender, String[] args) {
@@ -2896,11 +3634,15 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         String reason = args.length > 1 ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)).trim() : "Cheating";
         if (reason.isBlank()) reason = "Cheating";
         String key = offenseKey(target);
-        int newCount = Math.min(99, currentStrikes(key) + 1);
-        setStrikes(key, newCount, target.targetName);
+        int newCount;
+        synchronized (offensesLock) {
+            newCount = Math.min(99, currentStrikes(key) + 1);
+            setStrikes(key, newCount, target.targetName);
+            String duration = newCount <= 1 ? "7d" : newCount == 2 ? "30d" : "365d";
+            appendOffenseHistory(key,
+                System.currentTimeMillis() + "|" + sender.getName() + "|" + duration + "|" + reason);
+        }
         String duration = newCount <= 1 ? "7d" : newCount == 2 ? "30d" : "365d";
-        appendOffenseHistory(key,
-            System.currentTimeMillis() + "|" + sender.getName() + "|" + duration + "|" + reason);
         saveOffenses();
 
         // Reuse the existing /punish pipeline so combat-tag inventory gating,
@@ -2921,21 +3663,15 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             p.sendMessage(ChatColor.RED + "You do not have permission to view offenses.");
             return true;
         }
-        if (offensesConfig == null) {
-            sender.sendMessage(ChatColor.YELLOW + "No offenses recorded yet.");
-            return true;
-        }
         if (args.length == 0) {
-            org.bukkit.configuration.ConfigurationSection counts = offensesConfig.getConfigurationSection("counts");
-            if (counts == null || counts.getKeys(false).isEmpty()) {
+            Map<String, OffenseCount> counts = offenseCountsSnapshot();
+            if (counts.isEmpty()) {
                 sender.sendMessage(ChatColor.YELLOW + "No offenses recorded yet.");
                 return true;
             }
             List<String[]> rows = new ArrayList<>();
-            for (String k : counts.getKeys(false)) {
-                int n = counts.getInt(k, 0);
-                String display = offensesConfig.getString("names." + k, k);
-                rows.add(new String[]{ display, String.valueOf(n) });
+            for (OffenseCount entry : counts.values()) {
+                rows.add(new String[]{entry.name(), String.valueOf(entry.count())});
             }
             rows.sort((a, b) -> Integer.parseInt(b[1]) - Integer.parseInt(a[1]));
             sender.sendMessage(ChatColor.GOLD + "Top offenders (" + rows.size() + ")");
@@ -2956,7 +3692,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         int strikes = currentStrikes(key);
         sender.sendMessage(ChatColor.GOLD + target.targetName + ChatColor.GRAY + " has "
             + ChatColor.RED + strikes + ChatColor.GRAY + " offense strike(s).");
-        List<String> hist = offensesConfig.getStringList("history." + key);
+        List<String> hist = offenseHistorySnapshot(key);
         if (hist.isEmpty()) {
             sender.sendMessage(ChatColor.GRAY + "  (no history)");
         } else {
@@ -2993,27 +3729,35 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             return true;
         }
         String key = offenseKey(target);
-        int strikes = currentStrikes(key);
+        int strikes;
+        int next;
+        synchronized (offensesLock) {
+            strikes = currentStrikes(key);
+            if (strikes <= 0) {
+                sender.sendMessage(ChatColor.YELLOW + target.targetName + " has no strikes to revoke.");
+                return true;
+            }
+            int remove;
+            if (args.length >= 2 && args[1].equalsIgnoreCase("all")) {
+                remove = strikes;
+            } else if (args.length >= 2) {
+                try { remove = Math.max(1, Integer.parseInt(args[1])); }
+                catch (NumberFormatException ex) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /unoffend <player> [count|all]");
+                    return true;
+                }
+            } else {
+                remove = 1;
+            }
+            next = Math.max(0, strikes - remove);
+            setStrikes(key, next, target.targetName);
+            appendOffenseHistory(key,
+                System.currentTimeMillis() + "|" + sender.getName() + "|revoke|-" + (strikes - next));
+        }
         if (strikes <= 0) {
             sender.sendMessage(ChatColor.YELLOW + target.targetName + " has no strikes to revoke.");
             return true;
         }
-        int remove;
-        if (args.length >= 2 && args[1].equalsIgnoreCase("all")) {
-            remove = strikes;
-        } else if (args.length >= 2) {
-            try { remove = Math.max(1, Integer.parseInt(args[1])); }
-            catch (NumberFormatException ex) {
-                sender.sendMessage(ChatColor.RED + "Usage: /unoffend <player> [count|all]");
-                return true;
-            }
-        } else {
-            remove = 1;
-        }
-        int next = Math.max(0, strikes - remove);
-        setStrikes(key, next, target.targetName);
-        appendOffenseHistory(key,
-            System.currentTimeMillis() + "|" + sender.getName() + "|revoke|-" + (strikes - next));
         saveOffenses();
         sender.sendMessage(ChatColor.GREEN + "Revoked " + (strikes - next) + " strike(s) from "
             + target.targetName + " (" + next + " remaining).");
@@ -3088,9 +3832,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     private List<String> completeKnownPlayerTargets(String prefix) {
         Set<String> names = new HashSet<>();
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            names.add(player.getName());
-        }
+        names.addAll(onlinePlayerNames.values());
         for (PunishmentRecord record : records.values()) {
             if (record.targetName != null && !record.targetName.isBlank()) {
                 names.add(record.targetName);
@@ -3289,22 +4031,44 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private void storeLocation(UUID uuid, Location location) {
-        locationsConfig.set(uuid.toString(), location);
-        saveLocations();
-    }
-
-    private Location consumeStoredLocation(UUID uuid) {
-        String key = uuid.toString();
-        Location location = locationsConfig.getLocation(key);
-        if (location == null) {
-            return null;
+        synchronized (locationsLock) {
+            locationsConfig.set(uuid.toString(), location.clone());
+            saveLocationsLocked();
         }
-        locationsConfig.set(key, null);
-        saveLocations();
-        return location;
     }
 
-    private void saveLocations() {
+    private Location getStoredLocation(UUID uuid) {
+        synchronized (locationsLock) {
+            Location location = locationsConfig.getLocation(uuid.toString());
+            return location == null ? null : location.clone();
+        }
+    }
+
+    private void clearStoredLocationAfterTeleport(UUID uuid, Location expectedLocation) {
+        try {
+            Bukkit.getGlobalRegionScheduler().run(this, task -> {
+                if (!shuttingDown) {
+                    clearStoredLocation(uuid, expectedLocation);
+                }
+            });
+        } catch (RuntimeException ignored) {
+            // Leave the saved location intact if shutdown prevents the cleanup task.
+        }
+    }
+
+    private void clearStoredLocation(UUID uuid, Location expectedLocation) {
+        synchronized (locationsLock) {
+            String key = uuid.toString();
+            Location storedLocation = locationsConfig.getLocation(key);
+            if (storedLocation == null || !storedLocation.equals(expectedLocation)) {
+                return;
+            }
+            locationsConfig.set(key, null);
+            saveLocationsLocked();
+        }
+    }
+
+    private void saveLocationsLocked() {
         try {
             locationsConfig.save(locationsFile);
         } catch (IOException e) {
@@ -3312,11 +4076,11 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    private void savePendingActions() {
+    private synchronized void savePendingActions() {
         this.storage.saveDoc(DOC_PENDING, (YamlConfiguration) pendingActionsConfig);
     }
 
-    private void saveRecords() {
+    private synchronized void saveRecords() {
         this.storage.saveDoc(DOC_RECORDS, (YamlConfiguration) recordsConfig);
     }
 
@@ -3453,9 +4217,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private enum ViewMode {
-        ACTIVE_BANS("Active Bans", ChatColor.DARK_RED + "Server Bans"),
-        ACTIVE_MUTES("Active Mutes", ChatColor.DARK_RED + "PizzaSMP Mutes"),
-        HISTORY("History", ChatColor.DARK_RED + "PizzaSMP History");
+        ACTIVE_BANS("Active Bans", ChatColor.DARK_RED + "Active Bans"),
+        ACTIVE_MUTES("Active Mutes", ChatColor.DARK_RED + "Active Mutes"),
+        HISTORY("History", ChatColor.DARK_RED + "Punishment History");
 
         private final String displayName;
         private final String title;
@@ -3556,7 +4320,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
                 actionType = PunishmentType.BAN;
             }
             String duration = section.getString("duration", actionType == PunishmentType.KICK ? "" : "30d");
-            String reason = section.getString("reason", "PizzaSMP Rule Violation");
+            String reason = section.getString("reason", "Rule Violation");
             List<String> aliases = new ArrayList<>();
             for (String alias : section.getStringList("aliases")) {
                 if (alias == null || alias.isBlank()) {
@@ -3586,9 +4350,9 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         private final long issuedAt;
         private final String durationInput;
         private final long expiresAt;
-        private boolean active;
-        private long clearedAt;
-        private String clearedBy;
+        private volatile boolean active;
+        private volatile long clearedAt;
+        private volatile String clearedBy;
         private final String sourceCommand;
 
         private PunishmentRecord(
@@ -3776,7 +4540,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private static final class OnlinePlayersHolder implements InventoryHolder {
-        private final Map<Integer, UUID> slotTargets = new HashMap<>();
+        private final Map<Integer, ModerationPlayerSnapshot> slotTargets = new HashMap<>();
         private Inventory inventory;
 
         @Override
@@ -3784,6 +4548,15 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             return inventory;
         }
     }
+
+    private record ModerationPlayerSnapshot(
+        UUID uuid,
+        String name,
+        int ping,
+        String worldName,
+        String gameMode,
+        boolean online
+    ) { }
 
     private static final class PlayerActionsHolder implements InventoryHolder {
         private final UUID targetUuid;

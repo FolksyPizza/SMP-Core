@@ -1,5 +1,5 @@
 /*
- * PizzaNetworkCore — part of the PizzaSMP plugin suite.
+ * PizzaNetworkCore — part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */
@@ -448,14 +448,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private FileConfiguration shopConfig;
     private FileConfiguration sellConfig;
     private FileConfiguration worthConfig;
-    // ---- Branding (PizzaSMP <-> HorizonSMP toggle; see branding.yml) ----
+    // ---- Branding (active profile from branding.yml) ----
     private FileConfiguration brandingConfig;
     private String brandActive = "pizzasmp";
     private String brandDisplay = "ExampleSMP";
     private String brandShort = "Pizza";
     private String brandRegion = "NA-East";
     private String brandTagline = "Survival";
-    private String brandDiscord = "discord.gg/example";
+    private String brandDiscord = "";
     private String brandTierPlus = "Pizza+";
     private String brandTierPlusPlus = "Pizza++";
     private final Map<String, String> brandColors = new java.util.HashMap<>();   // role -> 6-hex (no #)
@@ -927,7 +927,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         for (Player online : Bukkit.getOnlinePlayers()) {
             this.chatKnownPlayerNames.put(online.getName().toLowerCase(Locale.ROOT), online.getName());
         }
-        this.loadBranding();       // resolve active brand profile (PizzaSMP/HorizonSMP) before any UI renders
+        this.loadBranding();       // resolve the active brand profile before any UI renders
         this.ensureDataSource();   // warm the DB connection pool before any query runs
         this.loadShopConfig();
         this.loadSellConfig();
@@ -4155,7 +4155,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.handlePizzaSusFlagCommand(sender, args);
             return true;
         }
-        // Console-capable (and admin players): switch the active brand profile (PizzaSMP <-> HorizonSMP).
+        // Console-capable (and admin players): switch the active brand profile.
         if ("branding".equals(cmdNameLower)) {
             if (sender instanceof Player pp && !pp.hasPermission(PERM_ADMIN_CONSOLE)) {
                 pp.sendMessage("§cThis command does not exist.");
@@ -6100,7 +6100,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             player.sendMessage("\u00a7cNo permission.");
             return;
         }
-        player.sendMessage("\u00a79Discord \u00a78\u00bb \u00a7bhttps://discord.gg/example");
+        if (this.brandDiscord == null || this.brandDiscord.isBlank()) { player.sendMessage("\u00a77No Discord link is configured."); return; }
+        player.sendMessage("\u00a79Discord \u00a78\u00bb \u00a7b" + (this.brandDiscord.startsWith("http") ? this.brandDiscord : "https://" + this.brandDiscord));
     }
 
     private void handleGtpCommand(Player staff, String[] args) {
@@ -14676,7 +14677,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.brandShort = this.brandingConfig.getString(base + "short", "Pizza");
         this.brandRegion = this.brandingConfig.getString(base + "region", "NA-East");
         this.brandTagline = this.brandingConfig.getString(base + "tagline", "Survival");
-        this.brandDiscord = this.brandingConfig.getString(base + "discord", "discord.gg/example");
+        this.brandDiscord = this.brandingConfig.getString(base + "discord", "");
         this.brandTierPlus = this.brandingConfig.getString(base + "tiers.plus", "Pizza+");
         this.brandTierPlusPlus = this.brandingConfig.getString(base + "tiers.plusplus", "Pizza++");
         this.brandColors.clear();
