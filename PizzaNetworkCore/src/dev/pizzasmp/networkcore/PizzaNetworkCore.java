@@ -450,7 +450,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private FileConfiguration worthConfig;
     // ---- Branding (active profile from branding.yml) ----
     private FileConfiguration brandingConfig;
-    private String brandActive = "pizzasmp";
+    private String brandActive = "example";
     private String brandDisplay = "ExampleSMP";
     private String brandShort = "Pizza";
     private String brandRegion = "NA-East";
@@ -14666,11 +14666,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         try { this.saveResource("branding.yml", false); } catch (Exception ignored) {}
         File f = new File(this.getDataFolder(), "branding.yml");
         this.brandingConfig = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
-        String active = this.brandingConfig.getString("active", "pizzasmp");
+        String active = this.brandingConfig.getString("active", "example");
         String base = "profiles." + active + ".";
         if (!this.brandingConfig.isConfigurationSection("profiles." + active)) {
-            this.getLogger().warning("[brand] profile '" + active + "' not found in branding.yml; using pizzasmp defaults.");
-            active = "pizzasmp"; base = "profiles.pizzasmp.";
+            this.getLogger().warning("[brand] profile '" + active + "' not found in branding.yml; using neutral defaults.");
+            active = "example"; base = "profiles.example.";
         }
         this.brandActive = active;
         this.brandDisplay = this.brandingConfig.getString(base + "display", "ExampleSMP");
