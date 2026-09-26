@@ -32,11 +32,11 @@ import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Sound;
 import org.bukkit.SoundCategory;
-import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitTask;
+import dev.pizzasmp.common.scheduler.PlatformScheduler;
+import dev.pizzasmp.common.scheduler.PlatformScheduler.TaskHandle;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 final class MaintenanceQueueManager {
     private final JavaPlugin plugin;
@@ -60,11 +60,15 @@ final class MaintenanceQueueManager {
     private volatile String message = "This server is currently under maintenance. Please try again later.";
     private volatile Set<String> targets = Set.of("survival", "pvp");
     private volatile boolean previousActive;
+    private volatile boolean running;
+    private volatile long generation;
+    private final AtomicBoolean refreshInProgress = new AtomicBoolean();
+    private final AtomicBoolean drainInProgress = new AtomicBoolean();
     private final ConcurrentHashMap<UUID, Long> nextMellohiAt = new ConcurrentHashMap();
     private final ConcurrentHashMap<UUID, Long> nextLobbyTransferAttemptAt = new ConcurrentHashMap();
-    private BukkitTask refreshTask;
-    private BukkitTask announceTask;
-    private BukkitTask drainTask;
+    private volatile TaskHandle refreshTask;
+    private volatile TaskHandle announceTask;
+    private volatile TaskHandle drainTask;
 
     MaintenanceQueueManager(JavaPlugin plugin, String serverName) {
         Sound resolvedSound;
@@ -75,8 +79,8 @@ final class MaintenanceQueueManager {
         String database = plugin.getConfig().getString("sync.database.name", "pizzasmp");
         String params = plugin.getConfig().getString("sync.database.parameters", "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true");
         this.dbUrl = "jdbc:mariadb://" + host + ":" + port + "/" + database + "?" + params;
-        this.dbUser = plugin.getConfig().getString("sync.database.user", "pizzasmp");
-        this.dbPassword = plugin.getConfig().getString("sync.database.password", "CHANGE_ME");
+        this.dbUser = plugin.getConfig().getString("sync.database.user", "");
+        this.dbPassword = plugin.getConfig().getString("sync.database.password", "");
         this.maintenanceMusicEnabled = plugin.getConfig().getBoolean("maintenance_music.enabled", true);
         String configuredSound = plugin.getConfig().getString("maintenance_music.sound", Sound.MUSIC_DISC_MELLOHI.name());
         try {
@@ -97,28 +101,68 @@ final class MaintenanceQueueManager {
         this.holdMessage = plugin.getConfig().getString("maintenance_hold.message",
             "The Server Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost. You Will Be Put Back After Your Region Restarts.");
     }
-
-    void start() {
-        this.ensureSchema();
-        this.refreshTask = Bukkit.getScheduler().runTaskTimerAsynchronously((Plugin)this.plugin, this::refreshState, 20L, 20L);
-        if ("lobby".equalsIgnoreCase(this.serverName) || "maintenance".equalsIgnoreCase(this.serverName)) {
-            this.announceTask = Bukkit.getScheduler().runTaskTimer((Plugin)this.plugin, this::broadcastHoldState, 20L, 20L);
+    synchronized void start() {
+        if (this.running) {
+            return;
         }
-        if ("lobby".equalsIgnoreCase(this.serverName) || "maintenance".equalsIgnoreCase(this.serverName)) {
-            this.drainTask = Bukkit.getScheduler().runTaskTimerAsynchronously((Plugin)this.plugin, this::drainQueueIfAllowed, 40L, this.returnDrainIntervalTicks);
+        this.running = true;
+        long token = ++this.generation;
+        PlatformScheduler.asyncNow(this.plugin, () -> {
+            if (!this.isCurrent(token)) return;
+            this.ensureSchema();
+            if (!this.isCurrent(token)) return;
+            this.refreshState(token);
+            this.setRefreshTask(token, PlatformScheduler.asyncRepeating(this.plugin,
+                () -> this.refreshState(token), 20L, 20L));
+            if ("lobby".equalsIgnoreCase(this.serverName) || "maintenance".equalsIgnoreCase(this.serverName)) {
+                this.setAnnounceTask(token, PlatformScheduler.globalRepeating(this.plugin,
+                    () -> this.broadcastHoldState(token), 20L, 20L));
+                this.setDrainTask(token, PlatformScheduler.asyncRepeating(this.plugin,
+                    () -> this.drainQueueIfAllowed(token), 40L, this.returnDrainIntervalTicks));
+            }
+        });
+    }
+
+    synchronized void shutdown() {
+        this.running = false;
+        ++this.generation;
+        this.cancelTask(this.refreshTask);
+        this.cancelTask(this.announceTask);
+        this.cancelTask(this.drainTask);
+        this.refreshTask = null;
+        this.announceTask = null;
+        this.drainTask = null;
+        this.nextMellohiAt.clear();
+        this.nextLobbyTransferAttemptAt.clear();
+    }
+
+    private boolean isCurrent(long token) {
+        return this.running && this.generation == token;
+    }
+
+    private void setRefreshTask(long token, TaskHandle task) {
+        synchronized (this) {
+            if (this.isCurrent(token)) this.refreshTask = task;
+            else task.cancel();
         }
     }
 
-    void shutdown() {
-        if (this.refreshTask != null) {
-            this.refreshTask.cancel();
+    private void setAnnounceTask(long token, TaskHandle task) {
+        synchronized (this) {
+            if (this.isCurrent(token)) this.announceTask = task;
+            else task.cancel();
         }
-        if (this.announceTask != null) {
-            this.announceTask.cancel();
+    }
+
+    private void setDrainTask(long token, TaskHandle task) {
+        synchronized (this) {
+            if (this.isCurrent(token)) this.drainTask = task;
+            else task.cancel();
         }
-        if (this.drainTask != null) {
-            this.drainTask.cancel();
-        }
+    }
+
+    private void cancelTask(TaskHandle task) {
+        if (task != null) task.cancel();
     }
 
     boolean isActive() {
@@ -137,68 +181,95 @@ final class MaintenanceQueueManager {
     }
 
     void handleJoin(Player player) {
-        String desired;
-        if ("maintenance".equalsIgnoreCase(this.serverName) && this.isQueued(player.getUniqueId())) {
-            this.enqueue(player);
-            return;
-        }
-        if (!this.active) {
-            return;
-        }
-        if (!"maintenance".equalsIgnoreCase(this.serverName) && this.isServerUnderMaintenance(this.serverName)) {
-            this.enqueue(player);
-            this.connectToServer(player, "maintenance");
-            return;
-        }
-        if ("lobby".equalsIgnoreCase(this.serverName) && this.shouldHoldPlayer(player.getUniqueId())) {
-            this.enqueue(player);
-            this.transferLobbyPlayerToMaintenance(player);
-            return;
-        }
-        if ("lobby".equalsIgnoreCase(this.serverName) && (desired = this.resolvePostMaintenanceTarget(player.getUniqueId())) != null && !desired.isBlank() && !"lobby".equalsIgnoreCase(desired) && !this.isServerUnderMaintenance(desired)) {
-            this.connectToServer(player, desired);
-            return;
-        }
+        if (!this.running) return;
+        long token = this.generation;
+        PlatformScheduler.entityNow(this.plugin, player, () -> {
+            if (!this.isCurrent(token) || !player.isOnline()) return;
+            UUID uuid = player.getUniqueId();
+            String playerName = player.getName();
+            int priority = this.priorityFor(player);
+            PlatformScheduler.asyncNow(this.plugin,
+                () -> this.handleJoinAsync(token, player, uuid, playerName, priority));
+        }, () -> { });
+    }
+
+    private void handleJoinAsync(long token, Player player, UUID uuid, String playerName, int priority) {
+        if (!this.isCurrent(token)) return;
         if ("maintenance".equalsIgnoreCase(this.serverName)) {
-            this.enqueue(player);
+            if (this.isQueued(uuid) || this.active) this.enqueue(uuid, playerName, priority);
+            return;
+        }
+        if (!this.active) return;
+        if (this.isServerUnderMaintenance(this.serverName)) {
+            this.enqueue(uuid, playerName, priority);
+            this.connectToServer(player, "maintenance", token);
+            return;
+        }
+        if ("lobby".equalsIgnoreCase(this.serverName)) {
+            if (this.shouldHoldPlayer(uuid)) {
+                this.enqueue(uuid, playerName, priority);
+                this.transferLobbyPlayerToMaintenance(player, token);
+                return;
+            }
+            String desired = this.resolvePostMaintenanceTarget(uuid);
+            if (desired != null && !desired.isBlank() && !"lobby".equalsIgnoreCase(desired)
+                    && !this.isServerUnderMaintenance(desired)) {
+                this.connectToServer(player, desired, token);
+            }
         }
     }
 
-    private void refreshState() {
+    private void refreshState(long token) {
+        if (!this.isCurrent(token) || !this.refreshInProgress.compareAndSet(false, true)) return;
         try (Connection connection = this.getConnection();
              PreparedStatement ps = connection.prepareStatement("SELECT active, message, targets_csv FROM maintenance_state WHERE id=1");
              ResultSet rs = ps.executeQuery();){
+            if (!this.isCurrent(token)) return;
             if (rs.next()) {
                 boolean nowActive = rs.getBoolean("active");
-                this.message = rs.getString("message");
-                this.targets = this.parseTargetsCsv(rs.getString("targets_csv"));
-                if (this.previousActive && !nowActive) {
-                    Bukkit.getScheduler().runTask((Plugin)this.plugin, this::stopMellohiForAll);
-                }
+                String nextMessage = rs.getString("message");
+                Set<String> nextTargets = this.parseTargetsCsv(rs.getString("targets_csv"));
+                boolean wasActive = this.previousActive;
+                this.message = nextMessage;
+                this.targets = nextTargets;
                 this.previousActive = nowActive;
                 this.active = nowActive;
+                if (wasActive && !nowActive && "maintenance".equalsIgnoreCase(this.serverName)) {
+                    PlatformScheduler.globalNow(this.plugin, () -> this.stopMellohiForAll(token));
+                }
                 if (nowActive) {
-                    Bukkit.getScheduler().runTask((Plugin)this.plugin, this::offloadMaintainedServerPlayers);
+                    PlatformScheduler.globalNow(this.plugin, () -> this.offloadMaintainedServerPlayers(token));
                 }
             }
         }
         catch (SQLException sQLException) {
             // empty catch block
+        } finally {
+            this.refreshInProgress.set(false);
         }
     }
 
-    private void broadcastHoldState() {
+    private void broadcastHoldState(long token) {
+        if (!this.isCurrent(token)) return;
         if (!this.active) {
             if ("maintenance".equalsIgnoreCase(this.serverName)) {
-                this.stopMellohiForAll();
+                this.stopMellohiForAll(token);
             }
             return;
         }
         if ("lobby".equalsIgnoreCase(this.serverName)) {
             for (Player player : Bukkit.getOnlinePlayers()) {
-                if (!this.shouldHoldPlayer(player.getUniqueId())) continue;
-                this.enqueue(player);
-                this.transferLobbyPlayerToMaintenance(player);
+                PlatformScheduler.entityNow(this.plugin, player, () -> {
+                    if (!this.isCurrent(token) || !player.isOnline()) return;
+                    UUID uuid = player.getUniqueId();
+                    String name = player.getName();
+                    int priority = this.priorityFor(player);
+                    PlatformScheduler.asyncNow(this.plugin, () -> {
+                        if (!this.isCurrent(token) || !this.active || !this.shouldHoldPlayer(uuid)) return;
+                        this.enqueue(uuid, name, priority);
+                        this.transferLobbyPlayerToMaintenance(player, token);
+                    });
+                }, () -> { });
             }
             return;
         }
@@ -207,33 +278,43 @@ final class MaintenanceQueueManager {
         }
         long now = System.currentTimeMillis();
         for (Player player : Bukkit.getOnlinePlayers()) {
-            this.enqueue(player);
-            // Green, fixed wording, no queue suffix \u2014 the hold line the player should see.
-            player.sendActionBar((Component)Component.text((String)("\u00a7a" + this.holdMessage)));
-            if (!this.maintenanceMusicEnabled) continue;
-            player.stopSound(SoundCategory.MUSIC);
-            player.stopSound(SoundCategory.AMBIENT);
-            long next = this.nextMellohiAt.getOrDefault(player.getUniqueId(), 0L);
-            if (now < next) continue;
-            player.stopSound(this.maintenanceMusicSound);
-            try {
-                player.playSound((Entity)player, this.maintenanceMusicSound, SoundCategory.RECORDS, this.maintenanceMusicVolume, this.maintenanceMusicPitch);
-            }
-            catch (Throwable ignored) {
-                player.playSound(player.getLocation(), this.maintenanceMusicSound, SoundCategory.RECORDS, this.maintenanceMusicVolume, this.maintenanceMusicPitch);
-            }
-            this.nextMellohiAt.put(player.getUniqueId(), now + this.maintenanceMusicIntervalMillis);
-            if (!this.maintenanceMusicDebug) continue;
-            this.plugin.getLogger().info("[maintenance-music] play uuid=" + String.valueOf(player.getUniqueId()) + " next_at_ms=" + (now + this.maintenanceMusicIntervalMillis));
+            PlatformScheduler.entityNow(this.plugin, player, () -> {
+                if (!this.isCurrent(token) || !player.isOnline()) return;
+                UUID uuid = player.getUniqueId();
+                String name = player.getName();
+                int priority = this.priorityFor(player);
+                PlatformScheduler.asyncNow(this.plugin, () -> {
+                    if (!this.isCurrent(token) || !this.active) return;
+                    this.enqueue(uuid, name, priority);
+                    PlatformScheduler.entityNow(this.plugin, player, () -> {
+                        if (!this.isCurrent(token) || !player.isOnline()) return;
+                        // Green, fixed wording, no queue suffix: the hold line the player should see.
+                        player.sendActionBar(Component.text("\u00a7a" + this.holdMessage));
+                        if (!this.maintenanceMusicEnabled) return;
+                        player.stopSound(SoundCategory.MUSIC);
+                        player.stopSound(SoundCategory.AMBIENT);
+                        long next = this.nextMellohiAt.getOrDefault(uuid, 0L);
+                        if (now < next) return;
+                        player.stopSound(this.maintenanceMusicSound);
+                        player.playSound(player, this.maintenanceMusicSound, SoundCategory.RECORDS,
+                            this.maintenanceMusicVolume, this.maintenanceMusicPitch);
+                        long nextAt = now + this.maintenanceMusicIntervalMillis;
+                        this.nextMellohiAt.put(uuid, nextAt);
+                        if (this.maintenanceMusicDebug) {
+                            this.plugin.getLogger().info("[maintenance-music] play uuid=" + uuid + " next_at_ms=" + nextAt);
+                        }
+                    }, () -> { });
+                });
+            }, () -> { });
         }
     }
 
-    private void transferLobbyPlayerToMaintenance(Player player) {
-        this.transferPlayerToMaintenance(player, 5000L);
+    private void transferLobbyPlayerToMaintenance(Player player, long token) {
+        this.transferPlayerToMaintenance(player, 5000L, token);
     }
 
-    private void offloadMaintainedServerPlayers() {
-        if (!this.active) {
+    private void offloadMaintainedServerPlayers(long token) {
+        if (!this.isCurrent(token) || !this.active) {
             return;
         }
         if ("maintenance".equalsIgnoreCase(this.serverName) || "lobby".equalsIgnoreCase(this.serverName)) {
@@ -243,31 +324,43 @@ final class MaintenanceQueueManager {
             return;
         }
         for (Player player : Bukkit.getOnlinePlayers()) {
-            this.enqueue(player);
-            this.transferPlayerToMaintenance(player, 3000L);
+            PlatformScheduler.entityNow(this.plugin, player, () -> {
+                if (!this.isCurrent(token) || !this.active || !player.isOnline()) return;
+                UUID uuid = player.getUniqueId();
+                String name = player.getName();
+                int priority = this.priorityFor(player);
+                PlatformScheduler.asyncNow(this.plugin, () -> {
+                    if (!this.isCurrent(token) || !this.active) return;
+                    this.enqueue(uuid, name, priority);
+                    this.transferPlayerToMaintenance(player, 3000L, token);
+                });
+            }, () -> { });
         }
     }
 
-    private void transferPlayerToMaintenance(Player player, long cooldownMs) {
-        long nextAllowed;
-        long now = System.currentTimeMillis();
-        if (now < (nextAllowed = this.nextLobbyTransferAttemptAt.getOrDefault(player.getUniqueId(), 0L).longValue())) {
-            return;
-        }
-        this.nextLobbyTransferAttemptAt.put(player.getUniqueId(), now + Math.max(1000L, cooldownMs));
-        Bukkit.getScheduler().runTask((Plugin)this.plugin, () -> {
-            if (!player.isOnline()) {
-                return;
-            }
-            this.connectToServer(player, "maintenance");
-        });
+    private void transferPlayerToMaintenance(Player player, long cooldownMs, long token) {
+        PlatformScheduler.entityNow(this.plugin, player, () -> {
+            if (!this.isCurrent(token) || !this.active || !player.isOnline()) return;
+            UUID uuid = player.getUniqueId();
+            PlatformScheduler.asyncNow(this.plugin, () -> {
+                if (!this.isCurrent(token) || !this.active) return;
+                long now = System.currentTimeMillis();
+                AtomicBoolean reserved = new AtomicBoolean();
+                this.nextLobbyTransferAttemptAt.compute(uuid, (ignored, nextAllowed) -> {
+                    if (nextAllowed != null && now < nextAllowed) return nextAllowed;
+                    reserved.set(true);
+                    return now + Math.max(1000L, cooldownMs);
+                });
+                if (!reserved.get()) return;
+                this.connectToServer(player, "maintenance", token);
+            });
+        }, () -> { });
     }
 
-    private void enqueue(Player player) {
-        int priority = this.priorityFor(player);
-        String desired = this.resolvePreferredServerForMaintenance(player.getUniqueId());
+    private void enqueue(UUID uuid, String playerName, int priority) {
+        String desired = this.resolvePreferredServerForMaintenance(uuid);
         if (desired == null || desired.isBlank()) {
-            desired = this.resolveTargetServer(player.getUniqueId());
+            desired = this.resolveTargetServer(uuid);
         }
         if ((desired = this.normalizeServerName(desired)).isBlank() || "maintenance".equalsIgnoreCase(desired)) {
             desired = "lobby";
@@ -276,15 +369,15 @@ final class MaintenanceQueueManager {
         String sql = "INSERT INTO maintenance_queue (uuid, player_name, desired_server, desired_reason, priority, status) VALUES (?, ?, ?, ?, ?, 'WAITING') ON DUPLICATE KEY UPDATE player_name=VALUES(player_name), desired_server=VALUES(desired_server), desired_reason=VALUES(desired_reason), priority=VALUES(priority), status='WAITING'";
         try (Connection connection = this.getConnection();
              PreparedStatement ps = connection.prepareStatement(sql);){
-            ps.setString(1, player.getUniqueId().toString());
-            ps.setString(2, player.getName());
+            ps.setString(1, uuid.toString());
+            ps.setString(2, playerName);
             ps.setString(3, desired);
             ps.setString(4, reason);
             ps.setInt(5, priority);
             ps.executeUpdate();
-            this.upsertReturnQueue(connection, player.getUniqueId(), player.getName(), desired, reason);
+            this.upsertReturnQueue(connection, uuid, playerName, desired, reason);
             if (this.maintenanceQueueDebug) {
-                this.plugin.getLogger().info("[maintenance-queue-debug] stage=enqueue uuid=" + String.valueOf(player.getUniqueId()) + " server=" + this.serverName + " desired=" + desired + " reason=" + reason + " priority=" + priority);
+                this.plugin.getLogger().info("[maintenance-queue-debug] stage=enqueue uuid=" + uuid + " server=" + this.serverName + " desired=" + desired + " reason=" + reason + " priority=" + priority);
             }
         }
         catch (SQLException sQLException) {
@@ -343,12 +436,10 @@ final class MaintenanceQueueManager {
             try (ResultSet rs = ps.executeQuery();) {
                 return rs.next();
             }
-        }
-        catch (SQLException ex) {
+        } catch (SQLException exception) {
             return false;
         }
     }
-
     private boolean shouldHoldPlayer(UUID uuid) {
         if (!this.active) {
             return false;
@@ -357,33 +448,45 @@ final class MaintenanceQueueManager {
         return preferred != null && !preferred.isBlank() && this.isServerUnderMaintenance(preferred);
     }
 
-    private void drainQueueIfAllowed() {
-        if (this.active) {
+    private void drainQueueIfAllowed(long token) {
+        if (!this.isCurrent(token) || this.active || !this.drainInProgress.compareAndSet(false, true)) {
             return;
         }
-        List<QueueEntry> entries = this.nextEntries(this.returnBatchSize);
-        for (QueueEntry entry : entries) {
-            Player player = Bukkit.getPlayer((UUID)entry.uuid);
-            if (player == null || !player.isOnline()) {
-                this.removeEntry(entry.uuid);
-                continue;
+        try {
+            List<QueueEntry> entries = this.nextEntries(this.returnBatchSize);
+            for (QueueEntry entry : entries) {
+                if (!this.isCurrent(token) || this.active) return;
+                String target = this.resolveTargetServer(entry.uuid);
+                if (entry.desiredServer != null && !entry.desiredServer.isBlank()) {
+                    target = entry.desiredServer;
+                }
+                if ("maintenance".equalsIgnoreCase(this.serverName)) {
+                    target = entry.desiredServer != null && !entry.desiredServer.isBlank() && !"maintenance".equalsIgnoreCase(entry.desiredServer) ? entry.desiredServer : this.resolvePostMaintenanceTarget(entry.uuid);
+                }
+                if (target == null || target.isBlank() || "maintenance".equalsIgnoreCase(target)) {
+                    target = "lobby";
+                }
+                this.markAttempt(entry.uuid);
+                if (this.maintenanceQueueDebug) {
+                    this.plugin.getLogger().info("[maintenance-queue-debug] stage=return_attempt uuid=" + String.valueOf(entry.uuid) + " from=" + this.serverName + " target=" + target + " attempts=" + (entry.attempts + 1));
+                }
+                String returnTarget = target;
+                PlatformScheduler.globalNow(this.plugin, () -> {
+                    if (!this.isCurrent(token) || this.active) return;
+                    Player player = Bukkit.getPlayer(entry.uuid);
+                    if (player == null) {
+                        PlatformScheduler.asyncNow(this.plugin, () -> {
+                            if (this.isCurrent(token)) this.removeEntry(entry.uuid);
+                        });
+                        return;
+                    }
+                    this.connectToServer(player, returnTarget, token, () -> {
+                        if (this.isCurrent(token)) this.removeEntry(entry.uuid);
+                    });
+                });
             }
-            String target = this.resolveTargetServer(entry.uuid);
-            if (entry.desiredServer != null && !entry.desiredServer.isBlank()) {
-                target = entry.desiredServer;
-            }
-            if ("maintenance".equalsIgnoreCase(this.serverName)) {
-                target = entry.desiredServer != null && !entry.desiredServer.isBlank() && !"maintenance".equalsIgnoreCase(entry.desiredServer) ? entry.desiredServer : this.resolvePostMaintenanceTarget(entry.uuid);
-            }
-            if (target == null || target.isBlank() || "maintenance".equalsIgnoreCase(target)) {
-                target = "lobby";
-            }
-            this.markAttempt(entry.uuid);
-            if (this.maintenanceQueueDebug) {
-                this.plugin.getLogger().info("[maintenance-queue-debug] stage=return_attempt uuid=" + String.valueOf(entry.uuid) + " from=" + this.serverName + " target=" + target + " attempts=" + (entry.attempts + 1));
-            }
-            this.connectToServer(player, target);
-            this.removeEntry(entry.uuid);
+        } finally {
+            this.drainInProgress.set(false);
         }
     }
 
@@ -517,18 +620,28 @@ final class MaintenanceQueueManager {
         }
     }
 
-    private void connectToServer(Player player, String serverName) {
-        Bukkit.getScheduler().runTask((Plugin)this.plugin, () -> {
+    private void connectToServer(Player player, String serverName, long token) {
+        if (!this.isCurrent(token)) return;
+        this.connectToServer(player, serverName, token, null);
+    }
+
+    private void connectToServer(Player player, String serverName, long token, Runnable afterSend) {
+        if (!this.isCurrent(token)) return;
+        PlatformScheduler.entityNow(this.plugin, player, () -> {
+            if (!this.isCurrent(token) || !player.isOnline()) return;
             try (ByteArrayOutputStream bytes = new ByteArrayOutputStream();
                  DataOutputStream out = new DataOutputStream(bytes);){
                 out.writeUTF("Connect");
                 out.writeUTF(serverName);
-                player.sendPluginMessage((Plugin)this.plugin, "BungeeCord", bytes.toByteArray());
+                player.sendPluginMessage(this.plugin, "BungeeCord", bytes.toByteArray());
+                if (afterSend != null) {
+                    PlatformScheduler.asyncNow(this.plugin, afterSend);
+                }
             }
-            catch (IOException iOException) {
-                // empty catch block
+            catch (IOException exception) {
+                this.plugin.getLogger().warning("Unable to prepare maintenance transfer message: " + exception.getMessage());
             }
-        });
+        }, () -> { });
     }
 
     private void ensureSchema() {
@@ -583,6 +696,9 @@ final class MaintenanceQueueManager {
         catch (ClassNotFoundException e) {
             throw new SQLException("mariadb driver missing", e);
         }
+        if (this.dbUser == null || this.dbUser.isBlank() || this.dbPassword == null || this.dbPassword.isBlank()) {
+            throw new SQLException("Database credentials are not configured");
+        }
         return DriverManager.getConnection(this.dbUrl, this.dbUser, this.dbPassword);
     }
 
@@ -612,9 +728,12 @@ final class MaintenanceQueueManager {
         }
     }
 
-    private void stopMellohiForAll() {
+    private void stopMellohiForAll(long token) {
+        if (!this.isCurrent(token)) return;
         for (Player player : Bukkit.getOnlinePlayers()) {
-            this.stopMellohi(player);
+            PlatformScheduler.entityNow(this.plugin, player, () -> {
+                if (this.isCurrent(token)) this.stopMellohi(player);
+            }, () -> { });
         }
     }
 

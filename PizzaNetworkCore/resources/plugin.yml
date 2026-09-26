@@ -1,30 +1,17 @@
 name: PizzaNetworkCore
 version: 1.0.0
 main: dev.pizzasmp.networkcore.PizzaNetworkCore
-api-version: '1.21'
-# NOT YET TRUE — this flag only controls whether Folia will let the plugin load, and it is
-# left on so a Folia boot can be TESTED. Two things must land before it is honest: the
-# ProtocolLib dependency below (ProtocolLib does not support Folia, and this plugin imports
-# its classes directly, so it cannot even class-load there), and an audit of the scheduler
-# use, which is only partly adapted. See docs/notes/CANOPY-PREP-PLAN.md.
-folia-supported: true
+api-version: '1.21.6'
 authors: [PizzaSMP]
 description: PizzaSMP core UX plugin (join/quit suppression, guide/settings/stats GUIs)
 # ProtocolLib is a HARD class-load dependency: this plugin imports com.comphenix.protocol.*
 # directly for four packet listeners. Without this declaration its absence surfaced as an
 # unexplained failure inside PluginClassLoader.<init>, before any guard in the code could run
 # or report anything useful. Declaring it makes the failure name itself.
-softdepend: [ProtocolLib]
 libraries:
   - org.mariadb.jdbc:mariadb-java-client:3.5.4
   - com.zaxxer:HikariCP:5.1.0
 commands:
-  spawn:
-    usage: /spawn
-    description: Teleport to the network lobby spawn.
-  warp:
-    usage: /warp <spawn>
-    description: Warp to a network destination.
   # DELIBERATELY UNREGISTERED (2026-08-07) — maintenance moved to CLI (scripts/).
   #   admin, manage  - the in-game consoles. Removed to bound the blast radius of a
   #                    LuckPerms permission leak: they put maintenance, world access,
@@ -124,10 +111,31 @@ commands:
   rtp:
     usage: /rtp [east|nether|end]
     description: Random teleport.
+  spawn:
+    usage: /spawn
+    description: Teleport to the server spawn.
+  warp:
+    usage: /warp <spawn|afk>
+    description: Teleport to a server hub location.
+  afk:
+    usage: /afk
+    description: Teleport to the AFK area.
+  setmoneyboard:
+    usage: /setmoneyboard
+    description: Set the spawn money leaderboard location.
+    permission: pizzasmp.hub.leaderboard.place
   rtpq:
-    usage: /rtpq
+    usage: /rtpq [cancel]
     description: Queue for a gear-matched RTP duel.
     aliases: [rtpqueue]
+  duel:
+    usage: /duel <player> [wager] [rounds] [restored] [arena] | /duel test
+    description: Challenge a player to a multi-round duel with optional wager and restored loadouts.
+    aliases: [1v1]
+  spectate:
+    usage: /spectate <player>
+    description: Fly-spectate a player or duel without phasing through blocks.
+    aliases: [spec]
   ecobot:
     usage: /ecobot [status|list|order|buy|deliver|clear|reload|pause|resume]
   tpa:
@@ -193,6 +201,13 @@ permissions:
     default: true
   pizzasmp.use.rtp:
     default: true
+  pizzasmp.use.duel:
+    default: true
+  pizzasmp.use.spectate:
+    default: true
+  pizzasmp.admin.dueltest:
+    description: Enter the admin-only solo duel test flow.
+    default: op
   pizzasmp.rtp.use:
     default: true
   pizzasmp.rank.pizzaplus:
@@ -249,3 +264,12 @@ permissions:
     default: op
   pizzasmp.admin.homes:
     default: op
+  pizzasmp.hub.bypass:
+    description: Edit protected hub worlds (break/place blocks in spawn/afk).
+    default: op
+  pizzasmp.hub.leaderboard.place:
+    description: Place the spawn money leaderboard.
+    default: op
+# Load after Essentials/EssentialsChat so the chat-icon renderer wraps their chat renderer (same priority
+# runs in registration order).
+softdepend: [ProtocolLib, Essentials, EssentialsChat]

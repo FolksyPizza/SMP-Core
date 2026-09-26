@@ -103,8 +103,6 @@ import com.comphenix.protocol.events.PacketEvent;
 import com.comphenix.protocol.events.PacketListener;
 import com.comphenix.protocol.wrappers.WrappedParticle;
 import com.destroystokyo.paper.event.server.AsyncTabCompleteEvent;
-// import dev.pizzasmp.networkcore.MaintenanceQueueManager;
-// import dev.pizzasmp.networkcore.PlayerSyncManager;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import java.io.ByteArrayInputStream;
@@ -140,13 +138,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.lang.management.ManagementFactory;
-import io.papermc.paper.dialog.Dialog;
-import io.papermc.paper.registry.data.dialog.ActionButton;
-import io.papermc.paper.registry.data.dialog.DialogBase;
-import io.papermc.paper.registry.data.dialog.action.DialogAction;
-import io.papermc.paper.registry.data.dialog.body.DialogBody;
-import io.papermc.paper.registry.data.dialog.input.DialogInput;
-import io.papermc.paper.registry.data.dialog.type.DialogType;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -239,6 +230,26 @@ import org.bukkit.scoreboard.Team;
 import org.bukkit.util.NumberConversions;
 import org.bukkit.util.io.BukkitObjectInputStream;
 import org.bukkit.util.io.BukkitObjectOutputStream;
+import com.destroystokyo.paper.event.player.PlayerArmorChangeEvent;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
+import dev.pizzasmp.networkcore.compat.AdventureObjectComponents;
+import dev.pizzasmp.networkcore.compat.DialogCloseCompat;
+import dev.pizzasmp.networkcore.compat.DialogCompat;
+import dev.pizzasmp.networkcore.compat.DialogCompat.ActionButton;
+import dev.pizzasmp.networkcore.compat.DialogCompat.Dialog;
+import dev.pizzasmp.networkcore.compat.DialogCompat.DialogAction;
+import dev.pizzasmp.networkcore.compat.DialogCompat.DialogBody;
+import dev.pizzasmp.networkcore.compat.DialogCompat.DialogInput;
+import dev.pizzasmp.networkcore.compat.DialogCompat.DialogType;
+import dev.pizzasmp.common.scheduler.PlatformScheduler;
+import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.key.Key;
+import org.bukkit.WorldCreator;
+import org.bukkit.entity.TextDisplay;
+import org.bukkit.event.entity.EntityDamageEvent;
+// import dev.pizzasmp.networkcore.MaintenanceQueueManager;
+// import dev.pizzasmp.networkcore.PlayerSyncManager;
 
 public final class PizzaNetworkCore
 extends JavaPlugin
@@ -248,7 +259,16 @@ TabCompleter,
 org.bukkit.plugin.messaging.PluginMessageListener {
     private static final String BRIDGE_CHANNEL = "pizzasmp:bridge";
     private static final Pattern HEX_COLOR_PATTERN = Pattern.compile("(?i)&#([0-9a-f]{6})");
+    private static final Pattern CHAT_ICON_ALIAS_PATTERN = Pattern.compile(":([a-zA-Z0-9_]{2,64}):");
+    private static final Map<String, ChatIcon> CHAT_ICON_ALIASES = Map.ofEntries(
+        Map.entry("heart", new ChatIcon("♥", NamedTextColor.RED)),
+        Map.entry("skull", new ChatIcon("☠", NamedTextColor.GRAY)),
+        Map.entry("fire", new ChatIcon("♨", NamedTextColor.RED)),
+        Map.entry("star", new ChatIcon("★", NamedTextColor.YELLOW)));
     private static final String TITLE_SETTINGS = "Settings";
+    private static final SettingDefinition RTP_ANIMATION_SETTING = new SettingDefinition(
+        "rtp_animation", "RTP Animation", Material.FEATHER, 36, 1, true,
+        List.of("Show an arcing arrival effect", "when using /rtp"), false, null);
     private static final String TITLE_GUIDE = "Guide";
     private static final String TITLE_STATS = "Stats";
     private static final String TITLE_SHOP = "Shop";
@@ -386,6 +406,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private static final String TITLE_AH_CONFIRM = "Confirm Listing";
     private static final String TITLE_AH_BUY_CONFIRM = "Confirm Purchase";
     private static final String TITLE_SHOP_GEAR_2 = "Shop – Gear II";
+    private static final String TITLE_PVP_SHOP = "PvP Gear";
     private static final String TITLE_CRATE_COMMON = "Common Crate";
     private static final String TITLE_CRATE_CRIMSON = "Crimson Crate";
     private static final String TITLE_CRATE_AMETHYST = "Amethyst Crate";
@@ -395,6 +416,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private static final String TITLE_BOUNTY = "Active Bounties";
     private static final String TITLE_NAV = "Navigator";
     private static final String TITLE_ADMIN = "Server Admin";
+    private static final String TITLE_DUEL_SETUP = "Duel Setup";
+    private static final String TITLE_DUEL_RTP_CONFIRM = "Leave Duel?";
     private static final String TITLE_RTP = "Random Teleport";
     private static final String TITLE_HOMES = "Your Homes";
     private static final String TITLE_HOME_DELETE_CONFIRM = "Delete Home";
@@ -469,29 +492,100 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
     private NamespacedKey amethystKindKey;
     private NamespacedKey amethystExpireKey;
+    private NamespacedKey duelReturnLocationKey;
     private static final long AMETHYST_LIFETIME_MS = 3L * 24L * 60L * 60L * 1000L; // 3 days
     private Economy economy;
     private Chat chatProvider;
     private PlayerSyncManager playerSyncManager;
     private MaintenanceQueueManager maintenanceQueueManager;
-    private boolean foliaRuntime;
     private final Map<UUID, PendingTeleport> pendingTeleports = new ConcurrentHashMap<UUID, PendingTeleport>();
+    // Names seen during this runtime let chat aliases resolve without unsafe Bukkit lookups on the async chat thread.
+    private final Map<String, String> chatKnownPlayerNames = new ConcurrentHashMap<String, String>();
+    private volatile Map<String, Component> chatItemSpriteComponents = Map.of();
     private final Map<UUID, PendingRtpTeleport> pendingRtpTeleports = new ConcurrentHashMap<UUID, PendingRtpTeleport>();
+    private final Map<UUID, RtpAnimation> rtpAnimations = new ConcurrentHashMap<>();
     private final Set<UUID> delayBypassDispatch = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Long> rtpCooldowns = new ConcurrentHashMap<UUID, Long>();
     private final Map<UUID, Long> combatTaggedUntil = new ConcurrentHashMap<UUID, Long>();
+    // Last player to damage each victim, so a kill clears the KILLER's combat tag even for crystal/anchor
+    // kills where victim.getKiller() is null.
+    private final Map<UUID, UUID> lastCombatAttacker = new ConcurrentHashMap<UUID, UUID>();
+    private static final String PERM_COMBAT_BYPASS = "pizzasmp.combat.bypass";
     private final Map<UUID, TaskHandle> combatActionbarTasks = new ConcurrentHashMap<UUID, TaskHandle>();
     private final Set<UUID> activeRtpSearches = ConcurrentHashMap.newKeySet();
     // Vanilla pearls: a player's thrown pearls are captured + removed on logout and re-spawned on
     // login (in-memory, same runtime), so they never persist to disk while the owner is offline.
+    private final Map<UUID, Integer> shardBonusMinutes = new ConcurrentHashMap<UUID, Integer>();   // 10-min playtime shard bonus counter
+    private static final long PLAYTIME_SHARD_BONUS = 20L;   // shards granted every 10 minutes online
     private final Map<UUID, List<StoredPearl>> loggedOutPearls = new ConcurrentHashMap<UUID, List<StoredPearl>>();
     // RTP Queue (duels): players searching for a gear-matched opponent. On match both are RTP'd to
     // one fresh spot; they are not bound to fight, no reward, no return. Cancels ONLY on death,
     // disconnect, or combat (a cancel just frees the other to keep searching).
     private final Map<UUID, RtpQueueEntry> rtpDuelQueue = new ConcurrentHashMap<UUID, RtpQueueEntry>();
+    private final Map<UUID, RtpDuelMatch> pendingRtpDuelMatches = new ConcurrentHashMap<>();
+    // These maps/counters and the queue-scan object are owned by the global scheduler. Session
+    // handles are compared by identity only; player APIs remain on the entity scheduler.
+    private final Map<UUID, RtpDuelQueueSession> rtpDuelQueueSessions = new HashMap<>();
+    private final Map<UUID, Long> rtpDuelSessionGenerations = new ConcurrentHashMap<>();
+    private final Map<UUID, RtpDuelEnqueueRequest> pendingRtpDuelEnqueues = new HashMap<>();
+    private final java.util.concurrent.ConcurrentLinkedQueue<Runnable> deferredRtpDuelGlobalActions =
+        new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private long rtpDuelQueueGeneration;
+    private long rtpDuelQueueScanGeneration;
+    private RtpDuelQueueScan activeRtpDuelQueueScan;
     private static final Sound[] RTPQ_DISCS = new Sound[] {
         Sound.MUSIC_DISC_MELLOHI, Sound.MUSIC_DISC_STAL, Sound.MUSIC_DISC_PIGSTEP, Sound.MUSIC_DISC_CAT
     };
+    // ===== /duel (challenge-based 1v1 with settings GUI, wager, spaced RTP, freeze+countdown) =====
+    // pendingDuelRequests: key = target (the challenged player). activeDuels: key = EACH participant.
+    // duelFrozen: participants who are teleported in but pre-FIGHT (can't move/pearl, are invincible).
+    private final Map<UUID, DuelRequest> pendingDuelRequests = new ConcurrentHashMap<UUID, DuelRequest>();
+    private final Map<UUID, DuelSession> activeDuels = new ConcurrentHashMap<UUID, DuelSession>();
+    private final Object duelArenaLeaseLock = new Object();
+    private final Set<DuelArenaLease> duelArenaLeases = new java.util.HashSet<>();
+    private volatile List<Long> duelArenaCandidateChunks;
+    private final Map<UUID, Long> duelReconnectDeadlines = new ConcurrentHashMap<UUID, Long>();
+    private final Map<UUID, ItemStack[]> pendingDuelInventoryRestores = new ConcurrentHashMap<UUID, ItemStack[]>();
+    private final Map<UUID, Location> pendingDuelReturns = new ConcurrentHashMap<>();
+    private final Set<UUID> duelFrozen = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> duelRoundSpectators = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> duelSpectatorTransitions = ConcurrentHashMap.newKeySet();
+    // Between-round free-move window (players may walk/build, but take no damage) and the
+    // brief launch-back arc. Neither uses gamemode/flight/gravity changes, so no player state can leak.
+    private final Set<UUID> duelIntermission = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> duelReturning = ConcurrentHashMap.newKeySet();
+    // A duel's pre-match destination is stored in player data so a disconnect or clean restart cannot leave
+    // the player stranded in the private arena.
+    private final Set<UUID> duelBorderApplied = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, org.bukkit.WorldBorder> duelPreviousWorldBorders = new ConcurrentHashMap<>();
+    // ===== Hub worlds (spawn + AFK): protected void worlds you teleport to. No mobs, no PvP, no damage,
+    // no block edits (except staff bypass). Coordinates are config-driven (hub.* in config.yml). =====
+    private static final String HUB_SPAWN_WORLD = "spawn_void";
+    private static final String HUB_AFK_WORLD = "afk_void";   // overworld void (perpetual night), no End dragon
+    private static final java.util.Set<String> HUB_WORLDS = java.util.Set.of(HUB_SPAWN_WORLD, HUB_AFK_WORLD);
+    private static final String PERM_HUB_BYPASS = "pizzasmp.hub.bypass";
+    private static final String PERM_HUB_LEADERBOARD_PLACE = "pizzasmp.hub.leaderboard.place";
+    private static final String HUB_MONEY_LEADERBOARD_KEY = "hub.leaderboards.money";
+    // Staff who toggled hub-edit ON (via /hubbypass) may break/place in the protected hub worlds.
+    private final Set<UUID> hubBypassPlayers = ConcurrentHashMap.newKeySet();
+    // Presence means the spawn double-jump currently owns the player's flight toggle. The value is
+    // the allowFlight state from before ownership, which must be restored on every exit path.
+    private final Map<UUID, Boolean> hubDoubleJumpPreviousAllowFlight = new ConcurrentHashMap<>();
+    // The shared board is visible to the spawn world. Each personal line is deliberately a distinct
+    // hidden-by-default entity so viewers never receive another player's rank.
+    private final Set<UUID> hubMoneyLeaderboardViewers = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, TextDisplay> hubMoneyLeaderboardPersonalDisplays = new ConcurrentHashMap<>();
+    private volatile TextDisplay hubMoneyLeaderboardSharedDisplay;
+    private volatile MoneyLeaderboardSnapshot hubMoneyLeaderboardSnapshot = MoneyLeaderboardSnapshot.empty();
+    private final AtomicBoolean hubMoneyLeaderboardRefreshInFlight = new AtomicBoolean(false);
+    private TaskHandle hubMoneyLeaderboardRefreshTask;
+    private NamespacedKey hubLeaderboardKindKey;
+    private static final Sound[] DUEL_VICTORY_SONGS = new Sound[] {
+        Sound.MUSIC_DISC_PIGSTEP, Sound.MUSIC_DISC_OTHERSIDE, Sound.MUSIC_DISC_BLOCKS, Sound.MUSIC_DISC_WARD
+    };
+    // /spectate: fly-around watch mode (adventure + flight = collides with blocks, so NO phasing).
+    private final Map<UUID, SpectateState> spectating = new ConcurrentHashMap<UUID, SpectateState>();
+    private final Map<UUID, SpectateStartRequest> pendingSpectateStarts = new ConcurrentHashMap<>();
     private final Map<UUID, UUID> localReplyTargets = new ConcurrentHashMap<UUID, UUID>();
     private final Map<UUID, Boolean> teamChatModeCache = new ConcurrentHashMap<UUID, Boolean>();
     private final Map<UUID, Long> muteCacheExpiry = new ConcurrentHashMap<UUID, Long>();
@@ -520,6 +614,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private final Map<UUID, PendingTextInput> pendingTextInputs = new ConcurrentHashMap<UUID, PendingTextInput>();
     // Legacy /admin chat-input capture: the next chat line a player types is consumed by this action.
     private final Map<UUID, java.util.function.Consumer<String>> pendingAdminInput = new ConcurrentHashMap<>();
+    private final Map<UUID, java.util.function.Consumer<String>> pendingDuelSetupInput = new ConcurrentHashMap<>();
+    private final Map<UUID, DuelSetupState> duelSetupStates = new ConcurrentHashMap<>();
     private final Map<UUID, AhSellState> ahSellState = new ConcurrentHashMap<UUID, AhSellState>();
     private final Set<UUID> ahSellCloseBypass = ConcurrentHashMap.newKeySet();
     private final Set<UUID> payDispatchBypass = ConcurrentHashMap.newKeySet();
@@ -534,6 +630,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private final Map<UUID, String> bountyGuiSearch = new ConcurrentHashMap<>();
     private final Map<UUID, String> bountyGuiSort = new ConcurrentHashMap<>();
     private final AtomicBoolean networkPlayerNameRefreshQueued = new AtomicBoolean(false);
+    // Keep a pending batch bound to the connection and enable cycle that requested it.
+    private final AtomicLong notificationGenerationSequence = new AtomicLong();
+    private final Map<UUID, Long> notificationSessionGenerations = new ConcurrentHashMap<>();
+    private final Map<UUID, NotificationRecipient> notificationRecipientsInFlight = new ConcurrentHashMap<>();
+    private volatile long notificationLifecycleGeneration;
+    private volatile boolean notificationPollingActive;
     private static final long PVP_KILL_SHARDS = 10L;
     private static final long AFK_THRESHOLD_MS = 180000L;
     private static final long AFK_SHARDS_PER_TICK = 1L;
@@ -570,6 +672,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private static final double TPS_DROP_THRESHOLD = 18.0;
     private static final double TPS_RECOVER_THRESHOLD = 19.5;
     private static final long VD_RECOVER_DELAY_MS = 120_000L;
+    // ---- Bandwidth-aware VD (uplink egress throttle) ----
+    // Chunk-send volume scales ~VD^2, so trimming view distance as the uplink nears its cap is the
+    // in-process lever for "stream chunks slower to save bandwidth". Sampled from the NIC tx counter
+    // each throttle tick; egressVdPenalty (0-2) feeds calcPerPlayerVd next to the TPS/pop-count logic.
+    // Hysteresis: ramp up at throttle-percent of the cap, ease down at the lower recover-percent.
+    private volatile double currentEgressMbps = 0.0;
+    private volatile int egressVdPenalty = 0;
+    private long egressLastTxBytes = -1L;
+    private long egressLastSampleMs = 0L;
+    // Players mid join-send-ramp: their view distance is being stepped up from a small radius, so the
+    // per-tick VD sweep must leave them alone until the ramp finishes (like an admin override).
+    private final java.util.Set<UUID> joinRamping = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.Set<UUID> combatLoggedPending = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.Random ecoRandom = new java.util.Random();
     private final java.util.List<TaskHandle> autoEcoTasks = new java.util.ArrayList<>();
@@ -583,7 +697,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private volatile List<String> cachedNetworkPlayerNames = List.of();
     private volatile long cachedNetworkPlayerNamesLoadedAt;
     private TaskHandle notificationPollTask;
-    private static final List<SettingDefinition> SETTINGS_DEFINITIONS = List.of(new SettingDefinition("public_chat", "Public Chat", Material.OAK_SIGN, 0, 1, true, List.of(), false, null), new SettingDefinition("private_messages", "Private Messages", Material.SPRUCE_SIGN, 1, 1, true, List.of(), false, null), new SettingDefinition("chat_server_messages", "Chat Server Messages", Material.BIRCH_SIGN, 2, 1, true, List.of(), false, null), new SettingDefinition("hotbar_server_messages", "Hotbar Server Messages", Material.JUNGLE_SIGN, 3, 1, true, List.of(), false, null), new SettingDefinition("pay_players", "Pay Players", Material.ACACIA_SIGN, 4, 1, true, List.of(), false, null), new SettingDefinition("bounty_alerts", "Bounty Alerts", Material.DARK_OAK_SIGN, 5, 1, true, List.of(), false, null), new SettingDefinition("auction_alerts", "Auction Alerts", Material.MANGROVE_SIGN, 6, 1, true, List.of(), false, null), new SettingDefinition("fast_crystals", "Fast Crystals", Material.END_CRYSTAL, 9, 1, true, List.of("Reduces crystal fight effects"), false, null), new SettingDefinition("totem_particles", "Totem Particles", Material.TOTEM_OF_UNDYING, 10, 1, true, List.of(), false, null), new SettingDefinition("explosion_particles", "Explosion Particles", Material.TNT, 11, 1, true, List.of(), false, null), new SettingDefinition("explosion_sounds", "Explosion Sounds", Material.GOAT_HORN, 12, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_buy", "Quick Auction Buy", Material.GOLD_INGOT, 13, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_sell", "Quick Auction Sell", Material.EMERALD, 8, 1, false, List.of("List instantly with no confirm screen"), false, null), new SettingDefinition("chainmail_on_respawn", "Chainmail on Respawn", Material.CHAINMAIL_HELMET, 14, 1, true, List.of(), false, null), new SettingDefinition("disable_mob_spawns", "Disable Mob Spawns", Material.ZOMBIE_HEAD, 15, 1, false, List.of(), false, null), new SettingDefinition("fast_anchor", "Fast Anchor", Material.RESPAWN_ANCHOR, 16, 1, true, List.of("Reduces anchor fight effects"), false, null), new SettingDefinition("player_visibility", "Player Visibility", Material.PLAYER_HEAD, 18, 1, true, List.of(), false, null), new SettingDefinition("scoreboard_toggle", "Scoreboard Toggle", Material.LECTERN, 19, 1, true, List.of(), false, null), new SettingDefinition("tpa_confirm_menus", "TPA Confirm Menus", Material.FEATHER, 20, 1, true, List.of(), false, null), new SettingDefinition("music_sound_notifications", "Music/Sound Notifications", Material.MUSIC_DISC_MELLOHI, 21, 1, true, List.of(), false, null), new SettingDefinition("order_notifications", "Order Notifications", Material.PAPER, 22, 1, true, List.of(), false, null), new SettingDefinition("tpa_auto_accept", "Auto Accept TPAs", Material.SLIME_BALL, 23, 1, false, List.of("Instantly accept incoming", "TPA requests (/tpauto)"), false, null), new SettingDefinition("tpa_requests", "TPA Requests", Material.ENDER_PEARL, 28, 1, true, List.of(), false, null), new SettingDefinition("tpahere_requests", "TPAHere Requests", Material.ENDER_EYE, 29, 1, true, List.of(), false, null), new SettingDefinition("team_invites", "Team Invites", Material.SHIELD, 30, 1, true, List.of(), false, null), new SettingDefinition("payments", "Payments", Material.EMERALD, 31, 1, true, List.of(), false, null), new SettingDefinition("team_chat", "Team Chat", Material.BELL, 32, 1, false, List.of(), false, null), new SettingDefinition("worth_display", "Worth Display", Material.BOOK, 33, 1, true, List.of(), false, null), new SettingDefinition("night_vision", "Night Vision", Material.GOLDEN_CARROT, 17, 1, false, List.of(), false, null), new SettingDefinition("show_money", "Show Money", Material.SUNFLOWER, 24, 1, true, List.of(), false, null), new SettingDefinition("show_shards", "Show Shards", Material.AMETHYST_SHARD, 25, 1, true, List.of(), false, null), new SettingDefinition("show_kills", "Show Kills", Material.NETHERITE_SWORD, 26, 1, true, List.of(), false, null), new SettingDefinition("show_deaths", "Show Deaths", Material.SKELETON_SKULL, 27, 1, true, List.of(), false, null), new SettingDefinition("show_playtime", "Show Playtime", Material.CLOCK, 34, 1, true, List.of(), false, null), new SettingDefinition("auction_overflow", "Auction Overflow", Material.HOPPER, 7, 1, false, List.of("Drop bought items when your", "inventory is full instead of blocking"), false, null), new SettingDefinition("search_spell_check", "Search Spell Check", Material.NAME_TAG, 35, 1, true, List.of("Auto-correct typos in", "AH and orders search"), false, null), new SettingDefinition("money_nametags", "Money Nametags", Material.GOLD_NUGGET, 36, 1, true, List.of("Show each player's balance", "on a line below their name"), false, null));
+    private static final List<SettingDefinition> SETTINGS_DEFINITIONS = List.of(new SettingDefinition("public_chat", "Public Chat", Material.OAK_SIGN, 0, 1, true, List.of(), false, null), new SettingDefinition("private_messages", "Private Messages", Material.SPRUCE_SIGN, 1, 1, true, List.of(), false, null), new SettingDefinition("chat_server_messages", "Chat Server Messages", Material.BIRCH_SIGN, 2, 1, true, List.of(), false, null), new SettingDefinition("hotbar_server_messages", "Hotbar Server Messages", Material.JUNGLE_SIGN, 3, 1, true, List.of(), false, null), new SettingDefinition("pay_players", "Pay Players", Material.ACACIA_SIGN, 4, 1, true, List.of(), false, null), new SettingDefinition("bounty_alerts", "Bounty Alerts", Material.DARK_OAK_SIGN, 5, 1, true, List.of(), false, null), new SettingDefinition("auction_alerts", "Auction Alerts", Material.MANGROVE_SIGN, 6, 1, true, List.of(), false, null), new SettingDefinition("fast_crystals", "Fast Crystals", Material.END_CRYSTAL, 9, 1, false, List.of("Hide crystal explosion effects", "for faster crystal PvP"), false, null), new SettingDefinition("totem_particles", "Totem Particles", Material.TOTEM_OF_UNDYING, 10, 1, true, List.of(), false, null), new SettingDefinition("explosion_particles", "Explosion Particles", Material.TNT, 11, 1, true, List.of(), false, null), new SettingDefinition("explosion_sounds", "Explosion Sounds", Material.GOAT_HORN, 12, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_buy", "Quick Auction Buy", Material.GOLD_INGOT, 13, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_sell", "Quick Auction Sell", Material.EMERALD, 8, 1, false, List.of("List instantly with no confirm screen"), false, null), new SettingDefinition("chainmail_on_respawn", "Chainmail on Respawn", Material.CHAINMAIL_HELMET, 14, 1, true, List.of(), false, null), new SettingDefinition("mob_spawns", "Mob Spawns", Material.ZOMBIE_HEAD, 15, 1, true, List.of("Whether mobs spawn near you", "(hostile, passive, all types)"), false, null), new SettingDefinition("fast_anchor", "Fast Anchor", Material.RESPAWN_ANCHOR, 16, 1, false, List.of("Hide anchor explosion effects", "for faster anchor PvP"), false, null), new SettingDefinition("player_visibility", "Player Visibility", Material.PLAYER_HEAD, 18, 1, true, List.of(), false, null), new SettingDefinition("scoreboard_toggle", "Scoreboard Toggle", Material.LECTERN, 19, 1, true, List.of(), false, null), new SettingDefinition("tpa_confirm_menus", "TPA Confirm Menus", Material.FEATHER, 20, 1, true, List.of(), false, null), new SettingDefinition("music_sound_notifications", "Music/Sound Notifications", Material.MUSIC_DISC_MELLOHI, 21, 1, true, List.of(), false, null), new SettingDefinition("order_notifications", "Order Notifications", Material.PAPER, 22, 1, true, List.of(), false, null), new SettingDefinition("tpa_auto_accept", "Auto Accept TPAs", Material.SLIME_BALL, 23, 1, false, List.of("Instantly accept incoming", "TPA requests (/tpauto)"), false, null), new SettingDefinition("tpa_requests", "TPA Requests", Material.ENDER_PEARL, 28, 1, true, List.of(), false, null), new SettingDefinition("tpahere_requests", "TPAHere Requests", Material.ENDER_EYE, 29, 1, true, List.of(), false, null), new SettingDefinition("team_invites", "Team Invites", Material.SHIELD, 30, 1, true, List.of(), false, null), new SettingDefinition("payments", "Payments", Material.EMERALD, 31, 1, true, List.of(), false, null), new SettingDefinition("team_chat", "Team Chat", Material.BELL, 32, 1, false, List.of(), false, null), new SettingDefinition("worth_display", "Worth Display", Material.BOOK, 33, 1, true, List.of(), false, null), new SettingDefinition("night_vision", "Night Vision", Material.GOLDEN_CARROT, 17, 1, false, List.of(), false, null), new SettingDefinition("show_money", "Show Money", Material.SUNFLOWER, 24, 1, true, List.of(), false, null), new SettingDefinition("show_shards", "Show Shards", Material.AMETHYST_SHARD, 25, 1, true, List.of(), false, null), new SettingDefinition("show_kills", "Show Kills", Material.NETHERITE_SWORD, 26, 1, true, List.of(), false, null), new SettingDefinition("show_deaths", "Show Deaths", Material.SKELETON_SKULL, 27, 1, true, List.of(), false, null), new SettingDefinition("show_playtime", "Show Playtime", Material.CLOCK, 34, 1, true, List.of(), false, null), new SettingDefinition("auction_overflow", "Auction Overflow", Material.HOPPER, 7, 1, true, List.of("Drop bought items when your", "inventory is full instead of blocking"), false, null), new SettingDefinition("search_spell_check", "Search Spell Check", Material.NAME_TAG, 35, 1, true, List.of("Auto-correct typos in", "AH and orders search"), false, null), new SettingDefinition("money_nametags", "Money Nametags", Material.GOLD_NUGGET, 36, 1, true, List.of("Show each player's balance", "on a line below their name"), false, null));
     private static final List<ShopEntry> END_CATEGORY_ITEMS = List.of(
         new ShopEntry("ender_chest",        "Ender Chest",        Material.ENDER_CHEST,        2500.0,  1, List.of()),
         new ShopEntry("ender_pearl",         "Ender Pearl",        Material.ENDER_PEARL,        75.0,    1, List.of()),
@@ -644,16 +758,175 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Map.entry("elytra", 3000), Map.entry("shulker", 800), Map.entry("netherite_ingot", 2500),
         Map.entry("xp_bottles", 300), Map.entry("trident", 2000), Map.entry("name_tag", 200));
 
+    private static final record ChatIcon(String glyph, NamedTextColor color) {}
     private static final record TPARequest(java.util.UUID requester, java.util.UUID recipient, String type, long createdTime) {}
+    private static final record DuelRequest(java.util.UUID challenger, java.util.UUID target, double wager, int rounds, boolean restoredLoadout, String arenaPreference, long createdAt) {}
+    private static final class DuelSetupState {
+        final UUID target;
+        final String targetName;
+        final boolean soloTest;
+        int rounds = 1;
+        double wager;
+        boolean restoredLoadout;
+        String arenaPreference = "open";
+        DuelSetupState(UUID target, String targetName, boolean soloTest) {
+            this.target = target;
+            this.targetName = targetName;
+            this.soloTest = soloTest;
+        }
+    }
+    // Mutable per-duel state. arena = found center; startA/startB = fixed per-player spawn spots reused
+    // each round; changed = blocks altered during rounds (reverted on reset); startInv* = each player's
+    // exact inventory snapshot at duel start (restored between rounds and at the end of Restored Loadout).
+    private static final class DuelSession {
+        final UUID a; final UUID b; final double wager; final int rounds; final boolean restoredLoadout; final String arenaPreference; final boolean soloTest; final long createdAt;
+        final Location soloReturnLocation;
+        volatile Location arena; volatile Location startA; volatile Location startB;
+        volatile Location returnA; volatile Location returnB;
+        volatile boolean started; volatile boolean fightBegan; volatile boolean paused; volatile boolean celebrating; volatile boolean finalPresentationShown; volatile boolean ended;
+        volatile boolean arenaEntered; volatile boolean postMatchLootWindow; volatile boolean wagerSettled;
+        volatile boolean loserReturned; volatile boolean winnerInventoryFinalized; volatile boolean loserInventoryFinalized;
+        volatile boolean loserInventoryDropped;
+        volatile long arenaSearchStartedAt; volatile long lootWindowEndsAt;
+        volatile long arenaSearchDeadline;
+        volatile int round = 1; volatile int winsA; volatile int winsB;
+        volatile UUID pendingRoundWinner; volatile UUID pendingRoundLoser; volatile boolean pendingMatchOver;
+        volatile int returnLaunchToken;
+        volatile boolean returnResetDone;      // arena restored mid-flight for the current return
+        volatile boolean resetPending;         // quarantines arena actions/re-entry until every restore task is acknowledged
+        volatile long resetDeferDeadline;
+        volatile DuelArenaLease arenaLease;
+        volatile java.util.concurrent.CompletableFuture<Boolean> arenaResetCompletion;
+        volatile long arenaResetGeneration;
+        volatile long resetLastWarningAt;
+        final java.util.Set<UUID> returnLaunchArrivals = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        // Watchdog: set when a non-fighting transition begins; if the fight hasn't resumed by this time
+        // the session is considered hung and is force-recovered so nobody is stuck invincible.
+        volatile long stuckDeadline;
+        volatile ItemStack[] startInvA; volatile ItemStack[] startInvB;
+        double borderRadius = 40.0;
+        final java.util.Set<UUID> disconnected = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        final java.util.Set<UUID> reconnectTimerFallbacks = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        final java.util.Map<UUID, org.bukkit.event.player.PlayerQuitEvent.QuitReason> disconnectReasons = new java.util.concurrent.ConcurrentHashMap<>();
+        final java.util.Map<String, DuelArenaBlockSnapshot> changed = new java.util.concurrent.ConcurrentHashMap<>();
+        final java.util.Map<String, org.bukkit.block.data.BlockData> changedData = new java.util.concurrent.ConcurrentHashMap<>();
+        DuelSession(UUID a, UUID b, double wager, int rounds, boolean restoredLoadout, String arenaPreference) {
+            this(a, b, wager, rounds, restoredLoadout, arenaPreference, false, null);
+        }
+        DuelSession(UUID a, UUID b, double wager, int rounds, boolean restoredLoadout, String arenaPreference, boolean soloTest, Location soloReturnLocation) {
+            this.a = a; this.b = b; this.wager = wager; this.rounds = Math.max(1, rounds);
+            this.restoredLoadout = restoredLoadout; this.arenaPreference = arenaPreference; this.soloTest = soloTest;
+            this.soloReturnLocation = soloReturnLocation == null ? null : soloReturnLocation.clone(); this.createdAt = System.currentTimeMillis();
+        }
+        UUID other(UUID who) { return who.equals(this.a) ? this.b : this.a; }
+        int needed() { return this.rounds / 2 + 1; }                          // majority; tied even limits use sudden death
+        int winsFor(UUID who) { return who.equals(this.a) ? this.winsA : this.winsB; }
+        void addWin(UUID who) { if (who.equals(this.a)) this.winsA++; else this.winsB++; }
+        boolean inArena(Location loc) {
+            if (this.arena == null || loc == null || loc.getWorld() == null || this.arena.getWorld() == null) return false;
+            if (!loc.getWorld().equals(this.arena.getWorld())) return false;
+            double dx = loc.getX() - this.arena.getX(), dz = loc.getZ() - this.arena.getZ();
+            return Math.abs(dx) <= this.borderRadius && Math.abs(dz) <= this.borderRadius;
+        }
+        boolean inRollbackVolume(Location loc) {
+            if (this.arena == null || loc == null || loc.getWorld() == null || this.arena.getWorld() == null
+                    || !loc.getWorld().equals(this.arena.getWorld())) return false;
+            // Fluids and explosions may travel below the arena surface or past the visual border.
+            // Record the full world column, with enough horizontal padding for their spread.
+            return Math.abs(loc.getX() - this.arena.getX()) <= this.borderRadius + 16.0
+                && Math.abs(loc.getZ() - this.arena.getZ()) <= this.borderRadius + 16.0;
+        }
+    }
+    // A lease covers the visual arena plus the 16-block rollback margin. It survives session removal
+    // from activeDuels until every region/entity task in the terminal reset has acknowledged success.
+    private static final class DuelArenaLease {
+        final DuelSession session;
+        final World world;
+        final UUID worldId;
+        final double centerX;
+        final double centerZ;
+        final double halfSize;
+        final Set<DuelArenaChunkKey> pinnedChunks = ConcurrentHashMap.newKeySet();
+        DuelArenaLease(DuelSession session, World world, double centerX, double centerZ, double halfSize) {
+            this.session = session;
+            this.world = world;
+            this.worldId = world.getUID();
+            this.centerX = centerX;
+            this.centerZ = centerZ;
+            this.halfSize = halfSize;
+        }
+        boolean overlaps(UUID candidateWorldId, double x, double z, double radius) {
+            return this.worldId.equals(candidateWorldId)
+                // Both rollback bounds are inclusive block volumes; touching edges still overlap.
+                && Math.abs(this.centerX - x) <= this.halfSize + radius
+                && Math.abs(this.centerZ - z) <= this.halfSize + radius;
+        }
+    }
+    private record DuelArenaChunkKey(int x, int z) { }
+    private static final int DUEL_PROBE_SAFE_SPAWN = 1;
+    private static final int DUEL_PROBE_OPEN_CENTER = 1 << 1;
+    private static final int DUEL_PROBE_OPEN_OUTER = 1 << 2;
+    private static final int DUEL_PROBE_START_LINE = 1 << 3;
+    private static final int DUEL_PROBE_REQUESTED_BIOME = 1 << 4;
+    private static final int DUEL_PROBE_START_A = 1 << 5;
+    private static final int DUEL_PROBE_START_B = 1 << 6;
+    private record DuelArenaColumnKey(int x, int z) { }
+    private record DuelArenaColumnProbe(int x, int z, int roles) { }
+    // No Bukkit block, location, chunk, or mutable world result crosses from its owning region.
+    private record DuelArenaColumnResult(int safeY, Material safeGround, int surfaceY,
+            boolean groundSolid, boolean groundUnsafe, boolean clearHeadroom, boolean foliage,
+            org.bukkit.block.Biome biome) { }
+    private record DuelArenaValidationResult(int centerY, int startAY, int startBY) { }
+    // BlockState is retained solely as the tile/block-state snapshot; its mutable World access is only
+    // invoked by a task scheduled for the snapshot's owning chunk. The remaining fields are immutable
+    // and are safe for cross-region clearance calculations.
+    private static final class DuelArenaBlockSnapshot {
+        final org.bukkit.block.BlockState state;
+        final UUID worldId;
+        final int x;
+        final int y;
+        final int z;
+        final boolean solid;
+        DuelArenaBlockSnapshot(org.bukkit.block.BlockState state, UUID worldId, int x, int y, int z, boolean solid) {
+            this.state = state;
+            this.worldId = worldId;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.solid = solid;
+        }
+    }
+    private static final class SpectateState {
+        final org.bukkit.GameMode priorMode; final boolean priorAllowFlight; final boolean priorFlying;
+        final boolean priorInvulnerable; final boolean priorInvisible; final Location returnLocation; final UUID targetId;
+        SpectateState(org.bukkit.GameMode m, boolean af, boolean f, boolean invulnerable, boolean invisible, Location returnLocation, UUID targetId) {
+            this.priorMode = m; this.priorAllowFlight = af; this.priorFlying = f; this.priorInvulnerable = invulnerable;
+            this.priorInvisible = invisible; this.returnLocation = returnLocation; this.targetId = targetId;
+        }
+    }
+    private static final class SpectateStartRequest {
+        final UUID viewerId;
+        volatile UUID targetId;
+        SpectateStartRequest(UUID viewerId, UUID targetId) { this.viewerId = viewerId; this.targetId = targetId; }
+    }
+
+    private record SpectateCandidate(Player player, UUID id, String name) { }
 
     public void onEnable() {
-        this.foliaRuntime = this.isFoliaRuntime();
+        this.notificationLifecycleGeneration = this.notificationGenerationSequence.incrementAndGet();
+        this.notificationPollingActive = true;
         this.saveDefaultConfig();
         this.uiActionKey = new NamespacedKey((Plugin)this, "ui_action");
         this.sellWorthMarkerKey = new NamespacedKey((Plugin)this, "sell_worth_marker");
         this.amethystKindKey = new NamespacedKey((Plugin)this, "amethyst_kind");
         this.amethystExpireKey = new NamespacedKey((Plugin)this, "amethyst_expire_at");
+        this.duelReturnLocationKey = new NamespacedKey((Plugin)this, "duel_return_location");
+        this.hubLeaderboardKindKey = new NamespacedKey((Plugin)this, "hub_leaderboard_kind");
         this.settings = this.getConfig();
+        this.chatItemSpriteComponents = this.loadChatItemSpriteComponents();
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            this.chatKnownPlayerNames.put(online.getName().toLowerCase(Locale.ROOT), online.getName());
+        }
         this.loadBranding();       // resolve active brand profile (PizzaSMP/HorizonSMP) before any UI renders
         this.ensureDataSource();   // warm the DB connection pool before any query runs
         this.loadShopConfig();
@@ -738,6 +1011,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.registerCommand("maintenancemotd", this);
         this.registerCommand("limbomaint", this);
         this.registerCommand("branding", this);
+        this.registerCommand("duel", this);       // challenge-based 1v1 (request -> GUI -> arena + countdown)
+        this.registerCommand("spectate", this);   // fly-around watch mode (no block phasing)
+        this.registerCommand("hubbypass", this);  // staff toggle: build in the protected hub worlds
+        this.registerCommand("hubedit", this);
+        this.registerCommand("sethubspawn", this);   // self-service hub teleport-point setters
+        this.registerCommand("addafkspot", this);
+        this.registerCommand("clearafkspots", this);
+        this.registerCommand("setmoneyboard", this);
+        this.registerCommand("wherepos", this);      // print + log your coords (easy sharing)
+        this.registerCommand("coords", this);
         this.loadWorldAccess();
         this.getServer().getMessenger().registerOutgoingPluginChannel((Plugin)this, "BungeeCord");
         this.getServer().getMessenger().registerOutgoingPluginChannel((Plugin)this, BRIDGE_CHANNEL);
@@ -755,27 +1038,38 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         this.startPlaytimeAndAfkTask();
         // EcoBot keeps the auction house stocked. It is not gated behind anything.
-        Bukkit.getScheduler().runTaskLaterAsynchronously((Plugin)this, this::initAutoEco, 100L);
+        PlatformScheduler.asyncLater(this, this::initAutoEco, 100L);
         // One-shot (marker-file guarded): convert every team home into a personal named home
         // for ALL team members, then clear team homes. Part of the teams -> friends transition.
         this.runAsyncTask(this::migrateTeamHomesToPersonal);
-        // Amethyst tool expiry: sweep every 60s on the main thread (touches player inventories).
-        Bukkit.getScheduler().runTaskTimer((Plugin)this, this::runAmethystExpirySweep, 1200L, 1200L);
+        // Inventory expiry is dispatched to each owning player scheduler by the global sweep.
+        PlatformScheduler.globalRepeating(this, this::runAmethystExpirySweep, 1200L, 1200L);
         // TPS-reactive view distance throttle: check every 30s (600 ticks)
-        Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickVdThrottle, 600L, 600L);
+        PlatformScheduler.globalRepeating(this, this::tickVdThrottle, 600L, 600L);
         // RTP duel queue: refresh hotbars, time out waits, and match gear-close pairs every second.
-        Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickRtpDuelQueue, 40L, 20L);
+        PlatformScheduler.globalRepeating(this, this::tickRtpDuelQueue, 40L, 20L);
+        PlatformScheduler.globalRepeating(this, this::duelStateFailsafe, 40L, 20L);   // never leave a player stuck invincible
+        this.loadHubWorlds();                                                                  // spawn + AFK void worlds
+        this.startHubMoneyLeaderboard();                                                       // cached top-10 + per-viewer ranks
+        PlatformScheduler.globalLater(this, () -> {
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                PlatformScheduler.entityNow(this, player, () -> {
+                    if (player.isOnline() && HUB_SPAWN_WORLD.equals(player.getWorld().getName())) this.applyHubFlight(player);
+                }, null);
+            }
+        }, 2L);                                                                                // reclaim temporary hub flight after /reload
+        PlatformScheduler.globalRepeating(this, this::tickHubVoidRescue, 40L, 10L);             // catch void falls in hub worlds
         // Queue admit timer: admit 1 queued player every N ticks (default 60 = 3s)
-        Bukkit.getScheduler().runTaskTimer((Plugin)this, () -> { if (this.isQueueEnabled() && !this.joinQueue.isEmpty()) this.admitNextPlayer(); }, 100L, 60L);
+        PlatformScheduler.globalRepeating(this, () -> { if (this.isQueueEnabled() && !this.joinQueue.isEmpty()) this.admitNextPlayer(); }, 100L, 60L);
         // Adaptive autosave: every 3 min while players are online, every 10 min when empty
         // (bukkit.yml autosave is the 10-min incremental safety net; this adds the fast path).
-        Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickAdaptiveAutosave, 1200L, 600L);
+        PlatformScheduler.globalRepeating(this, this::tickAdaptiveAutosave, 1200L, 600L);
         // Money nametags: refresh every 10s rather than hooking every economy write site,
         // which would mean touching auction/orders/shop/sell independently.
-        Bukkit.getScheduler().runTaskTimer((Plugin)this, () -> {
+        PlatformScheduler.globalRepeating(this, () -> {
             for (Player online : Bukkit.getOnlinePlayers()) this.refreshMoneyNametagsFor(online);
         }, 200L, 200L);
-        Bukkit.getScheduler().runTaskTimer((Plugin)this, this::tickVoidRescue, 20L, 20L);   // overworld void = silent RTP to safety
+        PlatformScheduler.globalRepeating(this, this::tickVoidRescue, 20L, 20L);   // overworld void = silent RTP to safety
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             try { new PizzaPlaceholders(this).register(); this.getLogger().info("Registered PlaceholderAPI expansion 'pizzasmp' (balance)."); }
             catch (Throwable t) { this.getLogger().warning("PAPI expansion register failed: " + t.getMessage()); }
@@ -785,9 +1079,44 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.registerWorthDisplayListener();
         }
     }
-
     public void onDisable() {
+        this.notificationPollingActive = false;
+        this.notificationLifecycleGeneration = this.notificationGenerationSequence.incrementAndGet();
+        this.notificationSessionGenerations.clear();
+        this.notificationRecipientsInFlight.clear();
         this.shuttingDown = true;
+        this.deferredRtpDuelGlobalActions.clear();
+        this.stopHubMoneyLeaderboard();
+        // Plugin reloads and controlled restarts cannot preserve the in-memory duel state machine.
+        // Cancel each unique session before player data is saved so wagers, inventories, and movement
+        // flags are restored rather than being persisted in a transitional state.
+        for (DuelSession session : new java.util.HashSet<>(this.activeDuels.values())) {
+            try {
+                if (session.pendingMatchOver && session.pendingRoundWinner != null && session.pendingRoundLoser != null)
+                    this.resolveMatch(session, session.pendingRoundWinner, session.pendingRoundLoser);
+                else this.abortDuel(session, null);
+            } catch (Throwable ignored) {}
+        }
+        synchronized (this.duelArenaLeaseLock) {
+            for (DuelArenaLease lease : this.duelArenaLeases) {
+                java.util.concurrent.CompletableFuture<Boolean> reset = lease.session.arenaResetCompletion;
+                if (reset == null || !reset.isDone() || !Boolean.TRUE.equals(reset.getNow(false))) {
+                    this.getLogger().severe("[duel] arena lease " + lease.worldId + " at "
+                        + lease.centerX + "," + lease.centerZ
+                        + " has no completed restore; Folia-safe disable draining and crash recovery are unavailable");
+                }
+            }
+        }
+        for (UUID queued : new java.util.HashSet<>(this.rtpDuelQueue.keySet())) this.cancelRtpQueue(queued, null);
+        this.pendingRtpDuelMatches.clear();
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (this.duelFrozen.contains(player.getUniqueId()) || this.duelIntermission.contains(player.getUniqueId())
+                    || this.duelReturning.contains(player.getUniqueId()) || this.duelRoundSpectators.contains(player.getUniqueId())
+                    || this.duelSpectatorTransitions.contains(player.getUniqueId())) {
+                this.clearDuelMovementState(player);
+            }
+            this.clearHubDoubleJumpFlight(player);
+        }
         // Limbo sync safety net: on ANY shutdown (plain stop, crash-stop, /admin restart — not just the
         // /limbomaint flow), snapshot every online player's location + inventory + ender chest so the
         // limbo can hold them faithfully when Velocity falls them back. Synchronous on purpose: the DB
@@ -811,6 +1140,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             pendingRtpTeleport.task.cancel();
         }
         this.pendingRtpTeleports.clear();
+        for (RtpAnimation animation : this.rtpAnimations.values()) {
+            if (animation.task != null) animation.task.cancel();
+        }
+        this.rtpAnimations.clear();
         for (PendingHomeTeleport pendingHomeTeleport : this.pendingHomeTeleports.values()) {
             if (pendingHomeTeleport.task == null) continue;
             pendingHomeTeleport.task.cancel();
@@ -853,8 +1186,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.sidebarTasks.clear();
         this.lastActivityTime.clear();
         this.lastPlaytimeFlush.clear();
+        this.duelBorderApplied.clear();
+        this.duelPreviousWorldBorders.clear();
     }
-
     private void setupEconomy() {
         try {
             // Register OUR economy first, at Highest, so it outranks EssentialsX.
@@ -881,7 +1215,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.economy = null;
         }
     }
-
     private void setupChat() {
         try {
             RegisteredServiceProvider rsp = Bukkit.getServicesManager().getRegistration(Chat.class);
@@ -930,7 +1263,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             + (root != null ? root.getAbsolutePath() : "?")
             + " — falling back to the bundled shop.yml. Run scripts/sync_shop_config.sh.");
     }
-
     private void loadSellConfig() {
         File absData = this.getDataFolder().getAbsoluteFile();
         File root = absData.getParentFile() != null ? absData.getParentFile().getParentFile() : null;
@@ -1067,7 +1399,57 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
         e.joinMessage(null);
+        Player joined = e.getPlayer();
+        UUID joinedUuid = joined.getUniqueId();
+        this.notificationSessionGenerations.put(joinedUuid, this.notificationGenerationSequence.incrementAndGet());
+        this.chatKnownPlayerNames.put(joined.getName().toLowerCase(Locale.ROOT), joined.getName());
+        this.noteDuelReconnect(e.getPlayer());
+        // A cancelled/failed client transition must never survive a reconnect. Active
+        // reconnecting duels are deliberately excluded and will set their own state.
+        Player joinedPlayer = e.getPlayer();
+        UUID joinedId = joinedPlayer.getUniqueId();
+        if (!this.activeDuels.containsKey(joinedId)
+                && (this.duelFrozen.contains(joinedId) || this.duelRoundSpectators.contains(joinedId)
+                    || this.duelSpectatorTransitions.contains(joinedId)
+                    || this.duelIntermission.contains(joinedId) || this.duelReturning.contains(joinedId))) {
+            this.clearDuelMovementState(joinedPlayer);
+        }
+        // Persistent safety net: a leaked duel-transition state (Invulnerable + NoGravity) is SAVED to
+        // playerdata and survives a restart, which the in-memory sets above cannot catch. A SURVIVAL
+        // player with no gravity is never legitimate (Essentials /god sets invulnerable but NOT NoGravity),
+        // so this uniquely targets the duel leak without touching /god, creative, or spectator.
+        if (!this.activeDuels.containsKey(joinedId)
+                && joinedPlayer.getGameMode() == GameMode.SURVIVAL && !joinedPlayer.hasGravity()) {
+            joinedPlayer.setGravity(true);
+            joinedPlayer.setInvulnerable(false);
+            joinedPlayer.setAllowFlight(false);
+            joinedPlayer.setFlying(false);
+            joinedPlayer.setFallDistance(0.0f);
+        }
+        // Brand-new players (no spawn point yet) start at the hub spawn.
+        if (this.hubWorldsReady() && !joinedPlayer.hasPlayedBefore()) {
+            Location hubLoc = this.hubSpawnLocation();
+            if (hubLoc != null) this.runPlayerTaskLater(joinedPlayer, () -> { if (joinedPlayer.isOnline()) joinedPlayer.teleportAsync(hubLoc); }, 2L);
+        }
+        Location pendingReturn = this.pendingDuelReturns.remove(joinedId);
+        if (pendingReturn == null) pendingReturn = this.loadDuelReturnLocation(joinedPlayer);
+        if (pendingReturn != null && !this.activeDuels.containsKey(joinedId)) {
+            Location returnDestination = pendingReturn;
+            this.runPlayerTaskLater(joinedPlayer, () -> this.returnDuelist(joinedId, joinedPlayer, returnDestination), 1L);
+        } else if (!this.activeDuels.containsKey(joinedId) && this.isDuelArenaWorld(joinedPlayer.getWorld())) {
+            World source = Bukkit.getWorld(this.settings.getString("duel.source-world", "world"));
+            if (source != null) {
+                this.runPlayerTaskLater(joinedPlayer, () -> {
+                    if (joinedPlayer.isOnline() && !this.activeDuels.containsKey(joinedPlayer.getUniqueId())
+                            && this.isDuelArenaWorld(joinedPlayer.getWorld())) {
+                        this.clearDuelMovementState(joinedPlayer);
+                        joinedPlayer.teleportAsync(source.getSpawnLocation());
+                    }
+                }, 1L);
+            }
+        }
         this.guardVoidOnJoin(e.getPlayer());   // don't let a void-kicked player load back into the void
+        if (!this.shouldQueue(joined)) this.beginJoinSendRamp(joined); // flatten the login chunk burst
         this.refreshSkinOnJoin(e.getPlayer()); // re-fetch skin from Mojang so skin changes take effect
         long now = System.currentTimeMillis();
         this.lastActivityTime.put(e.getPlayer().getUniqueId(), now);
@@ -1077,15 +1459,17 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         this.clearUnexpectedJoinInvisibility(e.getPlayer());
         this.restorePearlsOnJoin(e.getPlayer());
-        // Follow broadcast: followers see this player join.
-        this.notifyFollowers(e.getPlayer().getUniqueId(), e.getPlayer().getName(), "joined.", false);
-        this.refreshTabName(e.getPlayer());
+        // Non-critical/cosmetic join work — deferred a moment off the join chunk burst when enabled.
+        this.runDeferredJoinWork(joined, () -> {
+            this.notifyFollowers(joined.getUniqueId(), joined.getName(), "joined.", false);
+            this.refreshTabName(joined);
+            this.refreshVisibilityForAll();
+        });
         this.syncVaultOnJoin(e.getPlayer());
         this.loadSettingsIntoCache(e.getPlayer());
         this.scheduleMutualRefresh(e.getPlayer().getUniqueId());   // locator-bar friends-only cache
         this.runAsyncTask(() -> this.notifyPendingOrderDeliveries(e.getPlayer().getUniqueId()));
         this.refreshNetworkPlayerNameCacheAsync();
-        this.runOnPlayerThread(e.getPlayer(), this::refreshVisibilityForAll);
         if (this.maintenanceQueueManager != null) {
             this.maintenanceQueueManager.handleJoin(e.getPlayer());
         }
@@ -1093,6 +1477,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (e.getPlayer().getUniqueId().toString().startsWith("00000000-0000-0000-")) {
             e.getPlayer().addAttachment(this, "grim.exempt", true);
         }
+        this.runPlayerTaskLater(joinedPlayer, () -> {
+            if (joinedPlayer.isOnline() && HUB_SPAWN_WORLD.equals(joinedPlayer.getWorld().getName())) {
+                this.applyHubFlight(joinedPlayer);
+                this.showHubMoneyLeaderboardTo(joinedPlayer);
+            }
+        }, 2L);
         // Queue gate: if capacity threshold exceeded, hold player in queue
         if (this.shouldQueue(e.getPlayer())) {
             Player qp = e.getPlayer();
@@ -1165,6 +1555,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         long elapsed;
         e.quitMessage(null);
         UUID uuid = e.getPlayer().getUniqueId();
+        this.notificationSessionGenerations.remove(uuid);
+        this.clearHubDoubleJumpFlight(e.getPlayer());
+        this.hubBypassPlayers.remove(uuid);
+        this.removeHubMoneyLeaderboardViewer(e.getPlayer());
         // Follow broadcast: followers see this player leave.
         this.notifyFollowers(uuid, e.getPlayer().getName(), "left.", false);
         Long flushAt = this.lastPlaytimeFlush.remove(uuid);
@@ -1173,12 +1567,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             long secs = elapsed;
             this.runAsyncTask(() -> this.updatePlaytimeSeconds(uuid, secs));
         }
-        if (this.isCombatTagged(e.getPlayer()) && this.settings.getBoolean("combat.quit_death", true)) {
+        if (!this.activeDuels.containsKey(uuid) && this.isCombatTagged(e.getPlayer()) && this.settings.getBoolean("combat.quit_death", true)) {
             this.applyCombatLogoutPenalty(e.getPlayer());
         }
         this.cancelPendingTeleport(e.getPlayer(), false);
         this.cancelPendingRtp(uuid);
-        this.cancelRtpQueue(uuid, null);   // disconnect cancels the duel search (frees any near-match)
+        this.cancelRtpAnimation(uuid);
+        this.retireRtpDuelQueueSession(uuid, e.getPlayer());
         this.capturePearlsOnQuit(e.getPlayer());
         this.mutualFriendsCache.remove(uuid);   // locator-bar friends-only cache
         this.rtpCooldowns.remove(uuid);
@@ -1191,16 +1586,21 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.cancelPendingHomeTeleport(uuid);
         this.playerSettingsCache.remove(uuid);
         this.shopSelectionState.remove(uuid);
+        this.pendingDuelSetupInput.remove(uuid);
+        this.duelSetupStates.remove(uuid);
         this.ordersViewState.remove(uuid);
         this.orderBuilderState.remove(uuid);
         this.ahViewState.remove(uuid);
         this.pendingTextInputs.remove(uuid);
         this.ahSellState.remove(uuid);
         this.activeRtpSearches.remove(uuid);
-        this.queuedPlayers.remove(uuid);
-        this.joinQueue.removeIf(q -> q.uuid.equals(uuid));
-        this.queueReturnLocations.remove(uuid);
-        this.queueReturnGamemodes.remove(uuid);
+        synchronized (this.joinQueueLock) {
+            this.queuedPlayers.remove(uuid);
+            this.joinQueue.removeIf(q -> q.uuid.equals(uuid));
+            this.queueReturnLocations.remove(uuid);
+            this.queueReturnGamemodes.remove(uuid);
+            this.queueTestHoldUntil.remove(uuid);
+        }
         this.lastThrottledCommandTime.remove(uuid);
         this.cancelSidebarTask(uuid);
         e.getPlayer().setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
@@ -1214,7 +1614,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // read it off-thread.
         this.runAsyncTask(() -> this.saveAdvancementsToDb(uuid));
     }
-
     @EventHandler
     public void onAdvancement(org.bukkit.event.player.PlayerAdvancementDoneEvent e) {
         // Suppress advancement broadcast messages from being shown to all players
@@ -1225,7 +1624,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         final UUID advUuid = e.getPlayer().getUniqueId();
         this.runPlayerTaskLater(e.getPlayer(), () -> this.runAsyncTask(() -> this.saveAdvancementsToDb(advUuid)), 1L);
     }
-
     /**
      * Put the player's synced advancements on disk before they load. AsyncPreLogin blocks the
      * login until this returns, which is the ordering the whole file-copy approach depends on:
@@ -1249,7 +1647,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // Vanilla clients render spectators in grey italic in the tab list. Re-assert a
         // plain non-italic list name once the new gamemode has actually applied.
         Player gp = e.getPlayer();
-        this.runPlayerTaskLater(gp, () -> { if (gp.isOnline()) this.refreshTabName(gp); }, 1L);
+        this.runPlayerTaskLater(gp, () -> {
+            if (!gp.isOnline()) return;
+            this.refreshTabName(gp);
+            if (HUB_SPAWN_WORLD.equals(gp.getWorld().getName())) this.applyHubFlight(gp);
+        }, 1L);
     }
 
     // Force a plain, non-italic tab-list name so spectator-mode players aren't shown
@@ -1280,6 +1682,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         Block block = event.getClickedBlock();
         if (block == null || block.getType() != Material.RESPAWN_ANCHOR) {
+            return;
+        }
+        if (this.isHubWorld(block.getWorld())) {
+            event.setCancelled(true);
             return;
         }
         if (block.getWorld().getEnvironment() == World.Environment.NETHER) {
@@ -1410,6 +1816,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         long expireAt = System.currentTimeMillis() + (long)this.getCombatTagSeconds() * 1000L;
         this.applyCombatTag(victim, expireAt);
         this.applyCombatTag(attacker, expireAt);
+        this.lastCombatAttacker.put(victim.getUniqueId(), attacker.getUniqueId());   // for kill -> clear killer tag
     }
 
     // Resolves the responsible player behind any damage source: direct hits, projectiles,
@@ -1441,6 +1848,33 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return null;
     }
 
+    // CPVP damage tuning: end crystals and respawn anchors deal a lot of raw explosion damage.
+    // Scale that damage by a configurable factor (combat.crystal_damage_multiplier /
+    // combat.anchor_damage_multiplier). The default is vanilla damage; lowering it is an explicit
+    // server configuration choice. 0 disables the hit entirely.
+    // Only players are affected. Runs before combat-tag/ignite MONITOR handlers so tagging still works.
+    @EventHandler(priority=EventPriority.HIGH, ignoreCancelled=true)
+    public void onCpvpExplosionDamage(EntityDamageEvent e) {
+        if (!(e.getEntity() instanceof Player)) {
+            return;
+        }
+        double mult;
+        EntityDamageEvent.DamageCause cause = e.getCause();
+        if (cause == EntityDamageEvent.DamageCause.ENTITY_EXPLOSION
+                && e instanceof EntityDamageByEntityEvent ee
+                && ee.getDamager() instanceof org.bukkit.entity.EnderCrystal) {
+            mult = this.settings.getDouble("combat.crystal_damage_multiplier", 1.0);
+        } else if (cause == EntityDamageEvent.DamageCause.BLOCK_EXPLOSION) {
+            // Respawn anchor / bed explosions come through as a block explosion (no damager entity).
+            mult = this.settings.getDouble("combat.anchor_damage_multiplier", 1.0);
+        } else {
+            return;
+        }
+        if (mult < 0.0) mult = 0.0;
+        if (mult == 1.0) return;                       // vanilla — nothing to scale
+        e.setDamage(e.getDamage() * mult);             // scales the base; armor/enchants still apply after
+    }
+
     // Track who ignites end crystals (so their explosion damage tags combat).
     @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
     public void onCrystalIgnite(EntityDamageByEntityEvent e) {
@@ -1455,8 +1889,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     public void onDeathClearCombatTag(PlayerDeathEvent e) {
         e.deathMessage(null);
         Player victim = e.getPlayer();
+        if (this.activeDuels.containsKey(victim.getUniqueId())) return;
         this.clearCombatTag(victim.getUniqueId());
-        this.cancelRtpQueue(victim.getUniqueId(), null);   // dying cancels the duel search
+        if (this.isHubWorld(victim.getWorld())) return;
+        // Killing the opponent ends YOUR combat too — clear the tag of whoever last hit the victim. This
+        // covers crystal/anchor/bed kills where victim.getKiller() is null (the getKiller() branch below
+        // only handles direct kills).
+        UUID lastAtt = this.lastCombatAttacker.remove(victim.getUniqueId());
+        if (lastAtt != null && !lastAtt.equals(victim.getUniqueId())) {
+            this.clearCombatTag(lastAtt);
+            Player la = Bukkit.getPlayer(lastAtt);
+            if (la != null && la.isOnline()) this.refreshSidebarSoon(la);
+        }
+        this.cancelRtpQueue(victim.getUniqueId(), null, victim);   // dying cancels the duel search
         this.runAsyncTask(() -> this.incrementLongStat(victim.getUniqueId(), "deaths", 1L));
         this.refreshSidebarSoon(victim);
         // Follow broadcast: people who follow the victim see their death.
@@ -1484,11 +1929,46 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     @EventHandler(priority=EventPriority.MONITOR)
     public void onDeathProtectDrops(PlayerDeathEvent e) {
         List<ItemStack> drops = new java.util.ArrayList<>(e.getDrops());
-        if (drops.isEmpty()) return;
-        e.getDrops().clear();
-        Location loc = e.getPlayer().getLocation();
+        Player dead = e.getPlayer();
+        if (this.activeDuels.containsKey(dead.getUniqueId()) || this.isHubWorld(dead.getWorld())) {
+            e.setKeepInventory(true); e.getDrops().clear(); e.setDroppedExp(0);
+            e.setKeepLevel(true);
+            return;
+        }
+        // Diagnostic: if loot "vanishes" on death (e.g. /kill), this shows why — empty drops means the
+        // items were kept (keepInventory) or the player was in creative, NOT destroyed by this handler.
+        org.bukkit.GameMode gm = dead.getGameMode();
+        this.getLogger().info("[death] " + dead.getName() + " gm=" + gm
+            + " keepInv=" + e.getKeepInventory() + " keepLevel=" + e.getKeepLevel()
+            + " drops=" + drops.size() + " droppedExp=" + e.getDroppedExp());
+        // Creative/spectator never drop anything (vanilla).
+        if (gm == org.bukkit.GameMode.CREATIVE || gm == org.bukkit.GameMode.SPECTATOR) return;
+        // XP always resets on death (vanilla) even when the keepInventory gamerule is on: setKeepInventory
+        // (which PunishDrop uses to force item drops) does NOT touch levels, so XP was being kept.
+        int lvl = dead.getLevel();
+        e.setKeepLevel(false);
+        e.setNewLevel(0);
+        e.setNewExp(0);
+        e.setNewTotalExp(0);
+        if (e.getDroppedExp() <= 0 && lvl > 0) {
+            e.setDroppedExp(Math.min(100, lvl * 7));
+        }
+        // Items ALWAYS drop. CRITICAL FIX: when the keepInventory gamerule is ON, the event's drop list
+        // is EMPTY, but PunishDrop's setKeepInventory(false) makes the server clear the inventory while
+        // dropping nothing — so loot was being DESTROYED. Force keep-inventory off (so the inventory is
+        // cleared, no dupe) and re-drop the items ourselves: the event's drops if present, else a snapshot
+        // of the live inventory. Everything is despawn-protected at the death spot.
+        e.setKeepInventory(false);
+        if (drops.isEmpty()) {
+            for (ItemStack it : dead.getInventory().getContents()) {
+                if (it != null && it.getType() != Material.AIR) drops.add(it.clone());
+            }
+        } else {
+            e.getDrops().clear();
+        }
+        Location loc = dead.getLocation();
         World dropWorld = loc.getWorld();
-        if (dropWorld == null) return;
+        if (dropWorld == null || drops.isEmpty()) return;
         for (ItemStack drop : drops) {
             if (drop == null || drop.getType() == Material.AIR) continue;
             org.bukkit.entity.Item item = dropWorld.dropItemNaturally(loc, drop);
@@ -1533,6 +2013,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Player player = e.getPlayer();
         // Re-apply settings-based night vision (effects clear on death)
         this.runPlayerTaskLater(player, () -> this.applyNightVisionPreference(player), 5L);
+        // Hub deaths stay in the protected hub. The general no-bed flow below intentionally RTPs
+        // survival deaths and must not race the hub respawn handler or grant a respawn kit here.
+        if (this.isHubWorld(player.getWorld())) return;
         if (this.isSettingEnabledCached(player.getUniqueId(), "chainmail_on_respawn")) {
             // Delay 5 ticks: armor slots can be re-cleared by the client/other plugins right
             // after respawn, so set them a touch later and force an inventory update.
@@ -1570,7 +2053,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.searchRtpLocation(player.getUniqueId(), plan, 0);
         }, 2L);
     }
-
     @EventHandler(ignoreCancelled=true)
     public void onPortalCombatBlock(PlayerPortalEvent e) {
         Player player = e.getPlayer();
@@ -1579,7 +2061,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (this.isCombatTagged(player)) {
             e.setCancelled(true);
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot use portals."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "portal");
             return;
         }
@@ -1594,23 +2076,21 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     @EventHandler(ignoreCancelled=true)
     public void onBlockPlaced(BlockPlaceEvent e) {
         Player player = e.getPlayer();
-        if (player == null) {
+        if (player == null || this.isHubWorld(e.getBlock().getWorld())) {
             return;
         }
         this.lastActivityTime.put(player.getUniqueId(), System.currentTimeMillis());
         this.runAsyncTask(() -> this.incrementLongStat(player.getUniqueId(), "blocks_placed", 1L));
     }
-
     @EventHandler(ignoreCancelled=true)
     public void onBlockBroken(BlockBreakEvent e) {
         Player player = e.getPlayer();
-        if (player == null) {
+        if (player == null || this.isHubWorld(e.getBlock().getWorld())) {
             return;
         }
         this.lastActivityTime.put(player.getUniqueId(), System.currentTimeMillis());
         this.runAsyncTask(() -> this.incrementLongStat(player.getUniqueId(), "blocks_broken", 1L));
     }
-
     @EventHandler(ignoreCancelled=true)
     public void onMobKilled(EntityDeathEvent e) {
         Player killer = e.getEntity().getKiller();
@@ -1632,6 +2112,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      */
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     public void onSpawnRoute(PlayerCommandPreprocessEvent e) {
+        // Network deployments route spawn to the lobby backend; single servers keep the local hub /spawn.
+        if (!this.settings.getBoolean("network.route-spawn-to-lobby", false)) return;
         String raw = e.getMessage();
         if (raw == null || raw.length() < 2 || raw.charAt(0) != '/') return;
         String[] parts = raw.substring(1).trim().split("\\s+");
@@ -1673,7 +2155,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         }
     }
-
     @EventHandler(priority=EventPriority.HIGHEST, ignoreCancelled=true)
     public void onTeleportCommandDelay(PlayerCommandPreprocessEvent e) {
         Player player = e.getPlayer();
@@ -1686,7 +2167,20 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         String label = split[0].toLowerCase();
+        if (label.contains(":")) label = label.substring(label.indexOf(':') + 1);
         UUID uuid = player.getUniqueId();
+        DuelSession commandDuel = this.activeDuels.get(uuid);
+        if (commandDuel != null && "kill".equals(label)) {
+            e.setCancelled(true);
+            player.sendActionBar(Component.text("§c/kill is unavailable during a duel."));
+            return;
+        }
+        if (commandDuel != null && "leave".equals(label)) {
+            e.setCancelled(true);
+            if (commandDuel.soloTest) this.finishSoloDuel(commandDuel, "§7Duel test ended.", true);
+            else this.forfeitDuelByChoice(commandDuel, uuid);
+            return;
+        }
         if ("pay".equals(label) && this.payDispatchBypass.remove(uuid)) {
             return;
         }
@@ -1718,6 +2212,48 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             if (player.hasPermission("pizzasmp.use.shop")) {
                 e.setCancelled(true);
                 this.openShopMain(player);
+            }
+            return;
+        }
+        // /duel + /spectate are handled HERE (preprocess) like /tpa and /shop — cancelling the event so
+        // they bypass the command-throttle/audit stage that was silently eating the onCommand path.
+        if ("duel".equals(label) || "1v1".equals(label)) {
+            e.setCancelled(true);
+            if (player.hasPermission("pizzasmp.use.duel")) {
+                this.handleDuelCommand(player, split.length > 1 ? Arrays.copyOfRange(split, 1, split.length) : new String[]{});
+            } else {
+                player.sendMessage("§cThis command does not exist.");
+            }
+            return;
+        }
+        // Hub routing must win over Essentials' /spawn, /afk, /warp (which otherwise shadow ours). Handled
+        // in preprocess so the command reaches PNC regardless of which plugin "owns" it.
+        if (this.hubWorldsReady()) {
+            if ("spawn".equals(label)) { e.setCancelled(true); this.routeWarpLikeCommand(player, "spawn"); return; }
+            if ("afk".equals(label))   { e.setCancelled(true); this.routeWarpLikeCommand(player, "afk"); return; }
+            if ("warp".equals(label)) {
+                e.setCancelled(true);
+                this.routeWarpLikeCommand(player, split.length > 1 ? split[1].toLowerCase(Locale.ROOT) : "");
+                return;
+            }
+        }
+        if ("hubbypass".equals(label) || "hubedit".equals(label)) {
+            e.setCancelled(true);
+            this.handleHubBypassCommand(player);
+            return;
+        }
+        // Self-service teleport-point setters: stand where you want the point and run the command.
+        if ("sethubspawn".equals(label)) { e.setCancelled(true); this.handleSetHubSpawn(player); return; }
+        if ("addafkspot".equals(label))  { e.setCancelled(true); this.handleAddAfkSpot(player); return; }
+        if ("clearafkspots".equals(label)) { e.setCancelled(true); this.handleClearAfkSpots(player); return; }
+        if ("setmoneyboard".equals(label)) { e.setCancelled(true); this.handleSetMoneyBoard(player); return; }
+        if ("wherepos".equals(label) || "coords".equals(label)) { e.setCancelled(true); this.handleWherePos(player); return; }
+        if ("spectate".equals(label) || "spec".equals(label)) {
+            e.setCancelled(true);
+            if (player.hasPermission("pizzasmp.use.spectate")) {
+                this.handleSpectateCommand(player, split.length > 1 ? Arrays.copyOfRange(split, 1, split.length) : new String[]{});
+            } else {
+                player.sendMessage("§cThis command does not exist.");
             }
             return;
         }
@@ -1804,7 +2340,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // /pay is now handled by onPayFirst (LOWEST priority) above.
         if ("sethome".equals(label) && this.isCombatTagged(player)) {
             e.setCancelled(true);
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot set homes."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "sethome");
             return;
         }
@@ -1819,6 +2355,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (label.equals("tpa") || label.equals("tpahere") || label.equals("tpacancel") || label.equals("tpaaccept") || label.equals("tpaccept") || label.equals("tpacept") || label.equals("tpadeny") || label.equals("tpdeny")) {
             e.setCancelled(true);
+            if (this.activeDuels.containsKey(player.getUniqueId())) {
+                player.sendActionBar(Component.text("§cTeleport requests are unavailable during a duel."));
+                return;
+            }
             if (this.handleCrossServerTeleportRequestCommand(player, label, split)) {
                 return;
             }
@@ -1896,6 +2436,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     @EventHandler(priority=EventPriority.HIGHEST, ignoreCancelled=true)
     public void onChat(AsyncChatEvent e) {
         Player p = e.getPlayer();
+        java.util.function.Consumer<String> duelSetupInput = this.pendingDuelSetupInput.remove(p.getUniqueId());
+        if (duelSetupInput != null) {
+            e.setCancelled(true);
+            String text = this.plainMessage(e.message());
+            this.runOnPlayerThread(p, () -> duelSetupInput.accept(text));
+            return;
+        }
         java.util.function.Consumer<String> adminInput = this.pendingAdminInput.remove(p.getUniqueId());
         if (adminInput != null) {
             e.setCancelled(true);
@@ -1910,6 +2457,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.runOnPlayerThread(p, () -> this.handlePendingTextInput(p, pendingInput, text));
             return;
         }
+        // :alias: chat icons are applied at render time — see onChatIconRender.
         if (!this.isChatInterceptionEnabled()) {
             return;
         }
@@ -1959,7 +2507,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.deliverChatLocally(p, globalPrefix, globalMessage);
         }
     }
-
     // Renders a global chat line to this backend's players only (fallback when no proxy relay is
     // listening; gated by chat.bridge_local_echo). Respects each viewer's public_chat setting.
     private void deliverChatLocally(Player sender, String prefix, String msg) {
@@ -1972,6 +2519,118 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.getServer().getConsoleSender().sendMessage(formatted);
     }
 
+    // :alias: chat icons (item sprites / player heads — Minecraft 1.21.9+ object components). Applied to the
+    // FINAL rendered line, not to the message: EssentialsXChat rebuilds every chat line from a legacy-string
+    // copy of the message (ComponentFlattener.basic), and object components have no legacy form, so rewriting
+    // e.message() lost every icon. Wrapping the renderer lets any formatter run first; the literal :alias:
+    // text survives its round trip. HIGHEST + softdepend on Essentials/EssentialsChat (plugin.yml) makes this
+    // register after them, so we wrap THEIR renderer instead of being replaced by it. The renderer runs per
+    // viewer: Bedrock clients and the console can't draw object components and get readable text instead.
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onChatIconRender(AsyncChatEvent e) {
+        if (!this.settings.getBoolean("chat.icon-aliases-enabled", true)) return;
+        if (!CHAT_ICON_ALIAS_PATTERN.matcher(this.plainMessage(e.message())).find()) return;
+        String senderName = e.getPlayer().getName();
+        io.papermc.paper.chat.ChatRenderer inner = e.renderer();
+        e.renderer((source, displayName, message, viewer) -> this.renderChatIconAliases(
+            inner.render(source, displayName, message, viewer), senderName,
+            !(viewer instanceof Player vp) || this.isBedrockPlayer(vp)));
+    }
+
+    private Component renderChatIconAliases(Component line, String senderName, boolean textFallback) {
+        return line.replaceText(net.kyori.adventure.text.TextReplacementConfig.builder()
+            .match(CHAT_ICON_ALIAS_PATTERN)
+            .replacement((match, original) -> {
+                Component icon = this.chatIconFor(match.group(1), senderName, textFallback);
+                return icon != null ? icon : original;   // unknown alias: leave the :text: exactly as typed
+            })
+            .build());
+    }
+
+    // Resolution order: item, then a player seen this session, then a text glyph. null = not an alias.
+    private Component chatIconFor(String rawAlias, String senderName, boolean textFallback) {
+        String alias = rawAlias.toLowerCase(Locale.ROOT);
+        if ("totem".equals(alias)) alias = "totem_of_undying";
+        Material material = this.chatAliasMaterial(alias);
+        if (material != null) {
+            if (!textFallback) return this.chatItemAlias(material, senderName);
+            return Component.text("[" + material.getKey().getKey().replace('_', ' ') + "]", NamedTextColor.GRAY)
+                .hoverEvent(HoverEvent.showItem(Key.key(material.getKey().getNamespace(), material.getKey().getKey()), 1));
+        }
+        String playerName = this.chatKnownPlayerNames.get(alias);
+        if (playerName != null) {
+            Component name = Component.text(playerName, NamedTextColor.YELLOW);
+            if (textFallback) return name;
+            Component head = AdventureObjectComponents.playerHead(playerName);
+            if (head == null) return name;
+            return head
+                .hoverEvent(HoverEvent.showText(Component.text(playerName)))
+                .append(Component.space())
+                .append(name);
+        }
+        ChatIcon icon = CHAT_ICON_ALIASES.get(alias);
+        if (icon != null) return Component.text(icon.glyph(), icon.color());
+        // Valid offline names are not necessarily in this runtime's seen-name cache. Render them as
+        // name/head aliases without making an HTTP profile lookup on the asynchronous chat path.
+        if (rawAlias.matches("[A-Za-z0-9_]{3,16}")) {
+            Component name = Component.text(rawAlias, NamedTextColor.YELLOW);
+            if (textFallback) return name;
+            Component head = AdventureObjectComponents.playerHead(rawAlias);
+            if (head == null) return name;
+            return head
+                .hoverEvent(HoverEvent.showText(Component.text(rawAlias)))
+                .append(Component.space())
+                .append(name);
+        }
+        return null;
+    }
+
+    private Material chatAliasMaterial(String alias) {
+        Material material = Material.getMaterial(alias.toUpperCase(Locale.ROOT));
+        return material != null && material.isItem() && !material.isAir() ? material : null;
+    }
+
+    private Component chatItemAlias(Material material, String senderName) {
+        if (material == Material.PLAYER_HEAD) {
+            Component head = AdventureObjectComponents.playerHead(senderName);
+            if (head != null) {
+                return head.hoverEvent(HoverEvent.showItem(Key.key("minecraft", "player_head"), 1));
+            }
+            return Component.text("[" + senderName + "]", NamedTextColor.GRAY)
+                .hoverEvent(HoverEvent.showItem(Key.key("minecraft", "player_head"), 1));
+        }
+        Component sprite = this.chatItemSpriteComponents.get(material.getKey().getKey());
+        if (sprite != null) return sprite;
+        // Entity-rendered items (notably beds, banners, and chests) have no flat vanilla item sprite.
+        return Component.text("[" + material.name().toLowerCase(Locale.ROOT).replace('_', ' ') + "]", NamedTextColor.GRAY)
+            .hoverEvent(HoverEvent.showItem(Key.key(material.getKey().getNamespace(), material.getKey().getKey()), 1));
+    }
+
+    private Map<String, Component> loadChatItemSpriteComponents() {
+        Map<String, Component> sprites = new HashMap<>();
+        try (InputStream source = this.getResource("chat-item-sprites.tsv")) {
+            if (source == null) return Map.of();
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(source, java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.isBlank() || line.startsWith("#")) continue;
+                    String[] fields = line.split("\\t");
+                    if (fields.length != 3) continue;
+                    String alias = fields[0];
+                    Component sprite = AdventureObjectComponents.sprite(
+                        Key.key("minecraft", fields[1]), Key.key("minecraft", fields[2]));
+                    if (sprite != null) {
+                        sprites.put(alias, sprite.hoverEvent(HoverEvent.showItem(Key.key("minecraft", alias), 1)));
+                    }
+                }
+            }
+        } catch (IOException | IllegalArgumentException ex) {
+            this.getLogger().warning("Unable to load chat item sprites: " + ex.getMessage());
+        }
+        return Map.copyOf(sprites);
+    }
+
     @EventHandler
     public void onClick(InventoryClickEvent e) {
         HumanEntity humanEntity = e.getWhoClicked();
@@ -1980,6 +2639,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         Player p = (Player)humanEntity;
         String title = e.getView().getTitle();
+        if (TITLE_DUEL_SETUP.equals(title)) {
+            e.setCancelled(true);
+            if (e.getClickedInventory() == null || !e.getClickedInventory().equals(e.getView().getTopInventory())) return;
+            this.handleLegacyDuelSetupClick(p, e.getCurrentItem());
+            return;
+        }
+        if (TITLE_DUEL_RTP_CONFIRM.equals(title)) {
+            e.setCancelled(true);
+            if (e.getClickedInventory() == null || !e.getClickedInventory().equals(e.getView().getTopInventory())) return;
+            this.handleLegacyDuelRtpClick(p, e.getCurrentItem());
+            return;
+        }
         if (TITLE_SETTINGS.equals(title)) {
             if (e.getClickedInventory() == null || !e.getClickedInventory().equals((Object)e.getView().getTopInventory())) {
                 if (e.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) e.setCancelled(true);
@@ -2208,7 +2879,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 return;
             }
             e.setCancelled(true);
-            if (p.hasPermission(PERM_ADMIN_CONSOLE)) {
+            if (p.hasPermission(PERM_ADMIN_CONSOLE) || p.hasPermission("pizzasmp.manage")) {
                 this.handleAdminLegacyClick(p, e.getCurrentItem(), e.getClick());
             }
             return;
@@ -2266,14 +2937,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             // Allow staff to take items from offline player snapshots
             return;
         }
-        // Click feedback sound — ONLY for our own virtual GUIs (created with a null holder). Real
-        // containers (chest/hopper/shulker/barrel) have a block/entity holder, so moving items in
-        // them stays silent.
-        if (e.getClickedInventory() != null && e.getRawSlot() >= 0 && e.getRawSlot() < e.getView().getTopInventory().getSize()
-                && e.getView().getTopInventory().getHolder() == null
-                && e.getCurrentItem() != null && e.getCurrentItem().getType() != Material.AIR && e.getWhoClicked() instanceof Player) {
-            ((Player)e.getWhoClicked()).playSound(e.getWhoClicked().getLocation(), Sound.UI_BUTTON_CLICK, 0.45f, 1.0f);
-        }
+        // (No generic per-item click sound: clicking/moving items in our GUIs should be silent, like a
+        // real inventory. Intentional feedback sounds are played by specific actions, e.g. toggles.)
         if (TITLE_AH.equals(title)) {
             if (e.getClickedInventory() == null || !e.getClickedInventory().equals((Object)e.getView().getTopInventory())) {
                 if (e.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) e.setCancelled(true);
@@ -2334,6 +2999,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             e.setCancelled(true);
             this.handleShopClick(p, e.getCurrentItem(), e.getClick());
+            return;
+        }
+        if (TITLE_PVP_SHOP.equals(title)) {
+            if (e.getClickedInventory() == null || !e.getClickedInventory().equals((Object)e.getView().getTopInventory())) {
+                if (e.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) e.setCancelled(true);
+                return;
+            }
+            e.setCancelled(true);
+            this.handlePvpShopClick(p, e.getCurrentItem(), e.getClick());
             return;
         }
         if (TITLE_ORDERS.equals(title)) {
@@ -2599,11 +3273,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         }
     }
-
     @EventHandler(ignoreCancelled=true)
     public void onInventoryDrag(InventoryDragEvent e) {
         // Leaderboard head GUIs are view-only: block dragging items into/over them.
         if (e.getView().getTitle().startsWith("§fTop ")) {
+            e.setCancelled(true);
+            return;
+        }
+        if (TITLE_DUEL_SETUP.equals(e.getView().getTitle()) || TITLE_DUEL_RTP_CONFIRM.equals(e.getView().getTitle())) {
             e.setCancelled(true);
             return;
         }
@@ -2631,6 +3308,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         InventoryCloseEvent.Reason _reason = e.getReason();
         boolean _playerClose = _reason == InventoryCloseEvent.Reason.PLAYER || _reason == InventoryCloseEvent.Reason.TELEPORT
                 || _reason == InventoryCloseEvent.Reason.DEATH || _reason == InventoryCloseEvent.Reason.DISCONNECT;
+        if (_playerClose && e.getPlayer() instanceof Player _duelMenuPlayer
+                && TITLE_DUEL_SETUP.equals(e.getView().getTitle())
+                && !this.pendingDuelSetupInput.containsKey(_duelMenuPlayer.getUniqueId())) {
+            this.duelSetupStates.remove(_duelMenuPlayer.getUniqueId());
+        }
         if (_playerClose && e.getPlayer() instanceof Player _cp) {
             String _ct = e.getView().getTitle();
             if (TITLE_AH.equals(_ct) || TITLE_AH_MY.equals(_ct)) {
@@ -2722,11 +3404,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // entirely). SPECTATOR is exempt — it's the vanilla void-immune mode and staff moderate in it.
     private void tickVoidRescue() {
         for (Player p : Bukkit.getOnlinePlayers()) {
-            if (p.getGameMode() == org.bukkit.GameMode.SPECTATOR) continue;
-            org.bukkit.World w = p.getWorld();
-            if (w == null || w.getEnvironment() != org.bukkit.World.Environment.NORMAL) continue;   // overworld only, never end/nether
-            if (p.getLocation().getY() >= (w.getMinHeight() - 5.0)) continue;
-            this.triggerVoidRescue(p);
+            PlatformScheduler.entityNow(this, p, () -> {
+                if (!p.isOnline() || p.getGameMode() == GameMode.SPECTATOR) return;
+                World w = p.getWorld();
+                if (w == null || w.getEnvironment() != World.Environment.NORMAL) return;
+                if (p.getLocation().getY() >= w.getMinHeight() - 5.0) return;
+                this.triggerVoidRescue(p);
+            }, null);
         }
     }
 
@@ -2738,47 +3422,68 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void beginVoidRescueRtp(Player player) {
-        World world = Bukkit.getWorld("world");
-        if (world == null && !Bukkit.getWorlds().isEmpty()) world = Bukkit.getWorlds().getFirst();
-        if (world == null) { this.voidRescueInProgress.remove(player.getUniqueId()); return; }
-        double borderRadius = 5000.0, centerX = 0.0, centerZ = 0.0;
-        if (world.getWorldBorder() != null) {
-            centerX = world.getWorldBorder().getCenter().getX();
-            centerZ = world.getWorldBorder().getCenter().getZ();
-            borderRadius = this.rtpMaxRadius(world);
-        }
-        RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ,
-            Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius,
-            Math.max(16, this.settings.getInt("rtp.search-attempts", 120)), player.getLocation().getYaw());
-        this.voidRescueAttempt(player.getUniqueId(), plan, 0);
+        UUID playerId = player.getUniqueId();
+        float yaw = player.getLocation().getYaw();
+        PlatformScheduler.globalNow(this, () -> {
+            World world = Bukkit.getWorld("world");
+            if (world == null && !Bukkit.getWorlds().isEmpty()) world = Bukkit.getWorlds().getFirst();
+            if (world == null) { this.voidRescueInProgress.remove(playerId); return; }
+            double borderRadius = 5000.0, centerX = 0.0, centerZ = 0.0;
+            if (world.getWorldBorder() != null) {
+                centerX = world.getWorldBorder().getCenter().getX();
+                centerZ = world.getWorldBorder().getCenter().getZ();
+                borderRadius = this.rtpMaxRadius(world);
+            }
+            RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ,
+                Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius,
+                Math.max(16, this.settings.getInt("rtp.search-attempts", 120)), yaw);
+            this.voidRescueAttempt(playerId, plan, 0);
+        });
     }
-
     // One async search attempt: pick a coord, load its chunk async, check safety, then silently
     // force-teleport. Mirrors rtpAttemptAsync but with NO messages/countdown and a direct teleport.
     private void voidRescueAttempt(UUID uuid, RtpSearchPlan plan, int attempt) {
-        Player player = Bukkit.getPlayer(uuid);
-        if (player == null || !player.isOnline()) { this.voidRescueInProgress.remove(uuid); return; }
         if (attempt >= plan.maxAttempts) { this.voidRescueInProgress.remove(uuid); return; }   // give up; the 1s tick retries
-        World world = Bukkit.getWorld(plan.worldName);
-        if (world == null) { this.voidRescueInProgress.remove(uuid); return; }
-        double angle = ThreadLocalRandom.current().nextDouble(0.0, Math.PI * 2);
-        double radius = plan.minRadius >= plan.maxRadius ? plan.maxRadius : ThreadLocalRandom.current().nextDouble(plan.minRadius, plan.maxRadius);
-        int x = NumberConversions.floor(plan.centerX + Math.cos(angle) * radius);
-        int z = NumberConversions.floor(plan.centerZ + Math.sin(angle) * radius);
-        world.getChunkAtAsync(x >> 4, z >> 4, true).thenAccept(chunk -> this.runOnPlayerThread(player, () -> {
-            if (!player.isOnline()) { this.voidRescueInProgress.remove(uuid); return; }
-            Location target = this.findSafeRtpLocation(world, x, z, plan.yaw);
-            if (target == null) {
-                this.runAsyncTask(() -> this.voidRescueAttempt(uuid, plan, attempt + 1));
-                return;
-            }
-            player.setFallDistance(0.0f);
-            player.setVelocity(new org.bukkit.util.Vector(0, 0, 0));
-            player.teleport(target);
-            player.setFallDistance(0.0f);
-            this.voidRescueInProgress.remove(uuid);
-            this.getLogger().info("[VoidRescue] " + player.getName() + " was in the overworld void — RTP'd to a safe location.");
-        }));
+        PlatformScheduler.globalNow(this, () -> {
+            Player player = Bukkit.getPlayer(uuid);
+            World world = Bukkit.getWorld(plan.worldName);
+            if (player == null || world == null) { this.voidRescueInProgress.remove(uuid); return; }
+            PlatformScheduler.entityNow(this, player, () -> {
+                if (!player.isOnline()) { this.voidRescueInProgress.remove(uuid); return; }
+                double angle = ThreadLocalRandom.current().nextDouble(0.0, Math.PI * 2);
+                double radius = plan.minRadius >= plan.maxRadius ? plan.maxRadius
+                    : ThreadLocalRandom.current().nextDouble(plan.minRadius, plan.maxRadius);
+                int x = NumberConversions.floor(plan.centerX + Math.cos(angle) * radius);
+                int z = NumberConversions.floor(plan.centerZ + Math.sin(angle) * radius);
+                world.getChunkAtAsync(x >> 4, z >> 4, true).whenComplete((chunk, loadFailure) -> {
+                    if (loadFailure != null || chunk == null) {
+                        this.voidRescueInProgress.remove(uuid);
+                        return;
+                    }
+                    PlatformScheduler.regionNow(this, new Location(world, x, 0, z), () -> {
+                        Location target = this.findSafeRtpLocation(world, x, z, plan.yaw);
+                        if (target == null) {
+                            this.voidRescueAttempt(uuid, plan, attempt + 1);
+                            return;
+                        }
+                        PlatformScheduler.entityNow(this, player, () -> {
+                            if (!player.isOnline()) { this.voidRescueInProgress.remove(uuid); return; }
+                            player.setFallDistance(0.0f);
+                            player.setVelocity(new org.bukkit.util.Vector());
+                            player.teleportAsync(target).whenComplete((teleported, failure) ->
+                                PlatformScheduler.entityNow(this, player, () -> {
+                                    if (failure == null && Boolean.TRUE.equals(teleported)) {
+                                        player.setFallDistance(0.0f);
+                                        this.getLogger().info("[VoidRescue] " + player.getName()
+                                            + " was in the overworld void — RTP'd to a safe location.");
+                                    }
+                                    this.voidRescueInProgress.remove(uuid);
+                                }, () -> this.voidRescueInProgress.remove(uuid)));
+                        }, () -> this.voidRescueInProgress.remove(uuid));
+                    });
+                });
+            }, () -> this.voidRescueInProgress.remove(uuid));
+        });
     }
 
     // ---- PlaceholderAPI accessors (used by PizzaPlaceholders / the TAB tablist) --------------
@@ -2841,24 +3546,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     @EventHandler(priority=EventPriority.NORMAL, ignoreCancelled=true)
     public void onCreatureSpawn(org.bukkit.event.entity.CreatureSpawnEvent e) {
-        // Cancel natural mob spawns near players who have "disable_mob_spawns" enabled.
-        // Only applies to natural/chunk-gen reasons so mob spawners and commands still work.
+        // "Mob Spawns" is a per-player toggle (default ON = mobs spawn). When a player has it OFF, ALL
+        // natural mob spawns near them are cancelled — hostile, passive, phantoms, every type. Only
+        // natural/chunk-gen style reasons are gated so mob spawners and commands still work.
         org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason = e.getSpawnReason();
         switch (reason) {
             case NATURAL, CHUNK_GEN, VILLAGE_INVASION, JOCKEY, REINFORCEMENTS -> {}
             default -> { return; }
         }
         Location loc = e.getLocation();
-        boolean isPhantom = e.getEntityType() == org.bukkit.entity.EntityType.PHANTOM;
         for (Player nearby : loc.getWorld().getPlayers()) {
             if (nearby.getLocation().distanceSquared(loc) > 128 * 128) continue;
-            if (isPhantom) {
-                // Phantoms are opt-in per player: default OFF means no phantoms spawn near them.
-                if (!this.isSettingEnabledCached(nearby.getUniqueId(), "phantom_spawns")) {
-                    e.setCancelled(true);
-                    return;
-                }
-            } else if (this.isSettingEnabledCached(nearby.getUniqueId(), "disable_mob_spawns")) {
+            if (!this.isSettingEnabledCached(nearby.getUniqueId(), "mob_spawns")) {
                 e.setCancelled(true);
                 return;
             }
@@ -3148,15 +3847,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // auto-runs (single miss-click confidence) or gets a clickable "Did you mean /rtp?" message.
     // Staff-only commands are never suggested to players who lack them.
     private static final java.util.Set<String> CMD_SUGGEST_STAFF_PREFIXES = java.util.Set.of(
-        "admin", "punish", "offend", "unoffend", "sus", "suspicious", "moderation", "freeze", "unfreeze",
-        "stash", "spawnstash", "pizzaplus", "maintenance", "maintenancemotd", "limbomaint", "limbo",
-        "region", "branding", "vdthrottle", "sfmode", "staffmode", "gmcbypass", "atrack", "servermaint",
-        "invsee", "vanish", "sudo", "eco", "lp", "luckperms", "gtp", "admindelhome", "ecobot", "queuetest");
+        "admin", "manage", "nuke", "punish", "offend", "unoffend", "sus", "suspicious", "moderation",
+        "freeze", "unfreeze", "stash", "spawnstash", "pizzaplus", "maintenance", "maintenancemotd",
+        "limbomaint", "limbo", "region", "branding", "vdthrottle", "sfmode", "staffmode", "gmcbypass",
+        "atrack", "servermaint", "invsee", "vanish", "sudo", "eco", "lp", "luckperms", "gtp",
+        "admindelhome", "ecobot", "queuetest", "hubbypass", "hubedit",
+        "sethubspawn", "addafkspot", "clearafkspots", "setmoneyboard");
 
     private boolean knownCommand(String label) {
         return Bukkit.getCommandMap().getKnownCommands().containsKey(label.toLowerCase(Locale.ROOT));
     }
-
     /** Can this player be shown/offered {@code cand} as a correction? (never leak staff commands) */
     private boolean cmdSuggestable(Player pl, boolean staff, String cand, org.bukkit.command.Command cmd) {
         if (cand.length() < 2 || cand.indexOf(':') >= 0) return false;
@@ -3345,6 +4045,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if ("shop_back_main".equals(id)) {
             this.openShopMain(p);
+            return;
+        }
+        if ("pvp_shop_open".equals(id)) {
+            this.openPvpShop(p);
             return;
         }
         if (id.startsWith("shop_main_open:")) {
@@ -3541,6 +4245,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.routeWarpLikeCommand(p, args[0].toLowerCase());
                 break;
             }
+            case "setmoneyboard": {
+                this.handleSetMoneyBoard(p);
+                break;
+            }
             case "rtp": {
                 this.handleRtpCommand(p, args);
                 break;
@@ -3548,6 +4256,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             case "rtpq":
             case "rtpqueue": {
                 this.handleRtpQueueCommand(p, args);
+                break;
+            }
+            case "duel":
+            case "1v1": {
+                if (!p.hasPermission("pizzasmp.use.duel")) { p.sendMessage("§cThis command does not exist."); return true; }
+                this.handleDuelCommand(p, args);
+                break;
+            }
+            case "spectate":
+            case "spec": {
+                if (!p.hasPermission("pizzasmp.use.spectate")) { p.sendMessage("§cThis command does not exist."); return true; }
+                this.handleSpectateCommand(p, args);
                 break;
             }
             case "nv":
@@ -3993,7 +4713,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return true;
     }
-
     private boolean handleCrossServerRoutePreprocess(Player player, String label, String[] split, String rawMessage) {
         switch (label) {
             case "ah":
@@ -4082,7 +4801,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return false;
         }
         if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot teleport."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, normalized);
             return true;
         }
@@ -4094,7 +4813,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.createRemoteTeleportRequest(player, target, "tpahere".equals(normalized) ? "TPAHERE" : "TPA");
         return true;
     }
-
     private void createRemoteTeleportRequest(Player requester, OnlinePlayerSession target, String requestType) {
         if (requester == null || target == null || requestType == null) {
             return;
@@ -4127,7 +4845,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return false;
         }
         if (this.isCombatTagged(accepter)) {
-            accepter.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot teleport."));
+            accepter.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(accepter, "tpaccept");
             return true;
         }
@@ -4159,7 +4877,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
         return true;
     }
-
     private boolean handleRemoteTeleportDeny(Player denier, String requesterFilter) {
         if (denier == null) {
             return false;
@@ -4269,7 +4986,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return false;
         }
     }
-
     /*
      * Enabled aggressive block sorting
      * Enabled unnecessary exception pruning
@@ -4384,7 +5100,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return defaultValue;
     }
-
     /*
      * Enabled aggressive block sorting
      * Enabled unnecessary exception pruning
@@ -4424,7 +5139,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         if (this.isCombatTagged(player) && ("homes".equals(capabilityName) || "afk".equals(capabilityName))) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot teleport."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, capabilityName);
             return;
         }
@@ -4446,14 +5161,722 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.connectToServer(player, normalizedTarget);
     }
 
+    // ============================================================================
+    // Hub worlds: spawn + AFK. Loaded on enable, fully protected (no mobs / PvP / damage / block edits
+    // except staff bypass). Teleport points are config-driven (hub.* in config.yml).
+    // ============================================================================
+
+    private void loadHubWorlds() {
+        for (String name : HUB_WORLDS) {
+            try {
+                World w = Bukkit.getWorld(name);
+                if (w == null) {
+                    java.io.File dir = new java.io.File(Bukkit.getWorldContainer(), name);
+                    if (!dir.isDirectory()) { this.getLogger().warning("[hub] world folder missing: " + name + " (place it in the server root)"); continue; }
+                    w = Bukkit.createWorld(new org.bukkit.WorldCreator(name));   // overworld void (generator from level.dat)
+                }
+                if (w == null) { this.getLogger().warning("[hub] failed to load world " + name); continue; }
+                w.setPVP(false);
+                w.setDifficulty(org.bukkit.Difficulty.PEACEFUL);
+                try { w.setGameRule(org.bukkit.GameRule.DO_MOB_SPAWNING, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.DO_MOB_LOOT, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.DO_ENTITY_DROPS, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.DO_TILE_DROPS, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.MOB_GRIEFING, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.DO_FIRE_TICK, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.TNT_EXPLODES, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.RANDOM_TICK_SPEED, 0); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.FALL_DAMAGE, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.FIRE_DAMAGE, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.DROWNING_DAMAGE, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.FREEZE_DAMAGE, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.DO_WEATHER_CYCLE, false); } catch (Throwable ignored) {}
+                try { w.setGameRule(org.bukkit.GameRule.DO_DAYLIGHT_CYCLE, false); } catch (Throwable ignored) {}
+                try { w.setStorm(false); w.setThundering(false); } catch (Throwable ignored) {}
+                if (HUB_AFK_WORLD.equals(name)) { try { w.setTime(18000L); } catch (Throwable ignored) {} }   // perpetual night
+                this.getLogger().info("[hub] loaded protected world '" + name + "' spawn=" + w.getSpawnLocation());
+            } catch (Throwable t) {
+                this.getLogger().warning("[hub] error loading " + name + ": " + t.getMessage());
+            }
+        }
+    }
+
+    private boolean hubWorldsReady() { return Bukkit.getWorld(HUB_SPAWN_WORLD) != null; }
+    private boolean isHubWorld(org.bukkit.World w) { return w != null && HUB_WORLDS.contains(w.getName()); }
+    private boolean canEditHub(Player p) {
+        return p != null && p.hasPermission(PERM_HUB_BYPASS)
+            && this.hubBypassPlayers.contains(p.getUniqueId());
+    }
+
+    // Spawn teleport point: config hub.spawn.* if set, else the world's own spawn.
+    private Location hubSpawnLocation() {
+        World w = Bukkit.getWorld(HUB_SPAWN_WORLD);
+        if (w == null) return null;
+        if (this.settings.isSet("hub.spawn.x")) {
+            return new Location(w, this.settings.getDouble("hub.spawn.x"), this.settings.getDouble("hub.spawn.y"),
+                this.settings.getDouble("hub.spawn.z"),
+                (float) this.settings.getDouble("hub.spawn.yaw", 0.0), (float) this.settings.getDouble("hub.spawn.pitch", 0.0));
+        }
+        return w.getSpawnLocation();
+    }
+
+    // AFK teleport point: a random entry from config hub.afk-spots (list of {x,y,z,yaw,pitch}); else the
+    // AFK world's own spawn.
+    private Location hubAfkLocation() {
+        World w = Bukkit.getWorld(HUB_AFK_WORLD);
+        if (w == null) return null;
+        java.util.List<java.util.Map<?, ?>> spots = this.settings.getMapList("hub.afk-spots");
+        if (spots != null && !spots.isEmpty()) {
+            try {
+                java.util.Map<?, ?> m = spots.get(ThreadLocalRandom.current().nextInt(spots.size()));
+                return new Location(w,
+                    ((Number) m.get("x")).doubleValue(), ((Number) m.get("y")).doubleValue(), ((Number) m.get("z")).doubleValue(),
+                    m.get("yaw") == null ? 0f : ((Number) m.get("yaw")).floatValue(),
+                    m.get("pitch") == null ? 0f : ((Number) m.get("pitch")).floatValue());
+            } catch (Throwable ignored) {}
+        }
+        return w.getSpawnLocation();
+    }
+
+    private void teleportToHubSpawn(Player p) {
+        Location loc = this.hubSpawnLocation();
+        if (loc == null) { p.sendActionBar(Component.text("§cSpawn is unavailable right now.")); return; }
+        p.teleportAsync(loc).thenAccept(ok -> this.runOnPlayerThread(p, () -> {
+            if (ok && p.isOnline()) { p.setFallDistance(0f); this.applyHubFlight(p); }
+        }));
+    }
+
+    private boolean isElytraEquipped(Player p) {
+        if (p == null) return false;
+        ItemStack chestplate = p.getInventory().getChestplate();
+        return chestplate != null && chestplate.getType() == Material.ELYTRA;
+    }
+
+    // Essentials is configured to preserve flight for this permission across world changes.
+    private boolean hasExternalFlightEntitlement(Player p) {
+        return p.hasPermission("essentials.fly");
+    }
+
+    private void clearHubDoubleJumpFlight(Player p) {
+        if (p == null) return;
+        Boolean previousAllowFlight = this.hubDoubleJumpPreviousAllowFlight.remove(p.getUniqueId());
+        if (previousAllowFlight == null) return;
+        if (p.getGameMode() == GameMode.CREATIVE || p.getGameMode() == GameMode.SPECTATOR
+                || this.hasExternalFlightEntitlement(p)) return;
+        p.setFlying(false);
+        p.setAllowFlight(previousAllowFlight.booleanValue());
+    }
+
+    // Enable double-jump (flight ability, not actual flying) for an eligible player in spawn. An
+    // equipped elytra wins: leaving allowFlight off lets vanilla receive the glide input normally.
+    private void applyHubFlight(Player p) {
+        this.applyHubFlight(p, this.isElytraEquipped(p));
+    }
+
+    private void applyHubFlight(Player p, boolean elytraEquipped) {
+        if (p == null || !p.isOnline()) return;
+        if (!HUB_SPAWN_WORLD.equals(p.getWorld().getName())
+                || p.getGameMode() == GameMode.CREATIVE || p.getGameMode() == GameMode.SPECTATOR
+                || this.hasExternalFlightEntitlement(p)) {
+            this.clearHubDoubleJumpFlight(p);
+            return;
+        }
+        if (elytraEquipped) {
+            this.clearHubDoubleJumpFlight(p);
+            return;
+        }
+        this.hubDoubleJumpPreviousAllowFlight.putIfAbsent(p.getUniqueId(), p.getAllowFlight());
+        if (!p.getAllowFlight()) {
+            p.setAllowFlight(true);
+        }
+    }
+
+    // Armor-change covers shift-click, hotbar swaps, dispensers, and an elytra breaking while worn.
+    // Use the event's new item because the inventory may not yet expose the new chestplate in this tick.
+    @EventHandler
+    public void onHubChestArmorChange(PlayerArmorChangeEvent e) {
+        if (e.getSlotType() != PlayerArmorChangeEvent.SlotType.CHEST) return;
+        Player p = e.getPlayer();
+        if (!HUB_SPAWN_WORLD.equals(p.getWorld().getName())) return;
+        if (e.getNewItem() != null && e.getNewItem().getType() == Material.ELYTRA) {
+            this.applyHubFlight(p, true);
+        } else {
+            this.applyHubFlight(p, false);
+        }
+    }
+
+    // Double-jump: in spawn, the flight toggle (double-tap space) launches the player instead of flying.
+    @EventHandler(ignoreCancelled = true)
+    public void onHubDoubleJump(org.bukkit.event.player.PlayerToggleFlightEvent e) {
+        Player p = e.getPlayer();
+        if (!HUB_SPAWN_WORLD.equals(p.getWorld().getName())) return;
+        if (p.getGameMode() == GameMode.CREATIVE || p.getGameMode() == GameMode.SPECTATOR) return;
+        if (!e.isFlying()) return;
+        if (this.isElytraEquipped(p)) {
+            // A stale client flight-toggle packet may race the armor-change event. Never turn that
+            // race into artificial flight; the next jump uses vanilla elytra gliding.
+            e.setCancelled(true);
+            this.clearHubDoubleJumpFlight(p);
+            return;
+        }
+        if (!this.hubDoubleJumpPreviousAllowFlight.containsKey(p.getUniqueId())) return;
+        e.setCancelled(true);
+        org.bukkit.util.Vector v = p.getLocation().getDirection().normalize().multiply(0.9);
+        v.setY(0.9);
+        p.setVelocity(v);
+        p.setFallDistance(0f);
+        p.setAllowFlight(true);   // keep the double-jump available next time
+        try { p.playSound(p, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, org.bukkit.SoundCategory.MASTER, 0.7f, 1.4f); } catch (Throwable ignored) {}
+    }
+
+    // Grant double-jump on entering spawn; revoke only the temporary ability that PNC granted.
+    @EventHandler
+    public void onHubWorldChange(org.bukkit.event.player.PlayerChangedWorldEvent e) {
+        Player p = e.getPlayer();
+        if (HUB_SPAWN_WORLD.equals(p.getWorld().getName())) {
+            this.applyHubFlight(p);
+            this.showHubMoneyLeaderboardTo(p);
+        } else if (HUB_SPAWN_WORLD.equals(e.getFrom().getName())) {
+            this.clearHubDoubleJumpFlight(p);
+            this.removeHubMoneyLeaderboardViewer(p);
+        }
+    }
+
+    private void teleportToHubAfk(Player p) {
+        Location loc = this.hubAfkLocation();
+        if (loc == null) { p.sendActionBar(Component.text("§cThe AFK area is unavailable right now.")); return; }
+        p.teleportAsync(loc).thenAccept(ok -> this.runOnPlayerThread(p, () -> { if (ok && p.isOnline()) p.setFallDistance(0f); }));
+    }
+
+    // Void fall in a hub world -> return to that world's teleport point.
+    private void tickHubVoidRescue() {
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            PlatformScheduler.entityNow(this, p, () -> {
+                if (!p.isOnline()) return;
+                World w = p.getWorld();
+                if (!this.isHubWorld(w)) return;
+                double floor = this.settings.getDouble("hub.void-rescue-y", (double)(w.getMinHeight() + 1));
+                if (p.getLocation().getY() >= floor) return;
+                Location dest = HUB_AFK_WORLD.equals(w.getName()) ? this.hubAfkLocation() : this.hubSpawnLocation();
+                if (dest != null) p.teleportAsync(dest).thenAccept(ok -> this.runOnPlayerThread(p, () -> {
+                    if (ok && p.isOnline()) p.setFallDistance(0f);
+                }));
+            }, null);
+        }
+    }
+
+    // ---- Hub protection ----
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubDamage(EntityDamageEvent e) {
+        if (!this.isHubWorld(e.getEntity().getWorld())) return;
+        if (e.getEntity() instanceof Player) {
+            e.setCancelled(true);
+            return;
+        }
+        // Staff in edit mode may remove decorative entities deliberately. Everything else in the
+        // static maps is protected from players, projectiles, fire, explosions, and the environment.
+        if (e instanceof EntityDamageByEntityEvent byEntity
+                && byEntity.getDamager() instanceof Player player && this.canEditHub(player)) return;
+        e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubMobSpawn(org.bukkit.event.entity.CreatureSpawnEvent e) {
+        if (this.isHubWorld(e.getLocation().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubBlockBreak(org.bukkit.event.block.BlockBreakEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld()) && !this.canEditHub(e.getPlayer())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubBlockPlace(org.bukkit.event.block.BlockPlaceEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld()) && !this.canEditHub(e.getPlayer())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubDrop(org.bukkit.event.player.PlayerDropItemEvent e) {
+        if (this.isHubWorld(e.getPlayer().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubBucketEmpty(org.bukkit.event.player.PlayerBucketEmptyEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld()) && !this.canEditHub(e.getPlayer())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubBucketFill(org.bukkit.event.player.PlayerBucketFillEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld()) && !this.canEditHub(e.getPlayer())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubInteract(PlayerInteractEvent e) {
+        if (!this.isHubWorld(e.getPlayer().getWorld()) || this.canEditHub(e.getPlayer())) return;
+        if (e.getAction() == org.bukkit.event.block.Action.PHYSICAL || e.getClickedBlock() != null) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubEntityPlace(org.bukkit.event.entity.EntityPlaceEvent e) {
+        Player player = e.getPlayer();
+        if (this.isHubWorld(e.getEntity().getWorld()) && !this.canEditHub(player)) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubArmorStandManipulate(org.bukkit.event.player.PlayerArmorStandManipulateEvent e) {
+        if (this.isHubWorld(e.getRightClicked().getWorld()) && !this.canEditHub(e.getPlayer())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubHangingPlace(org.bukkit.event.hanging.HangingPlaceEvent e) {
+        if (this.isHubWorld(e.getEntity().getWorld()) && !this.canEditHub(e.getPlayer())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubHangingBreak(org.bukkit.event.hanging.HangingBreakByEntityEvent e) {
+        if (!this.isHubWorld(e.getEntity().getWorld())) return;
+        if (e.getRemover() instanceof Player player && this.canEditHub(player)) return;
+        e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubEntityExplode(org.bukkit.event.entity.EntityExplodeEvent e) {
+        if (this.isHubWorld(e.getLocation().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubBlockExplode(org.bukkit.event.block.BlockExplodeEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubIgnite(org.bukkit.event.block.BlockIgniteEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubBurn(org.bukkit.event.block.BlockBurnEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubSpread(org.bukkit.event.block.BlockSpreadEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubFluidFlow(org.bukkit.event.block.BlockFromToEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubPistonExtend(org.bukkit.event.block.BlockPistonExtendEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubPistonRetract(org.bukkit.event.block.BlockPistonRetractEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubEntityChangeBlock(org.bukkit.event.entity.EntityChangeBlockEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubGrow(org.bukkit.event.block.BlockGrowEvent e) {
+        if (this.isHubWorld(e.getBlock().getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubStructureGrow(org.bukkit.event.world.StructureGrowEvent e) {
+        if (this.isHubWorld(e.getWorld())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubRedstone(org.bukkit.event.block.BlockRedstoneEvent e) {
+        if (e.getBlock().getWorld().getName().equals(HUB_AFK_WORLD)) e.setNewCurrent(e.getOldCurrent());
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubInventoryMove(org.bukkit.event.inventory.InventoryMoveItemEvent e) {
+        Location source = e.getSource().getLocation();
+        Location destination = e.getDestination().getLocation();
+        if ((source != null && source.getWorld() != null && HUB_AFK_WORLD.equals(source.getWorld().getName()))
+                || (destination != null && destination.getWorld() != null
+                    && HUB_AFK_WORLD.equals(destination.getWorld().getName()))) {
+            e.setCancelled(true);
+        }
+    }
+
+    // Toggle whether YOU can edit the protected hub worlds (build in spawn/afk). Staff-gated.
+    private void handleHubBypassCommand(Player p) {
+        if (!p.hasPermission(PERM_HUB_BYPASS)) { p.sendMessage("§cThis command does not exist."); return; }
+        UUID id = p.getUniqueId();
+        if (this.hubBypassPlayers.remove(id)) {
+            p.sendActionBar(this.legacyColorize("&7Hub edit: &cOFF"));
+        } else {
+            this.hubBypassPlayers.add(id);
+            p.sendActionBar(this.legacyColorize("&7Hub edit: &aON&7. You can build in spawn/afk."));
+        }
+    }
+
+    // Stand where you want the spawn point and run /sethubspawn — writes it live (no restart).
+    private void handleSetHubSpawn(Player p) {
+        if (!p.hasPermission(PERM_HUB_BYPASS)) { p.sendMessage("§cThis command does not exist."); return; }
+        if (!HUB_SPAWN_WORLD.equals(p.getWorld().getName())) {
+            p.sendActionBar(this.legacyColorize("&cStand in spawn before setting its arrival point."));
+            return;
+        }
+        Location l = p.getLocation();
+        this.settings.set("hub.spawn.x", l.getX());
+        this.settings.set("hub.spawn.y", l.getY());
+        this.settings.set("hub.spawn.z", l.getZ());
+        this.settings.set("hub.spawn.yaw", (double) l.getYaw());
+        this.settings.set("hub.spawn.pitch", (double) l.getPitch());
+        this.saveConfig();
+        p.sendActionBar(this.legacyColorize(String.format("&aSpawn point set: &f%.1f %.1f %.1f", l.getX(), l.getY(), l.getZ())));
+        this.getLogger().info("[hub] spawn set by " + p.getName() + " -> " + l.getX() + "," + l.getY() + "," + l.getZ() + " yaw=" + l.getYaw());
+    }
+
+    // Stand where you want an AFK point and run /addafkspot — appends it (random-picked on /afk).
+    private void handleAddAfkSpot(Player p) {
+        if (!p.hasPermission(PERM_HUB_BYPASS)) { p.sendMessage("§cThis command does not exist."); return; }
+        if (!HUB_AFK_WORLD.equals(p.getWorld().getName())) {
+            p.sendActionBar(this.legacyColorize("&cStand in the AFK world before adding an AFK spot."));
+            return;
+        }
+        Location l = p.getLocation();
+        java.util.List<Object> spots = new java.util.ArrayList<>();
+        java.util.List<?> existing = this.settings.getList("hub.afk-spots");
+        if (existing != null) spots.addAll(existing);
+        java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("x", l.getX()); m.put("y", l.getY()); m.put("z", l.getZ());
+        m.put("yaw", (double) l.getYaw()); m.put("pitch", (double) l.getPitch());
+        spots.add(m);
+        this.settings.set("hub.afk-spots", spots);
+        this.saveConfig();
+        p.sendActionBar(this.legacyColorize("&aAFK spot added &7(" + spots.size() + " total)"));
+    }
+
+    private void handleClearAfkSpots(Player p) {
+        if (!p.hasPermission(PERM_HUB_BYPASS)) { p.sendMessage("§cThis command does not exist."); return; }
+        this.settings.set("hub.afk-spots", new java.util.ArrayList<>());
+        this.saveConfig();
+        p.sendActionBar(this.legacyColorize("&7Cleared all AFK spots."));
+    }
+
+    // Stand where the heading of the money board should appear and run /setmoneyboard. The location
+    // is intentionally configured in-game like the other hub points, so it is not tied to a map file.
+    private void handleSetMoneyBoard(Player p) {
+        if (!p.hasPermission(PERM_HUB_LEADERBOARD_PLACE)) { p.sendMessage("§cThis command does not exist."); return; }
+        if (!HUB_SPAWN_WORLD.equals(p.getWorld().getName())) {
+            p.sendActionBar(this.legacyColorize("&cStand in spawn before placing the money board."));
+            return;
+        }
+        Location l = p.getLocation();
+        this.settings.set(HUB_MONEY_LEADERBOARD_KEY + ".x", l.getX());
+        this.settings.set(HUB_MONEY_LEADERBOARD_KEY + ".y", l.getY());
+        this.settings.set(HUB_MONEY_LEADERBOARD_KEY + ".z", l.getZ());
+        this.settings.set(HUB_MONEY_LEADERBOARD_KEY + ".yaw", (double)l.getYaw());
+        this.settings.set(HUB_MONEY_LEADERBOARD_KEY + ".pitch", (double)l.getPitch());
+        this.saveConfig();
+        this.removeHubMoneyLeaderboardDisplays();
+        this.scheduleHubMoneyLeaderboardRender();
+        this.requestHubMoneyLeaderboardRefresh();
+        p.sendActionBar(this.legacyColorize(String.format("&aMoney board set: &f%.1f %.1f %.1f", l.getX(), l.getY(), l.getZ())));
+    }
+
+    private boolean hasHubMoneyLeaderboardLocation() {
+        return this.settings.isSet(HUB_MONEY_LEADERBOARD_KEY + ".x")
+            && this.settings.isSet(HUB_MONEY_LEADERBOARD_KEY + ".y")
+            && this.settings.isSet(HUB_MONEY_LEADERBOARD_KEY + ".z");
+    }
+
+    private Location hubMoneyLeaderboardLocation() {
+        World world = Bukkit.getWorld(HUB_SPAWN_WORLD);
+        if (world == null || !this.hasHubMoneyLeaderboardLocation()) return null;
+        return new Location(world,
+            this.settings.getDouble(HUB_MONEY_LEADERBOARD_KEY + ".x"),
+            this.settings.getDouble(HUB_MONEY_LEADERBOARD_KEY + ".y"),
+            this.settings.getDouble(HUB_MONEY_LEADERBOARD_KEY + ".z"),
+            (float)this.settings.getDouble(HUB_MONEY_LEADERBOARD_KEY + ".yaw", 0.0),
+            (float)this.settings.getDouble(HUB_MONEY_LEADERBOARD_KEY + ".pitch", 0.0));
+    }
+
+    private void startHubMoneyLeaderboard() {
+        this.removeHubMoneyLeaderboardDisplays();
+        this.hubMoneyLeaderboardRefreshTask = this.runAsyncRepeatingTask(this::requestHubMoneyLeaderboardRefresh, 20L, 1200L);
+        this.requestHubMoneyLeaderboardRefresh();
+    }
+
+    private void stopHubMoneyLeaderboard() {
+        if (this.hubMoneyLeaderboardRefreshTask != null) {
+            this.hubMoneyLeaderboardRefreshTask.cancel();
+            this.hubMoneyLeaderboardRefreshTask = null;
+        }
+        this.hubMoneyLeaderboardViewers.clear();
+        this.removeHubMoneyLeaderboardDisplays();
+    }
+
+    // The periodic task and joins both call this. The guard keeps a busy database from accumulating
+    // overlapping leaderboard reads while still allowing a newly-arrived spawn viewer to join the cache.
+    private void requestHubMoneyLeaderboardRefresh() {
+        if (this.shuttingDown || !this.hasHubMoneyLeaderboardLocation()
+                || !this.hubMoneyLeaderboardRefreshInFlight.compareAndSet(false, true)) return;
+        this.runAsyncTask(() -> {
+            try {
+                List<BalanceLookupResult> top = this.queryLeaderboard(this.findLbCategory("money"), 10);
+                Map<UUID, LeaderboardViewerRank> ranks = this.queryHubMoneyLeaderboardRanks(this.hubMoneyLeaderboardViewers);
+                this.hubMoneyLeaderboardSnapshot = new MoneyLeaderboardSnapshot(top, ranks);
+                this.scheduleHubMoneyLeaderboardRender();
+            } finally {
+                this.hubMoneyLeaderboardRefreshInFlight.set(false);
+            }
+        });
+    }
+
+    // A single parameterized query gets every spawn viewer's position and balance. This avoids a
+    // query per player and preserves competition ranks for ties (equal balances share a rank).
+    private Map<UUID, LeaderboardViewerRank> queryHubMoneyLeaderboardRanks(Set<UUID> viewerIds) {
+        if (viewerIds == null || viewerIds.isEmpty()) return Map.of();
+        List<UUID> ids = new ArrayList<>(viewerIds);
+        String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
+        String sql = "SELECT p.uuid, COALESCE(b.money, 0) AS value, "
+            + "1 + (SELECT COUNT(*) FROM players ranked_players "
+            + "LEFT JOIN balances ranked_balances ON ranked_balances.uuid=ranked_players.uuid "
+            + "WHERE COALESCE(ranked_balances.money, 0) > COALESCE(b.money, 0)) AS rank "
+            + "FROM players p LEFT JOIN balances b ON b.uuid=p.uuid WHERE p.uuid IN (" + placeholders + ")";
+        Map<UUID, LeaderboardViewerRank> ranks = new HashMap<>();
+        try (Connection conn = this.openSyncConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (int i = 0; i < ids.size(); i++) ps.setString(i + 1, ids.get(i).toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    try {
+                        UUID id = UUID.fromString(rs.getString(1));
+                        ranks.put(id, new LeaderboardViewerRank((int)Math.min(Integer.MAX_VALUE, rs.getLong(3)), rs.getDouble(2)));
+                    } catch (IllegalArgumentException ignored) {}
+                }
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("Hub money leaderboard rank query failed: " + ex.getMessage());
+        }
+        return ranks;
+    }
+
+    // Cross back onto the owning world region before creating or changing a display entity. The
+    // existing plugin supports Folia, where display entities may not be touched from the async query.
+    private void scheduleHubMoneyLeaderboardRender() {
+        Runnable route = () -> {
+            Location location = this.hubMoneyLeaderboardLocation();
+            if (location == null || location.getWorld() == null) return;
+            this.runRegionTask(location.getWorld(), location.getBlockX(), location.getBlockZ(), this::renderHubMoneyLeaderboard);
+        };
+        PlatformScheduler.globalNow(this, route);
+    }
+
+    private void renderHubMoneyLeaderboard() {
+        Location location = this.hubMoneyLeaderboardLocation();
+        if (location == null) return;
+        TextDisplay shared = this.hubMoneyLeaderboardSharedDisplay;
+        if (shared == null || !shared.isValid()) {
+            shared = this.createHubMoneyLeaderboardDisplay(location, true);
+            this.hubMoneyLeaderboardSharedDisplay = shared;
+        }
+        shared.text(this.hubMoneyLeaderboardSharedText());
+        for (UUID id : new ArrayList<>(this.hubMoneyLeaderboardViewers)) {
+            Player player = Bukkit.getPlayer(id);
+            if (player == null || !player.isOnline() || !HUB_SPAWN_WORLD.equals(player.getWorld().getName())) {
+                this.removeHubMoneyLeaderboardViewer(player, id);
+                continue;
+            }
+            this.renderHubMoneyLeaderboardPersonalLine(player, location);
+        }
+    }
+
+    private TextDisplay createHubMoneyLeaderboardDisplay(Location location, boolean shared) {
+        TextDisplay display = location.getWorld().spawn(location, TextDisplay.class, created -> {
+            created.setBillboard(org.bukkit.entity.Display.Billboard.CENTER);
+            created.setAlignment(TextDisplay.TextAlignment.CENTER);
+            created.setDefaultBackground(false);
+            created.setSeeThrough(true);
+            created.setShadowed(true);
+            created.setViewRange(48.0f);
+            created.setDisplayWidth(6.0f);
+            created.setDisplayHeight(shared ? 4.0f : 0.35f);
+            created.setPersistent(false);
+            created.setInvulnerable(true);
+            created.getPersistentDataContainer().set(this.hubLeaderboardKindKey, PersistentDataType.STRING,
+                shared ? "money_shared" : "money_personal");
+            if (!shared) created.setVisibleByDefault(false);
+        });
+        return display;
+    }
+
+    private Component hubMoneyLeaderboardSharedText() {
+        Component text = Component.text("Most Money", NamedTextColor.GOLD);
+        List<BalanceLookupResult> top = this.hubMoneyLeaderboardSnapshot.top();
+        if (top.isEmpty()) return text.append(Component.newline()).append(Component.text("Loading…", NamedTextColor.GRAY));
+        for (int i = 0; i < top.size(); i++) {
+            BalanceLookupResult entry = top.get(i);
+            text = text.append(Component.newline())
+                .append(Component.text("#" + (i + 1) + " ", NamedTextColor.YELLOW))
+                .append(Component.text(entry.username() + " ", NamedTextColor.WHITE))
+                .append(Component.text("$" + this.fmtMoney(entry.balance()), NamedTextColor.GREEN));
+        }
+        return text;
+    }
+
+    private Component hubMoneyLeaderboardPersonalText(UUID viewerId) {
+        LeaderboardViewerRank rank = this.hubMoneyLeaderboardSnapshot.ranks().get(viewerId);
+        if (rank == null) return Component.text("Your rank is loading…", NamedTextColor.GRAY);
+        return Component.text("#" + rank.rank() + " ", NamedTextColor.YELLOW)
+            .append(Component.text("You: ", NamedTextColor.WHITE))
+            .append(Component.text("$" + this.fmtMoney(rank.value()), NamedTextColor.GREEN));
+    }
+
+    private void renderHubMoneyLeaderboardPersonalLine(Player player, Location boardLocation) {
+        UUID id = player.getUniqueId();
+        TextDisplay display = this.hubMoneyLeaderboardPersonalDisplays.get(id);
+        if (display == null || !display.isValid()) {
+            // Ten text rows occupy roughly 2.5 blocks; keep the personal line just below the board.
+            display = this.createHubMoneyLeaderboardDisplay(boardLocation.clone().add(0.0, -2.9, 0.0), false);
+            this.hubMoneyLeaderboardPersonalDisplays.put(id, display);
+        }
+        display.text(this.hubMoneyLeaderboardPersonalText(id));
+        player.showEntity((Plugin)this, display);
+    }
+
+    private void showHubMoneyLeaderboardTo(Player player) {
+        if (player == null || !player.isOnline() || !HUB_SPAWN_WORLD.equals(player.getWorld().getName())
+                || !this.hasHubMoneyLeaderboardLocation()) return;
+        UUID id = player.getUniqueId();
+        this.hubMoneyLeaderboardViewers.add(id);
+        this.scheduleHubMoneyLeaderboardRender();
+        if (!this.hubMoneyLeaderboardSnapshot.ranks().containsKey(id)) this.requestHubMoneyLeaderboardRefresh();
+    }
+
+    private void removeHubMoneyLeaderboardViewer(Player player) {
+        this.removeHubMoneyLeaderboardViewer(player, player == null ? null : player.getUniqueId());
+    }
+
+    private void removeHubMoneyLeaderboardViewer(Player player, UUID id) {
+        if (id == null) return;
+        this.hubMoneyLeaderboardViewers.remove(id);
+        TextDisplay display = this.hubMoneyLeaderboardPersonalDisplays.remove(id);
+        if (display == null) return;
+        try { if (player != null && player.isOnline()) player.hideEntity((Plugin)this, display); } catch (Throwable ignored) {}
+        try { display.remove(); } catch (Throwable ignored) {}
+    }
+
+    // Marker cleanup handles a reload or an interrupted shutdown without touching map-authored displays.
+    private void removeHubMoneyLeaderboardDisplays() {
+        TextDisplay shared = this.hubMoneyLeaderboardSharedDisplay;
+        this.hubMoneyLeaderboardSharedDisplay = null;
+        if (shared != null) { try { shared.remove(); } catch (Throwable ignored) {} }
+        for (TextDisplay display : this.hubMoneyLeaderboardPersonalDisplays.values()) {
+            try { display.remove(); } catch (Throwable ignored) {}
+        }
+        this.hubMoneyLeaderboardPersonalDisplays.clear();
+        World world = Bukkit.getWorld(HUB_SPAWN_WORLD);
+        if (world == null || this.hubLeaderboardKindKey == null) return;
+        for (TextDisplay display : world.getEntitiesByClass(TextDisplay.class)) {
+            if (display.getPersistentDataContainer().has(this.hubLeaderboardKindKey, PersistentDataType.STRING)) display.remove();
+        }
+    }
+
+    // General coordinate share: prints AND logs your exact position so it can be picked up easily.
+    private void handleWherePos(Player p) {
+        Location l = p.getLocation();
+        String s = String.format("%s x=%.2f y=%.2f z=%.2f yaw=%.1f pitch=%.1f", l.getWorld().getName(),
+            l.getX(), l.getY(), l.getZ(), l.getYaw(), l.getPitch());
+        p.sendMessage(this.legacyColorize("&7Your position: &f" + s));
+        this.getLogger().info("[pos] " + p.getName() + " -> " + s);
+    }
+
+    // End portal in the spawn world links to the AFK area.
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onHubEndPortal(org.bukkit.event.player.PlayerPortalEvent e) {
+        if (e.getFrom() == null || e.getFrom().getWorld() == null || !HUB_SPAWN_WORLD.equals(e.getFrom().getWorld().getName())) return;
+        if (e.getCause() != org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.END_PORTAL) return;
+        e.setCancelled(true);
+        Player p = e.getPlayer();
+        this.runPlayerTaskLater(p, () -> this.teleportToHubAfk(p), 1L);
+    }
+
+    // Keep players on the build: an automatic void-edge guard (no config needed) plus an optional
+    // configured radius for the spawn world. Staff/flying/creative move freely.
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onHubBorderMove(PlayerMoveEvent e) {
+        Player p = e.getPlayer();
+        if (!this.isHubWorld(p.getWorld())) return;
+        if (p.getGameMode() == GameMode.CREATIVE || p.getGameMode() == GameMode.SPECTATOR
+                || p.isFlying() || p.isGliding()) return;
+        Location from = e.getFrom(), to = e.getTo();
+        if (to == null || to.getWorld() == null) return;
+        if (to.getBlockX() == from.getBlockX() && to.getBlockZ() == from.getBlockZ()) return;   // only on horizontal block change
+        boolean blocked = false;
+        if (HUB_SPAWN_WORLD.equals(p.getWorld().getName())) {
+            double r = this.settings.getDouble("hub.spawn.border-radius", 0.0);
+            if (r > 0.0) {
+                Location c = this.hubSpawnLocation();
+                if (c != null) {
+                    double dx = to.getX() - c.getX(), dz = to.getZ() - c.getZ();
+                    if (dx * dx + dz * dz > r * r) blocked = true;
+                }
+            }
+        }
+        // Void edge: only when NOT rising (so jumps, stairs, and bubble columns are never blocked) and
+        // only over DEEP void — a normal drop or ledge is fine; the void-fall rescue is the backstop.
+        if (!blocked && to.getY() <= from.getY() + 0.05 && this.isOverDeepVoid(to)) blocked = true;
+        if (blocked) {
+            Location back = from.clone();
+            back.setYaw(to.getYaw()); back.setPitch(to.getPitch());
+            e.setTo(back);
+        }
+    }
+
+    // True only if there's a DEEP column of open air below (a real void edge). Any solid block OR liquid
+    // within reach counts as ground, so ledges, drops, stairs, and water/bubble columns are allowed.
+    private boolean isOverDeepVoid(Location loc) {
+        World w = loc.getWorld();
+        if (w == null) return false;
+        int x = loc.getBlockX(), z = loc.getBlockZ();
+        int scan = Math.min(24, loc.getBlockY() - w.getMinHeight());
+        if (scan < 24) return false;   // not enough room below to be "deep void"
+        for (int i = 1; i <= scan; i++) {
+            org.bukkit.block.Block b = w.getBlockAt(x, loc.getBlockY() - i, z);
+            if (!b.isPassable() || b.isLiquid()) return false;   // solid or liquid within 24 -> not void
+        }
+        return true;
+    }
+
+    // No-bed / no-anchor respawn goes to the hub spawn (LOW so the duel respawn handler at HIGHEST wins).
+    @EventHandler(priority = EventPriority.LOW)
+    public void onHubRespawn(org.bukkit.event.player.PlayerRespawnEvent e) {
+        if (this.activeDuels.containsKey(e.getPlayer().getUniqueId())) return;
+        if (e.isBedSpawn() || e.isAnchorSpawn()) return;
+        Location loc = this.hubSpawnLocation();
+        if (loc != null) e.setRespawnLocation(loc);
+    }
+
     private void routeWarpLikeCommand(Player player, String target) {
         String requestedTarget;
         if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot teleport."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "warp:" + target);
             return;
         }
         String string = requestedTarget = target == null ? "" : target.toLowerCase(Locale.ROOT);
+        // Local hub worlds take priority: /spawn and /afk teleport within THIS server (no cross-server hop).
+        if (("spawn".equals(requestedTarget) || "afk".equals(requestedTarget)) && this.hubWorldsReady()) {
+            if ("afk".equals(requestedTarget)) this.teleportToHubAfk(player);
+            else this.teleportToHubSpawn(player);
+            return;
+        }
         if ("spawn".equals(requestedTarget)) {
             String spawnServer = this.getConfiguredSpawnServer();
             if (this.maintenanceQueueManager != null && this.maintenanceQueueManager.isServerUnderMaintenance(spawnServer)) {
@@ -4497,7 +5920,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.connectToServer(player, "lobby");
                 break;
             }
-            case "survival": 
+            case "survival":
             case "main": {
                 if (this.isServer("survival")) {
                     this.dispatchTeleportCommand(player, "spawn");
@@ -4509,7 +5932,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.connectToServer(player, "survival");
                 break;
             }
-            case "pvp": 
+            case "pvp":
             case "duels": {
                 if (this.isServer("pvp")) {
                     this.dispatchTeleportCommand(player, "spawn");
@@ -4739,7 +6162,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             });
         });
     }
-
     private void handleSellCommand(Player player, String[] args) {
         if (args.length > 0 && "reload".equalsIgnoreCase(args[0])) {
             if (!player.hasPermission("pizzasmp.sell.reload")) {
@@ -4760,47 +6182,140 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 player.sendActionBar((Component)Component.text((String)"\u00a77You are not holding anything."));
                 return;
             }
-            double unit = this.sellUnitPrice(hand.getType());
-            if (unit <= 0.0) {
-                player.sendActionBar((Component)Component.text((String)"\u00a7cThat item has no sell price."));
-                return;
-            }
-            double total = unit * hand.getAmount();
+            // Take the held stack (dupe-safe) and route it: best matching order first, shop price for
+            // the remainder. Even items with no shop price sell if an order (e.g. EcoBot) wants them.
+            ItemStack taken = hand.clone();
             player.getInventory().setItemInMainHand(null);
-            this.depositMoney(player, total);
-            double earned = total;
-            this.runAsyncTask(() -> this.incrementMoneyStat(player.getUniqueId(), "sell_earned", earned));
-            player.sendActionBar((Component)Component.text((String)("\u00a77You sold items for $" + this.fmtMoney(total))));
-            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
-            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SELL_HAND", hand.getType().name(), hand.getAmount(), unit, earned, null);
-            this.notifyFollowers(player.getUniqueId(), player.getName(), "sold items for \u00a7f$" + this.fmtMoney(total) + "\u00a77.", true);
+            this.sellItemsAsync(player, java.util.List.of(taken), "SELL_HAND", true);
             return;
         }
         if (!"all".equalsIgnoreCase(args[0])) {
             player.sendMessage("\u00a77Usage: \u00a7f/sell \u00a77or \u00a7f/sell all \u00a77or \u00a7f/sell hand");
             return;
         }
-        double total = 0.0;
+        // /sell all: take every known-sellable stack (has a shop price) out of the inventory now, then
+        // route each to the highest-paying order first, shop price as the floor for the rest.
+        java.util.List<ItemStack> taken = new java.util.ArrayList<>();
         ItemStack[] contents = player.getInventory().getStorageContents();
         for (int i = 0; i < contents.length; ++i) {
-            double unit;
             ItemStack stack = contents[i];
-            if (stack == null || stack.getType() == Material.AIR || (unit = this.sellUnitPrice(stack.getType())) <= 0.0) continue;
-            total += unit * (double)stack.getAmount();
+            if (stack == null || stack.getType() == Material.AIR || this.sellUnitPrice(stack.getType()) <= 0.0) continue;
+            taken.add(stack.clone());
             contents[i] = null;
         }
-        if (total <= 0.0) {
+        if (taken.isEmpty()) {
             player.sendActionBar((Component)Component.text((String)"\u00a77No sellable items found."));
             return;
         }
         player.getInventory().setStorageContents(contents);
-        this.depositMoney(player, total);
-        double earnedAmount = total;
-        this.runAsyncTask(() -> this.incrementMoneyStat(player.getUniqueId(), "sell_earned", earnedAmount));
-        player.sendActionBar((Component)Component.text((String)("\u00a7a+" + this.fmtMoney(total))));
-        player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
-        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SELL_ALL", "INVENTORY", 1, 0, earnedAmount, null);
-        this.notifyFollowers(player.getUniqueId(), player.getName(), "sold items for \u00a7f$" + this.fmtMoney(total) + "\u00a77.", true);
+        this.sellItemsAsync(player, taken, "SELL_ALL", false);
+    }
+
+    /**
+     * Sells items that have ALREADY been removed from the player's inventory. Dynamic-economy routing:
+     * each stack is delivered into the highest-paying matching active buy order (EcoBot or players,
+     * never the seller's own) at that order's unit price; whatever no order wants falls back to the
+     * fixed shop price; anything with neither is returned to the player. All DB work is async.
+     */
+    private void sellItemsAsync(Player player, java.util.List<ItemStack> items, String auditTag, boolean handMode) {
+        UUID id = player.getUniqueId();
+        this.runAsyncTask(() -> {
+            double orderPayout = 0.0;
+            double shopPayout = 0.0;
+            int orderSold = 0;
+            java.util.List<ItemStack> unsold = new java.util.ArrayList<>();
+            for (ItemStack stack : items) {
+                if (stack == null || stack.getType() == Material.AIR) continue;
+                Material mat = stack.getType();
+                int remaining = stack.getAmount();
+                double baseUnit = this.sellUnitPrice(mat);        // order floor / plain-item shop price
+                double perItem = this.getItemWorth(stack);        // shulkers -> summed contents + box worth
+                // Filled shulkers aren't order-routed (a wildcard order would pay only the box price and
+                // lose the contents); they sell at their contents worth.
+                boolean special = mat.name().contains("SHULKER");
+                // 1) orders first, but ONLY orders paying MORE than the base shop worth (so selling
+                //    never earns less than /sell would). Orders at/below base worth fall to the shop floor.
+                if (!special && baseUnit > 0.0) {
+                    double[] r = this.sellMaterialToBestOrders(id, mat, remaining, stack, Math.max(0.0, baseUnit));
+                    int sold = (int) r[0];
+                    orderSold += sold;
+                    orderPayout += r[1];
+                    remaining -= sold;
+                }
+                // 2) base worth for the remainder (getItemWorth covers shulker contents)
+                if (remaining > 0 && perItem > 0.0) {
+                    shopPayout += perItem * remaining;
+                    remaining = 0;
+                }
+                // 3) nothing wanted it -> hand it back
+                if (remaining > 0) {
+                    ItemStack back = stack.clone();
+                    back.setAmount(remaining);
+                    unsold.add(back);
+                }
+            }
+            final double totalPayout = orderPayout + shopPayout;
+            final int fOrderSold = orderSold;
+            this.runOnPlayerThread(player, () -> {
+                if (totalPayout > 0.0) {
+                    this.depositMoney(player, totalPayout);
+                    this.runAsyncTask(() -> this.incrementMoneyStat(id, "sell_earned", totalPayout));
+                }
+                for (ItemStack u : unsold) {
+                    for (ItemStack leftover : player.getInventory().addItem(u).values()) {
+                        player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+                    }
+                }
+                if (totalPayout <= 0.0) {
+                    player.sendActionBar((Component)Component.text((String)(handMode ? "\u00a7cThat item has no sell price." : "\u00a77No sellable items found.")));
+                    return;
+                }
+                player.sendActionBar((Component)Component.text((String)(handMode
+                    ? "\u00a77You sold items for $" + this.fmtMoney(totalPayout)
+                    : "\u00a7a+" + this.fmtMoney(totalPayout))));
+                player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
+                this.logTransactionAudit(id.toString(), player.getName(), auditTag, "INVENTORY", 1, 0, totalPayout,
+                    fOrderSold > 0 ? "orders=" + fOrderSold : null);
+                this.notifyFollowers(id, player.getName(), "sold items for \u00a7f$" + this.fmtMoney(totalPayout) + "\u00a77.", true);
+            });
+        });
+    }
+
+    /**
+     * Drains {@code amount} of {@code mat} into the highest-priced active wildcard buy orders (price
+     * descending), paying each order's unit price, never the seller's own order. Reuses
+     * applyOrderDelivery (which fills the order + records the delivery + returns the payout). Returns
+     * {@code [soldCount, totalPayout]}. Call ASYNC \u2014 it does its own DB work.
+     */
+    private double[] sellMaterialToBestOrders(UUID seller, Material mat, int amount, ItemStack preview, double minUnitPrice) {
+        double payout = 0.0;
+        int sold = 0;
+        int remaining = amount;
+        int guard = 0;
+        while (remaining > 0 && guard++ < 500) {
+            long orderId = -1L;
+            try (Connection conn = this.openSyncConnection();
+                 PreparedStatement ps = conn.prepareStatement(
+                    "SELECT id FROM order_listings WHERE status='ACTIVE' AND item_key=? AND enchant_spec='*' "
+                  + "AND creator_uuid<>? AND amount_filled<amount_total AND unit_price>? "
+                  + "AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP) ORDER BY unit_price DESC, id ASC LIMIT 1")) {
+                ps.setString(1, mat.name());
+                ps.setString(2, seller.toString());
+                ps.setDouble(3, minUnitPrice);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) orderId = rs.getLong(1);
+                }
+            } catch (Exception ex) {
+                break;
+            }
+            if (orderId < 0L) break;
+            OrderDeliveryApplyResult res = this.applyOrderDelivery(orderId, seller, mat, remaining, preview);
+            if (res == null || res.amount() <= 0) break;   // race (someone else filled it) -> stop
+            sold += res.amount();
+            remaining -= res.amount();
+            payout += res.payout();
+        }
+        return new double[]{ sold, payout };
     }
 
     private void openSellGui(Player player) {
@@ -4851,34 +6366,17 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void processSellGuiOnClose(Player player, Inventory inv) {
-        double total = 0.0;
-        ArrayList<ItemStack> unsellable = new ArrayList<ItemStack>();
+        // Route the GUI's items through the same order-aware path as /sell (orders above base worth
+        // first, then base worth, unsellable returned). getItemWorth inside handles shulker contents.
+        java.util.List<ItemStack> items = new java.util.ArrayList<>();
         for (int slot = 0; slot < 36; ++slot) {
             ItemStack stack;
             if (!this.isSellGuiInsertSlot(slot) || (stack = inv.getItem(slot)) == null || stack.getType() == Material.AIR) continue;
-            stack = this.stripSellWorthMarker(stack);
-            double unit = this.getItemWorth(stack);
-            if (unit <= 0.0) {
-                unsellable.add(stack.clone());
-                continue;
-            }
-            // getItemWorth is per-item (shulkers return whole-box worth with amount 1)
-            total += unit * (double)stack.getAmount();
+            items.add(this.stripSellWorthMarker(stack));
             inv.setItem(slot, null);
         }
-        if (total > 0.0) {
-            this.depositMoney(player, total);
-            double earnedAmount = total;
-            this.runAsyncTask(() -> this.incrementMoneyStat(player.getUniqueId(), "sell_earned", earnedAmount));
-            player.sendActionBar((Component)Component.text((String)("\u00a7a+" + this.fmtMoney(total))));
-            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
-        }
-        for (ItemStack item : unsellable) {
-            HashMap leftovers = player.getInventory().addItem(new ItemStack[]{item});
-            if (leftovers.isEmpty()) continue;
-            for (Object left : leftovers.values()) {
-                player.getWorld().dropItemNaturally(player.getLocation(), (ItemStack)left);
-            }
+        if (!items.isEmpty()) {
+            this.sellItemsAsync(player, items, "SELL_GUI", false);
         }
     }
 
@@ -5191,7 +6689,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (slot == TEAM_HOME_SET_SLOT) {
             if (this.isCombatTagged(player)) {
-                player.sendActionBar((Component)Component.text("\u00a7cYou are in combat! Cannot set homes."));
+                player.sendActionBar((Component)Component.text("\u00a7cYou can't do this in combat"));
                 this.logCombatBlocked(player, "teamhome_set");
                 return;
             }
@@ -5237,7 +6735,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (current.getType() == Material.GRAY_BED) {
             if (this.isCombatTagged(player)) {
-                player.sendActionBar((Component)Component.text("\u00a7cYou are in combat! Cannot set homes."));
+                player.sendActionBar((Component)Component.text("\u00a7cYou can't do this in combat"));
                 this.logCombatBlocked(player, "home_set");
                 return;
             }
@@ -5368,7 +6866,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot teleport."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "teamhome_tp");
             return;
         }
@@ -5386,7 +6884,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot teleport."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "home_tp");
             return;
         }
@@ -5431,7 +6929,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot teleport."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "home_tp_execute");
             return;
         }
@@ -5758,7 +7256,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot set homes."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "teamhome_set");
             return;
         }
@@ -5780,28 +7278,24 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * Exception decompiling
      */
     private boolean setTeamHome(UUID uuid, Location location) {
-        /*
-         * This method has failed to decompile.  When submitting a bug report, please provide this stack trace, and (if you hold appropriate legal rights) the relevant class file.
-         * 
-         * org.benf.cfr.reader.util.ConfusedCFRException: Tried to end blocks [14[TRYBLOCK]], but top level block is 36[DOLOOP]
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement.processEndingBlocks(Op04StructuredStatement.java:435)
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement.buildNestedBlocks(Op04StructuredStatement.java:484)
-         *     at org.benf.cfr.reader.bytecode.analysis.opgraph.Op03SimpleStatement.createInitialStructuredBlock(Op03SimpleStatement.java:736)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysisInner(CodeAnalyser.java:850)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysisOrWrapFail(CodeAnalyser.java:278)
-         *     at org.benf.cfr.reader.bytecode.CodeAnalyser.getAnalysis(CodeAnalyser.java:201)
-         *     at org.benf.cfr.reader.entities.attributes.AttributeCode.analyse(AttributeCode.java:94)
-         *     at org.benf.cfr.reader.entities.Method.analyse(Method.java:531)
-         *     at org.benf.cfr.reader.entities.ClassFile.analyseMid(ClassFile.java:1055)
-         *     at org.benf.cfr.reader.entities.ClassFile.analyseTop(ClassFile.java:942)
-         *     at org.benf.cfr.reader.Driver.doJarVersionTypes(Driver.java:257)
-         *     at org.benf.cfr.reader.Driver.doJar(Driver.java:139)
-         *     at org.benf.cfr.reader.CfrDriverImpl.analyse(CfrDriverImpl.java:76)
-         *     at org.benf.cfr.reader.Main.main(Main.java:54)
-         */
-        throw new IllegalStateException("Decompilation failed");
+        String sql = "UPDATE teams t JOIN team_members tm ON tm.team_id = t.id "
+            + "SET t.home_world=?, t.home_x=?, t.home_y=?, t.home_z=?, t.home_yaw=?, t.home_pitch=? "
+            + "WHERE tm.member_uuid=?";
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, location.getWorld().getName());
+            ps.setDouble(2, location.getX());
+            ps.setDouble(3, location.getY());
+            ps.setDouble(4, location.getZ());
+            ps.setFloat(5, location.getYaw());
+            ps.setFloat(6, location.getPitch());
+            ps.setString(7, uuid.toString());
+            return ps.executeUpdate() > 0;
+        } catch (SQLException ex) {
+            this.getLogger().warning("[teamhome] setTeamHome failed: " + ex.getMessage());
+            return false;
+        }
     }
-
     private void clearTeamHome(UUID uuid) {
         if (uuid == null) {
             return;
@@ -5893,23 +7387,24 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void handleAdminDelHome(Player admin, String targetName, String homeName) {
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+        PlatformScheduler.asyncNow(this, () -> {
             String sql = "SELECT uuid FROM players WHERE LOWER(username)=LOWER(?) LIMIT 1";
             try (Connection conn = this.openSyncConnection();
                  PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, targetName);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) {
-                        Bukkit.getScheduler().runTask(this, () -> admin.sendMessage("§cPlayer not found: §f" + targetName));
+                        this.runOnPlayerThread(admin, () -> admin.sendMessage("§cPlayer not found: §f" + targetName));
                         return;
                     }
                     UUID targetUuid = UUID.fromString(rs.getString(1));
                     this.deleteHome(targetUuid, homeName);
-                    Bukkit.getScheduler().runTask(this, () -> admin.sendMessage("§aDeleted home §f" + homeName + "§a from §f" + targetName + "§a."));
+                    this.runOnPlayerThread(admin, () -> admin.sendMessage("§aDeleted home §f" + homeName + "§a from §f" + targetName + "§a."));
                 }
             } catch (Exception ex) {
                 this.getLogger().warning("adminDelhome failed: " + ex.getMessage());
-                Bukkit.getScheduler().runTask(this, () -> admin.sendMessage("§cError deleting home: " + ex.getMessage()));
+                String error = ex.getMessage();
+                this.runOnPlayerThread(admin, () -> admin.sendMessage("§cError deleting home: " + error));
             }
         });
     }
@@ -5927,27 +7422,77 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             player.sendMessage("\u00a7cYou do not have permission to use /rtp.");
             return;
         }
-        // Block on combat tag (PvP), NOT on raw damage. Mob/environment hits
-        // never combat-tag and so never block /rtp.
-        if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot use RTP."));
-            this.logCombatBlocked(player, "rtp");
-            return;
-        }
-        // Simplified: no RTP GUI. Bare /rtp goes to the overworld (east); a dimension can be named.
-        if (args.length == 0) {
-            this.startRtpWarmup(player, "overworld", false);
-            return;
-        }
-        String dimension = this.normalizeRtpDimension(args[0]);
+        String dimension = args.length == 0 ? "overworld" : this.normalizeRtpDimension(args[0]);
         if (dimension == null) {
-            // Unmissable feedback (chat + error tone) so an invalid dimension is obviously rejected,
-            // not silently ignored (the old actionbar was easy to miss and read as "RTP'd overworld").
             player.sendMessage(this.legacyColorize("&cUnknown region &f\"" + args[0] + "&f\"&c. Valid: &feast&7/&foverworld&7, &fnether&7, &fend&c."));
             player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 0.7f, 1.0f);
             return;
         }
+        DuelSession duel = this.activeDuels.get(player.getUniqueId());
+        if (duel != null) {
+            this.openDuelRtpConfirmation(player, dimension);
+            return;
+        }
+        // Block on combat tag (PvP), NOT on raw damage. Mob/environment hits
+        // never combat-tag and so never block /rtp.
+        if (this.isCombatTagged(player)) {
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
+            this.logCombatBlocked(player, "rtp");
+            return;
+        }
         this.startRtpWarmup(player, dimension, false);
+    }
+    private void openDuelRtpConfirmation(Player player, String dimension) {
+        if (!this.useDialogUi(player)) {
+            this.openLegacyDuelRtpConfirmation(player, dimension);
+            return;
+        }
+        ActionButton leave = ActionButton.builder(Component.text("Leave and RTP", NamedTextColor.RED)).width(150)
+            .action(DialogAction.customClick((view, aud) -> {
+                if (!(aud instanceof Player pl)) return;
+                DialogCloseCompat.close(pl);
+                this.leaveDuelAndStartRtp(pl, dimension);
+            }, ClickCallback.Options.builder().build())).build();
+        ActionButton stay = ActionButton.builder(Component.text("Stay", NamedTextColor.GREEN)).width(150)
+            .action(DialogAction.customClick((view, aud) -> { if (aud instanceof Player pl) DialogCloseCompat.close(pl); },
+                ClickCallback.Options.builder().build())).build();
+        Dialog dialog = this.buildDialog(Component.text("Leave Duel?", NamedTextColor.RED),
+            List.of(DialogBody.plainMessage(Component.text("Leaving awards the duel and wager to your opponent.", NamedTextColor.GRAY))),
+            List.of(), DialogType.confirmation(leave, stay));
+        if (!DialogCompat.show(player, dialog)) this.openLegacyDuelRtpConfirmation(player, dimension);
+    }
+
+    private void openLegacyDuelRtpConfirmation(Player player, String dimension) {
+        Inventory inventory = Bukkit.createInventory(null, 27, TITLE_DUEL_RTP_CONFIRM);
+        inventory.setItem(11, this.namedWithLore(Material.ENDER_PEARL, "§cLeave duel and use /rtp", "duel_rtp_leave:" + dimension,
+            List.of("§7This ends the duel and forfeits the wager.")));
+        inventory.setItem(15, this.namedWithLore(Material.SHIELD, "§7Stay in duel", "duel_rtp_stay", List.of()));
+        player.openInventory(inventory);
+    }
+
+    private void handleLegacyDuelRtpClick(Player player, ItemStack item) {
+        String action = this.uiActionId(item);
+        if (action == null) return;
+        if ("duel_rtp_stay".equals(action)) {
+            player.closeInventory();
+        } else if (action.startsWith("duel_rtp_leave:")) {
+            String dimension = this.normalizeRtpDimension(action.substring("duel_rtp_leave:".length()));
+            player.closeInventory();
+            if (dimension != null) this.leaveDuelAndStartRtp(player, dimension);
+        }
+    }
+
+    private void leaveDuelAndStartRtp(Player player, String dimension) {
+        DuelSession session = this.activeDuels.get(player.getUniqueId());
+        if (session == null) {
+            this.startRtpWarmup(player, dimension, false);
+        } else if (session.soloTest) {
+            this.finishSoloDuel(session, null, true);
+            this.runPlayerTaskLater(player, () -> this.startRtpWarmup(player, dimension, false), 30L);
+        } else {
+            this.forfeitDuelByChoice(session, player.getUniqueId());
+            this.runPlayerTaskLater(player, () -> this.startRtpWarmup(player, dimension, false), 110L);
+        }
     }
 
     void executeQueuedRtp(Player player, String dimension) {
@@ -5979,13 +7524,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         if (!bypassChecks && this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot use RTP."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "rtp_warmup");
             return;
         }
         UUID uuid = player.getUniqueId();
         // Using /rtp while queued for a duel cancels the duel search (frees any near-match opponent).
-        this.cancelRtpQueue(uuid, null);
+        this.cancelRtpQueue(uuid, null, player);
         // Re-running RTP before the teleport lands is allowed: it just starts another search and
         // teleports again. No "already in progress" denial.
         if (!bypassChecks && !this.canUseRtpNow(player)) {
@@ -6002,7 +7547,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.rtpLog("warmup_ok", "player=" + player.getName() + " dim=" + dimension + " bypass=" + bypassChecks);
         this.beginRtpSearch(player, dimension, bypassChecks);
     }
-
     // Locate a safe destination (async chunk loading), then start the visible countdown.
     private void beginRtpSearch(Player player, String dimension, boolean bypassChecks) {
         UUID uuid = player.getUniqueId();
@@ -6055,7 +7599,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             + " radius=" + (long) plan.minRadius + ".." + (long) plan.maxRadius + " attempts=" + plan.maxAttempts);
         this.rtpAttemptAsync(uuid, plan, dimension, bypassChecks, 0);
     }
-
     /**
      * Cross-server /rtp, over the database.
      *
@@ -6310,7 +7853,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         }
                     });
                 }
-                this.scheduleTask(() -> this.applyResolvedRtp(player, attempt + 1), 200, TimeUnit.MILLISECONDS);
+                PlatformScheduler.globalLater(this, () -> this.applyResolvedRtp(player, attempt + 1), 4L);   // ~200ms
                 return;
             }
             if (!"RESOLVED".equals(status) || world == null) {
@@ -6390,87 +7933,427 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.tickRtpCountdown(uuid);
         }));
     }
-
     // ===== RTP Queue (duels / matchmaking) =====
 
     private void handleRtpQueueCommand(Player player, String[] args) {
         UUID uuid = player.getUniqueId();
-        // No manual cancel: a queued player stays in until matched, timed out, or death/disconnect/combat.
-        if (this.rtpDuelQueue.containsKey(uuid)) {
-            player.sendActionBar(Component.text("§7Already searching for an opponent…"));
+        if (args.length > 0 && "cancel".equalsIgnoreCase(args[0])) {
+            this.scheduleRtpDuelGlobal(() -> {
+                if (Bukkit.getPlayer(uuid) != player) return;
+                if (this.rtpDuelQueue.containsKey(uuid) || this.pendingRtpDuelMatches.containsKey(uuid)
+                        || this.pendingRtpDuelEnqueues.containsKey(uuid)) {
+                    this.cancelRtpQueueOnGlobal(uuid, "Search Cancelled", player, null);
+                } else this.dispatchRtpDuelPlayerAction(uuid, player,
+                    current -> this.showDuelStatusTitle(current, "Not Queued", null));
+            });
+            return;
+        }
+        if (this.activeDuels.containsKey(uuid)) {
+            this.showDuelStatusTitle(player, "Duel Active", null);
             return;
         }
         if (this.isCombatTagged(player)) {
-            player.sendActionBar(Component.text("§cYou are in combat! Cannot queue."));
+            this.showDuelStatusTitle(player, "Unavailable In Combat", null);
             return;
         }
         if (this.maintenanceQueueManager != null && this.maintenanceQueueManager.isServerUnderMaintenance("survival")) {
-            player.sendActionBar(Component.text("§cSurvival is under maintenance. Try again later."));
+            this.showDuelStatusTitle(player, "Survival Unavailable", null);
             return;
         }
+        this.scheduleRtpDuelGlobal(() -> {
+            if (this.shuttingDown || Bukkit.getPlayer(uuid) != player) return;
+            if (this.rtpDuelQueue.containsKey(uuid) || this.pendingRtpDuelMatches.containsKey(uuid)
+                    || this.pendingRtpDuelEnqueues.containsKey(uuid)) {
+                this.dispatchRtpDuelPlayerAction(uuid, player,
+                    current -> this.showDuelStatusTitle(current, "Searching", "Use /rtpq cancel to leave"));
+            } else PlatformScheduler.entityNow(this, player, () -> {
+                if (player.isOnline()) this.showRtpDuelQueuePrompt(player);
+            }, null);
+        });
+    }
+    private void showRtpDuelQueuePrompt(Player player) {
         if (!this.useDialogUi(player)) {
             this.enqueueRtpDuel(player);
             return;
         }
-        // Layout: prompt at the top; No on the left (closes), Yes on the right (searches).
-        ActionButton no = this.dialogButton(Component.text("No", NamedTextColor.RED), null, 120, q -> q.closeDialog());
+        // DialogType.confirmation(yesButton, noButton): first arg is the affirmative. BOTH buttons must
+        // carry a real click action that closes the dialog itself (afterAction is NONE) — matches the
+        // working kill-confirm pattern. The old (no, yes) order bound "search" to the cancel slot, so it
+        // fired without pressing Yes and the buttons appeared dead.
         ActionButton yes = this.dialogButton(Component.text("Yes", NamedTextColor.GREEN), null, 120,
-            pl -> this.runOnPlayerThread(pl, () -> this.enqueueRtpDuel(pl)));
+            pl -> { DialogCloseCompat.close(pl); this.runOnPlayerThread(pl, () -> this.enqueueRtpDuel(pl)); });
+        ActionButton no = this.dialogButton(Component.text("No", NamedTextColor.RED), null, 120,
+            q -> DialogCloseCompat.close(q));
         Dialog dialog = this.buildDialog(Component.text("RTP Queue", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text(
                 "Are you sure you want to randomly teleport with another player?", NamedTextColor.GRAY))),
-            List.of(), DialogType.confirmation(no, yes));
-        player.showDialog(dialog);
+            List.of(), DialogType.confirmation(yes, no));
+        DialogCompat.show(player, dialog);
     }
 
     private void enqueueRtpDuel(Player player) {
+        if (player == null) return;
         UUID uuid = player.getUniqueId();
-        if (this.rtpDuelQueue.containsKey(uuid)) return;
-        Sound disc = RTPQ_DISCS[ThreadLocalRandom.current().nextInt(RTPQ_DISCS.length)];
-        this.rtpDuelQueue.put(uuid, new RtpQueueEntry(this.computeGearScore(player), System.currentTimeMillis(), disc));
-        player.playSound(player.getLocation(), disc, org.bukkit.SoundCategory.RECORDS, 0.6f, 1.0f);
-        player.sendActionBar(this.legacyColorize("&#00BFFFSearching for opponent…"));
+        long requestedAt = System.currentTimeMillis();
+        this.scheduleRtpDuelGlobal(() -> this.beginRtpDuelEnqueue(uuid, player, requestedAt));
     }
 
-    // Remove a player from the duel queue: stop the disc + clear the hotbar; optional message.
-    private void cancelRtpQueue(UUID uuid, String messageOrNull) {
-        RtpQueueEntry entry = this.rtpDuelQueue.remove(uuid);
-        if (entry == null) return;
-        Player p = Bukkit.getPlayer(uuid);
-        if (p != null && p.isOnline()) {
-            try { p.stopSound(entry.disc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) {}
-            if (messageOrNull != null) p.sendActionBar(this.legacyColorize(messageOrNull));
+    private void beginRtpDuelEnqueue(UUID uuid, Player requestedPlayer, long requestedAt) {
+        if (this.shuttingDown) return;
+        Player player = Bukkit.getPlayer(uuid);
+        if (player == null || player != requestedPlayer) return;
+        RtpDuelQueueSession session = this.ensureRtpDuelQueueSession(uuid, player);
+        if (this.rtpDuelQueue.containsKey(uuid) || this.pendingRtpDuelMatches.containsKey(uuid)
+                || this.pendingRtpDuelEnqueues.containsKey(uuid) || this.activeDuels.containsKey(uuid)) return;
+
+        RtpDuelEnqueueRequest request = new RtpDuelEnqueueRequest(uuid, ++this.rtpDuelQueueGeneration,
+            session.generation, requestedAt, player);
+        this.pendingRtpDuelEnqueues.put(uuid, request);
+        PlatformScheduler.TaskHandle enqueueDeadline = PlatformScheduler.globalLater(this, () -> {
+            if (this.pendingRtpDuelEnqueues.get(uuid) == request) {
+                this.completeRtpDuelEnqueue(request, new RtpDuelEligibility(request.requestGeneration,
+                    request.sessionGeneration, false, false, false, true, 0));
+            }
+        }, 40L);
+        if (!enqueueDeadline.wasAccepted()) {
+            this.completeRtpDuelEnqueue(request, new RtpDuelEligibility(request.requestGeneration,
+                request.sessionGeneration, false, false, false, true, 0));
+            return;
+        }
+        PlatformScheduler.TaskHandle capture = PlatformScheduler.entityNow(this, player, () -> {
+            boolean online = player.isOnline();
+            boolean combatTagged = online && this.isCombatTagged(player);
+            boolean participating = this.activeDuels.containsKey(uuid) || this.pendingRtpDuelMatches.containsKey(uuid);
+            int gearScore = online && !combatTagged && !participating ? this.computeGearScore(player) : 0;
+            RtpDuelEligibility snapshot = new RtpDuelEligibility(request.requestGeneration,
+                request.sessionGeneration, !this.shuttingDown, online, combatTagged, participating, gearScore);
+            this.scheduleRtpDuelGlobal(() -> this.completeRtpDuelEnqueue(request, snapshot));
+        }, () -> {
+            RtpDuelEligibility retired = new RtpDuelEligibility(request.requestGeneration,
+                request.sessionGeneration, false, false, false, true, 0);
+            this.scheduleRtpDuelGlobal(() -> this.completeRtpDuelEnqueue(request, retired));
+        });
+        if (!capture.wasAccepted()) {
+            this.completeRtpDuelEnqueue(request, new RtpDuelEligibility(request.requestGeneration,
+                request.sessionGeneration, false, false, false, true, 0));
         }
     }
 
-    // Runs every second: refresh the searching hotbar, time out long waits, and match gear-close pairs.
+    private void completeRtpDuelEnqueue(RtpDuelEnqueueRequest request, RtpDuelEligibility snapshot) {
+        if (this.pendingRtpDuelEnqueues.get(request.uuid) != request) return;
+        this.pendingRtpDuelEnqueues.remove(request.uuid, request);
+        if (!snapshot.online() || Bukkit.getPlayer(request.uuid) != request.player)
+            this.retireRtpDuelQueueSessionOnGlobal(request.uuid, request.player, request.sessionGeneration);
+        if (this.shuttingDown || snapshot.requestGeneration() != request.requestGeneration
+                || snapshot.sessionGeneration() != request.sessionGeneration || !snapshot.enabled()
+                || !snapshot.online() || snapshot.combatTagged() || snapshot.participating()) return;
+        RtpDuelQueueSession session = this.rtpDuelQueueSessions.get(request.uuid);
+        if (session == null || session.generation != request.sessionGeneration || session.player != request.player
+                || Bukkit.getPlayer(request.uuid) != request.player || this.rtpDuelQueue.containsKey(request.uuid)
+                || this.pendingRtpDuelMatches.containsKey(request.uuid) || this.activeDuels.containsKey(request.uuid)) return;
+
+        Sound disc = RTPQ_DISCS[ThreadLocalRandom.current().nextInt(RTPQ_DISCS.length)];
+        RtpQueueEntry entry = new RtpQueueEntry(snapshot.gearScore(), request.requestGeneration,
+            request.sessionGeneration, request.requestedAt, disc, request.player);
+        if (this.rtpDuelQueue.putIfAbsent(request.uuid, entry) != null) return;
+        PlatformScheduler.TaskHandle notify = PlatformScheduler.entityNow(this, request.player, () -> {
+            if (this.shuttingDown || !entry.active) return;
+            if (!request.player.isOnline()) {
+                this.scheduleRtpDuelGlobal(
+                    () -> this.cancelRtpQueueOnGlobal(request.uuid, null, request.player, request.sessionGeneration));
+                return;
+            }
+            request.player.playSound(request.player.getLocation(), disc, org.bukkit.SoundCategory.RECORDS, 0.6f, 1.0f);
+            this.showDuelStatusTitle(request.player, "Searching", "Use /rtpq cancel to leave");
+        }, () -> this.scheduleRtpDuelGlobal(
+            () -> this.cancelRtpQueueOnGlobal(request.uuid, null, request.player, request.sessionGeneration)));
+        if (!notify.wasAccepted())
+            this.cancelRtpQueueOnGlobal(request.uuid, null, request.player, request.sessionGeneration);
+    }
+
+    private RtpDuelQueueSession ensureRtpDuelQueueSession(UUID uuid, Player player) {
+        RtpDuelQueueSession current = this.rtpDuelQueueSessions.get(uuid);
+        if (current != null && current.player == player) return current;
+        if (current != null) {
+            this.cancelRtpQueueOnGlobal(uuid, null, current.player, current.generation);
+            this.rtpDuelQueueSessions.remove(uuid, current);
+            this.rtpDuelSessionGenerations.remove(uuid, current.generation);
+        }
+        RtpDuelQueueSession next = new RtpDuelQueueSession(player, ++this.rtpDuelQueueGeneration);
+        this.rtpDuelQueueSessions.put(uuid, next);
+        this.rtpDuelSessionGenerations.put(uuid, next.generation);
+        return next;
+    }
+
+    private boolean belongsToRtpDuelSession(RtpQueueEntry entry, Player expectedPlayer,
+            Long expectedSessionGeneration) {
+        return entry != null && this.belongsToRtpDuelSession(entry.sessionPlayer,
+            entry.sessionGeneration, expectedPlayer, expectedSessionGeneration);
+    }
+
+    private boolean belongsToRtpDuelSession(Player sessionPlayer, long sessionGeneration,
+            Player expectedPlayer, Long expectedSessionGeneration) {
+        return (expectedPlayer == null || sessionPlayer == expectedPlayer)
+            && (expectedSessionGeneration == null || sessionGeneration == expectedSessionGeneration.longValue());
+    }
+
+    private boolean isCurrentRtpDuelQueueEntry(UUID uuid, RtpQueueEntry entry) {
+        return entry != null && entry.active && this.rtpDuelQueue.get(uuid) == entry
+            && this.isCurrentRtpDuelQueueSession(uuid, entry);
+    }
+
+    private boolean isCurrentRtpDuelQueueSession(UUID uuid, RtpQueueEntry entry) {
+        RtpDuelQueueSession session = this.rtpDuelQueueSessions.get(uuid);
+        return entry != null && session != null && session.player == entry.sessionPlayer
+            && session.generation == entry.sessionGeneration
+            && this.rtpDuelSessionGenerations.getOrDefault(uuid, 0L) == entry.sessionGeneration;
+    }
+
+    private void restoreRtpDuelQueueEntry(UUID uuid, RtpQueueEntry entry) {
+        if (entry == null || !this.isCurrentRtpDuelQueueSession(uuid, entry)) return;
+        entry.active = true;
+        if (this.rtpDuelQueue.putIfAbsent(uuid, entry) != null) entry.active = false;
+    }
+
+    // RTP-match state is serialized on the global scheduler; callers may be player/event-owned.
+    private void cancelRtpQueue(UUID uuid, String messageOrNull) {
+        this.cancelRtpQueue(uuid, messageOrNull, null);
+    }
+    private void cancelRtpQueue(UUID uuid, String messageOrNull, Player expectedSession) {
+        if (uuid == null || this.shuttingDown) return;
+        this.scheduleRtpDuelGlobal(
+            () -> this.cancelRtpQueueOnGlobal(uuid, messageOrNull, expectedSession, null));
+    }
+
+    private void retireRtpDuelQueueSession(UUID uuid, Player player) {
+        if (uuid == null || player == null || this.shuttingDown) return;
+        this.scheduleRtpDuelGlobal(() -> {
+            RtpDuelQueueSession session = this.rtpDuelQueueSessions.get(uuid);
+            if (session != null && session.player != player) return;
+            Long sessionGeneration = null;
+            if (session != null) {
+                sessionGeneration = session.generation;
+                this.rtpDuelQueueSessions.remove(uuid, session);
+                this.rtpDuelSessionGenerations.remove(uuid, session.generation);
+            }
+            this.cancelRtpQueueOnGlobal(uuid, null, player, sessionGeneration);
+        });
+    }
+
+    private void cancelRtpQueueOnGlobal(UUID uuid, String messageOrNull, Player expectedSession,
+            Long expectedSessionGeneration) {
+        RtpQueueEntry queued = this.rtpDuelQueue.get(uuid);
+        if (queued != null && !this.belongsToRtpDuelSession(queued, expectedSession, expectedSessionGeneration)) {
+            queued = null;
+        }
+        RtpQueueEntry entry = queued != null && this.rtpDuelQueue.remove(uuid, queued) ? queued : null;
+        if (entry != null) entry.active = false;
+
+        RtpDuelEnqueueRequest pendingEnqueue = this.pendingRtpDuelEnqueues.get(uuid);
+        if (pendingEnqueue != null && !this.belongsToRtpDuelSession(pendingEnqueue.player,
+                pendingEnqueue.sessionGeneration, expectedSession, expectedSessionGeneration)) {
+            pendingEnqueue = null;
+        }
+        if (pendingEnqueue != null) this.pendingRtpDuelEnqueues.remove(uuid, pendingEnqueue);
+
+        RtpDuelMatch pending = this.pendingRtpDuelMatches.get(uuid);
+        boolean cancelledMatch = pending != null && this.isCurrentRtpDuelMatch(pending)
+            && this.belongsToRtpDuelSession(pending.entry(uuid), expectedSession, expectedSessionGeneration);
+        UUID partnerId = null;
+        Sound cancelledDisc = entry == null ? null : entry.disc;
+        Sound partnerDisc = null;
+        if (cancelledMatch) {
+            pending.state = RtpDuelMatch.State.CANCELLED;
+            partnerId = pending.other(uuid);
+            RtpQueueEntry ownMatchEntry = pending.entry(uuid);
+            RtpQueueEntry partnerMatchEntry = pending.entry(partnerId);
+            if (cancelledDisc == null && ownMatchEntry != null) cancelledDisc = ownMatchEntry.disc;
+            if (partnerMatchEntry != null) partnerDisc = partnerMatchEntry.disc;
+            this.pendingRtpDuelMatches.remove(pending.a, pending);
+            this.pendingRtpDuelMatches.remove(pending.b, pending);
+        }
+        if (entry == null && !cancelledMatch && pendingEnqueue == null) return;
+
+        Sound ownDisc = cancelledDisc;
+        Player playerExpected = expectedSession;
+        this.dispatchRtpDuelPlayerAction(uuid, playerExpected, player -> {
+            if (ownDisc != null) {
+                try { player.stopSound(ownDisc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) {}
+            }
+            if (messageOrNull != null) this.showDuelStatusTitle(player, messageOrNull, null);
+        });
+        if (partnerId != null) {
+            Sound discToStop = partnerDisc;
+            this.dispatchRtpDuelPlayerAction(partnerId, player -> {
+                if (discToStop != null) {
+                    try { player.stopSound(discToStop, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) { }
+                }
+                this.enqueueRtpDuel(player);
+            });
+        }
+    }
+
+    // Runs every second on global. Player-owned eligibility is collected before global matchmaking.
     private void tickRtpDuelQueue() {
-        if (this.rtpDuelQueue.isEmpty()) return;
+        if (this.shuttingDown) return;
+        this.drainDeferredRtpDuelGlobalActions();
+        if (this.shuttingDown || this.activeRtpDuelQueueScan != null || this.rtpDuelQueue.isEmpty()) return;
         long now = System.currentTimeMillis();
-        long timeoutMs = Math.max(15L, this.settings.getLong("rtpq.timeout-seconds", 30L)) * 1000L;
-        // 1) Refresh hotbar + drop offline/timed-out entries.
-        List<UUID> ready = new java.util.ArrayList<UUID>();
-        for (Map.Entry<UUID, RtpQueueEntry> me : this.rtpDuelQueue.entrySet()) {
-            Player p = Bukkit.getPlayer(me.getKey());
-            if (p == null || !p.isOnline()) { this.rtpDuelQueue.remove(me.getKey()); continue; }
-            if (now - me.getValue().enqueuedAt >= timeoutMs) {
-                this.cancelRtpQueue(me.getKey(), "§7No opponent found. Try /rtpq again.");
+        long timeoutMs = Math.max(15L, this.settings.getLong("rtpq.timeout-seconds", 15L)) * 1000L;
+        List<RtpDuelQueueCandidate> candidates = new java.util.ArrayList<>();
+        for (Map.Entry<UUID, RtpQueueEntry> me : new java.util.ArrayList<>(this.rtpDuelQueue.entrySet())) {
+            UUID uuid = me.getKey();
+            RtpQueueEntry entry = me.getValue();
+            if (this.rtpDuelQueue.get(uuid) != entry || !entry.active) continue;
+            if (!this.isCurrentRtpDuelQueueSession(uuid, entry)) {
+                Player current = Bukkit.getPlayer(uuid);
+                if (current != null && current != entry.sessionPlayer) this.ensureRtpDuelQueueSession(uuid, current);
+                this.cancelRtpQueueOnGlobal(uuid, null, entry.sessionPlayer, entry.sessionGeneration);
                 continue;
             }
-            p.sendActionBar(this.legacyColorize("&#00BFFFSearching for opponent…"));
-            ready.add(me.getKey());
-        }
-        // 2) Match adjacent-by-gear pairs whose gap fits the (widening) band.
-        ready.sort((a, b) -> Integer.compare(this.rtpDuelQueue.get(a).gearScore, this.rtpDuelQueue.get(b).gearScore));
-        for (int i = 0; i + 1 < ready.size(); i += 2) {
-            UUID a = ready.get(i), b = ready.get(i + 1);
-            RtpQueueEntry ea = this.rtpDuelQueue.get(a), eb = this.rtpDuelQueue.get(b);
-            if (ea == null || eb == null) continue;
-            int gap = Math.abs(ea.gearScore - eb.gearScore);
-            int band = Math.max(this.duelBand(ea, now), this.duelBand(eb, now));
-            if (gap <= band) {
-                this.startRtpDuelMatch(a, b);
+            if (now - entry.enqueuedAt >= timeoutMs) {
+                this.cancelRtpQueueOnGlobal(uuid, "No Opponent Found", entry.sessionPlayer, entry.sessionGeneration);
+                continue;
             }
+            Player player = Bukkit.getPlayer(uuid); // Handle lookup only; online state is checked on its entity scheduler.
+            if (player == null) {
+                this.retireRtpDuelQueueSessionOnGlobal(uuid, entry.sessionPlayer, entry.sessionGeneration);
+                this.cancelRtpQueueOnGlobal(uuid, null, entry.sessionPlayer, entry.sessionGeneration);
+                continue;
+            }
+            if (player != entry.sessionPlayer) {
+                this.ensureRtpDuelQueueSession(uuid, player);
+                this.cancelRtpQueueOnGlobal(uuid, null, entry.sessionPlayer, entry.sessionGeneration);
+                continue;
+            }
+            candidates.add(new RtpDuelQueueCandidate(uuid, player, entry));
+        }
+        if (candidates.isEmpty()) return;
+        RtpDuelQueueScan scan = new RtpDuelQueueScan(++this.rtpDuelQueueScanGeneration, now,
+            timeoutMs, candidates);
+        this.activeRtpDuelQueueScan = scan;
+        PlatformScheduler.TaskHandle scanDeadline = PlatformScheduler.globalLater(this,
+            () -> this.finishRtpDuelQueueScan(scan), 10L);
+        if (!scanDeadline.wasAccepted()) this.finishRtpDuelQueueScan(scan);
+        for (RtpDuelQueueCandidate candidate : candidates) {
+            Player player = candidate.player;
+            PlatformScheduler.TaskHandle snapshotTask = PlatformScheduler.entityNow(this, player, () -> {
+                boolean online = player.isOnline();
+                boolean combatTagged = online && this.isCombatTagged(player);
+                boolean participating = this.activeDuels.containsKey(candidate.uuid)
+                    || this.pendingRtpDuelMatches.containsKey(candidate.uuid);
+                RtpDuelEligibility result = new RtpDuelEligibility(candidate.entry.requestGeneration,
+                    candidate.entry.sessionGeneration, !this.shuttingDown, online, combatTagged, participating,
+                    candidate.entry.gearScore);
+                this.scheduleRtpDuelGlobal(() -> this.recordRtpDuelQueueEligibility(scan, candidate, result));
+            }, () -> {
+                RtpDuelEligibility retired = new RtpDuelEligibility(candidate.entry.requestGeneration,
+                    candidate.entry.sessionGeneration, false, false, false, true, candidate.entry.gearScore);
+                this.scheduleRtpDuelGlobal(() -> this.recordRtpDuelQueueEligibility(scan, candidate, retired));
+            });
+            if (!snapshotTask.wasAccepted()) {
+                this.recordRtpDuelQueueEligibility(scan, candidate, new RtpDuelEligibility(
+                    candidate.entry.requestGeneration, candidate.entry.sessionGeneration,
+                    false, false, false, true, candidate.entry.gearScore));
+            }
+        }
+    }
+    // Queue state is global-owned. If an immediate global dispatch is rejected transiently, one
+    // next-tick retry is attempted; if that is rejected too, the global queue tick drains the
+    // immutable state-transition closure. No caller mutates queue state off-owner.
+    private boolean scheduleRtpDuelGlobal(Runnable action) {
+        if (this.shuttingDown) return false;
+        AtomicBoolean dispatched = new AtomicBoolean(false);
+        Runnable guarded = () -> {
+            if (!this.shuttingDown && dispatched.compareAndSet(false, true)) action.run();
+        };
+        PlatformScheduler.TaskHandle immediate = PlatformScheduler.globalNow(this, guarded);
+        if (immediate.wasAccepted() || this.shuttingDown) return immediate.wasAccepted();
+        this.deferredRtpDuelGlobalActions.add(guarded);
+        PlatformScheduler.TaskHandle retry = PlatformScheduler.globalLater(this, guarded, 1L);
+        return retry.wasAccepted() || !this.shuttingDown;
+    }
+
+    private void drainDeferredRtpDuelGlobalActions() {
+        for (int drained = 0; drained < 1024; drained++) {
+            Runnable action = this.deferredRtpDuelGlobalActions.poll();
+            if (action == null || this.shuttingDown) return;
+            try {
+                action.run();
+            } catch (RuntimeException ex) {
+                this.getLogger().warning("Deferred RTP queue transition failed (cause="
+                    + ex.getClass().getSimpleName() + ").");
+            }
+        }
+    }
+
+    private void retireRtpDuelQueueSessionOnGlobal(UUID uuid, Player player, long sessionGeneration) {
+        RtpDuelQueueSession session = this.rtpDuelQueueSessions.get(uuid);
+        if (session != null && session.player == player && session.generation == sessionGeneration) {
+            this.rtpDuelQueueSessions.remove(uuid, session);
+            this.rtpDuelSessionGenerations.remove(uuid, session.generation);
+        }
+    }
+
+    private void recordRtpDuelQueueEligibility(RtpDuelQueueScan scan, RtpDuelQueueCandidate candidate,
+            RtpDuelEligibility eligibility) {
+        if (this.shuttingDown || this.activeRtpDuelQueueScan != scan
+                || scan.generation != this.rtpDuelQueueScanGeneration || scan.finished
+                || eligibility.requestGeneration() != candidate.entry.requestGeneration
+                || eligibility.sessionGeneration() != candidate.entry.sessionGeneration
+                || scan.results.containsKey(candidate.uuid)) return;
+        scan.results.put(candidate.uuid, eligibility);
+        if (this.rtpDuelQueue.get(candidate.uuid) == candidate.entry
+                && (!eligibility.online() || eligibility.combatTagged() || eligibility.participating())) {
+            String message = eligibility.online() ? "Search Cancelled" : null;
+            if (!eligibility.online()) this.retireRtpDuelQueueSessionOnGlobal(candidate.uuid,
+                candidate.player, candidate.entry.sessionGeneration);
+            this.cancelRtpQueueOnGlobal(candidate.uuid, message, candidate.player,
+                candidate.entry.sessionGeneration);
+        }
+        if (scan.results.size() == scan.candidates.size()) this.finishRtpDuelQueueScan(scan);
+    }
+
+    private void finishRtpDuelQueueScan(RtpDuelQueueScan scan) {
+        if (this.shuttingDown || this.activeRtpDuelQueueScan != scan
+                || scan.generation != this.rtpDuelQueueScanGeneration || scan.finished) return;
+        scan.finished = true;
+        this.activeRtpDuelQueueScan = null;
+        long now = System.currentTimeMillis();
+        List<RtpDuelQueueCandidate> ready = new java.util.ArrayList<>();
+        for (RtpDuelQueueCandidate candidate : scan.candidates) {
+            RtpDuelEligibility eligibility = scan.results.get(candidate.uuid);
+            if (eligibility == null || !eligibility.enabled() || !eligibility.online()
+                    || eligibility.combatTagged() || eligibility.participating()) continue;
+            if (!this.isCurrentRtpDuelQueueEntry(candidate.uuid, candidate.entry)) continue;
+            if (now - candidate.entry.enqueuedAt >= scan.timeoutMs) {
+                this.cancelRtpQueueOnGlobal(candidate.uuid, "No Opponent Found", candidate.player,
+                    candidate.entry.sessionGeneration);
+                continue;
+            }
+            if (this.activeDuels.containsKey(candidate.uuid)
+                    || this.pendingRtpDuelMatches.containsKey(candidate.uuid)) {
+                this.cancelRtpQueueOnGlobal(candidate.uuid, "Search Cancelled", candidate.player,
+                    candidate.entry.sessionGeneration);
+                continue;
+            }
+            ready.add(candidate);
+        }
+        ready.sort((left, right) -> Long.compare(left.entry.enqueuedAt, right.entry.enqueuedAt));
+        for (RtpDuelQueueCandidate a : ready) {
+            if (!this.isCurrentRtpDuelQueueEntry(a.uuid, a.entry)) continue;
+            UUID closest = null;
+            int closestGap = Integer.MAX_VALUE;
+            for (RtpDuelQueueCandidate b : ready) {
+                if (a.uuid.equals(b.uuid) || !this.isCurrentRtpDuelQueueEntry(b.uuid, b.entry)) continue;
+                int gap = Math.abs(a.entry.gearScore - b.entry.gearScore);
+                if (gap <= Math.max(this.duelBand(a.entry, scan.startedAt), this.duelBand(b.entry, scan.startedAt))
+                        && gap < closestGap) {
+                    closest = b.uuid;
+                    closestGap = gap;
+                }
+            }
+            if (closest != null) this.startRtpDuelMatch(a.uuid, closest);
         }
     }
 
@@ -6510,24 +8393,52 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return total;
     }
 
+    // Called only by tickRtpDuelQueue on the global scheduler. Pending-match state is owned there;
+    // participant state is read and changed only in each participant's entity callback.
     private void startRtpDuelMatch(UUID a, UUID b) {
+        if (this.shuttingDown || a == null || b == null || a.equals(b)) return;
         RtpQueueEntry ea = this.rtpDuelQueue.remove(a);
         RtpQueueEntry eb = this.rtpDuelQueue.remove(b);
-        Player pa = Bukkit.getPlayer(a);
-        Player pb = Bukkit.getPlayer(b);
-        if (pa == null || !pa.isOnline() || pb == null || !pb.isOnline()) {
-            // One dropped between selection and match: requeue the survivor so it keeps searching.
-            if (pa != null && pa.isOnline() && ea != null) this.rtpDuelQueue.put(a, ea);
-            if (pb != null && pb.isOnline() && eb != null) this.rtpDuelQueue.put(b, eb);
+        if (ea != null) ea.active = false;
+        if (eb != null) eb.active = false;
+        if (ea == null || eb == null) {
+            this.restoreRtpDuelQueueEntry(a, ea);
+            this.restoreRtpDuelQueueEntry(b, eb);
             return;
         }
-        if (ea != null) { try { pa.stopSound(ea.disc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) {} }
-        if (eb != null) { try { pb.stopSound(eb.disc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) {} }
-        pa.sendActionBar(this.legacyColorize("&#00BFFFOpponent found! Teleporting…"));
-        pb.sendActionBar(this.legacyColorize("&#00BFFFOpponent found! Teleporting…"));
-        this.beginDuelSearch(a, b);
-    }
+        if (!this.isCurrentRtpDuelQueueSession(a, ea) || !this.isCurrentRtpDuelQueueSession(b, eb)) {
+            if (!this.isCurrentRtpDuelQueueSession(a, ea))
+                this.cancelRtpQueueOnGlobal(a, null, ea.sessionPlayer, ea.sessionGeneration);
+            if (!this.isCurrentRtpDuelQueueSession(b, eb))
+                this.cancelRtpQueueOnGlobal(b, null, eb.sessionPlayer, eb.sessionGeneration);
+            return;
+        }
+        if (this.pendingRtpDuelMatches.containsKey(a) || this.pendingRtpDuelMatches.containsKey(b)) {
+            this.restoreRtpDuelQueueEntry(a, ea);
+            this.restoreRtpDuelQueueEntry(b, eb);
+            return;
+        }
+        if (this.activeDuels.containsKey(a) || this.activeDuels.containsKey(b)) {
+            this.restoreRtpDuelQueueEntry(a, ea);
+            this.restoreRtpDuelQueueEntry(b, eb);
+            this.cancelRtpQueueOnGlobal(a, "Search Cancelled", ea.sessionPlayer, ea.sessionGeneration);
+            this.cancelRtpQueueOnGlobal(b, "Search Cancelled", eb.sessionPlayer, eb.sessionGeneration);
+            return;
+        }
 
+        RtpDuelMatch match = new RtpDuelMatch(a, b, ea, eb);
+        this.pendingRtpDuelMatches.put(a, match);
+        this.pendingRtpDuelMatches.put(b, match);
+        PlatformScheduler.TaskHandle timeout = PlatformScheduler.globalLater(this,
+            () -> this.failRtpDuelMatch(match), 30L * 20L);
+        if (!timeout.wasAccepted()) {
+            this.failRtpDuelMatch(match);
+            return;
+        }
+        this.tickRtpDuelSearchElapsed(match);
+        this.prepareRtpDuelParticipant(match, a, ea.disc);
+        this.prepareRtpDuelParticipant(match, b, eb.disc);
+    }
     // Find ONE fresh, safe overworld spot (same logic as /rtp) and drop both players on it.
     private void beginDuelSearch(UUID a, UUID b) {
         World world = Bukkit.getWorld("world");
@@ -6585,12 +8496,3628 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }));
     }
 
+    private void prepareRtpDuelParticipant(RtpDuelMatch match, UUID uuid, Sound disc) {
+        Player player = Bukkit.getPlayer(uuid); // Global-registry lookup; all Player use is in entity ownership.
+        RtpQueueEntry queueEntry = match.entry(uuid);
+        if (player == null || queueEntry == null || player != queueEntry.sessionPlayer) {
+            this.cancelRtpDuelMatchOnGlobal(match, uuid);
+            return;
+        }
+        PlatformScheduler.TaskHandle preparation = PlatformScheduler.entityNow(this, player, () -> {
+            if (!this.isPendingRtpDuelMatch(match) || !player.isOnline()) {
+                this.scheduleRtpDuelGlobal(() -> this.cancelRtpDuelMatchOnGlobal(match, uuid));
+                return;
+            }
+            try { player.stopSound(disc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) { }
+            float yaw = uuid.equals(match.a) ? player.getLocation().getYaw() : 0.0f;
+            this.scheduleRtpDuelGlobal(() -> this.onRtpDuelParticipantPrepared(match, uuid, yaw));
+        }, () -> this.scheduleRtpDuelGlobal(() -> this.cancelRtpDuelMatchOnGlobal(match, uuid)));
+        if (!preparation.wasAccepted()) this.cancelRtpDuelMatchOnGlobal(match, uuid);
+    }
+
+    private void onRtpDuelParticipantPrepared(RtpDuelMatch match, UUID uuid, float yaw) {
+        if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.SEARCHING
+                || !match.preparedParticipants.add(uuid)) return;
+        if (uuid.equals(match.a)) match.startYaw = yaw;
+        if (match.preparedParticipants.size() == 2) this.beginDuelSearch(match, match.startYaw);
+    }
+
+    private void tickRtpDuelSearchElapsed(RtpDuelMatch match) {
+        if (!this.isPendingRtpDuelMatch(match)) return;
+        long elapsedSeconds = Math.max(0L, (System.currentTimeMillis() - match.startedAt) / 1000L);
+        String elapsed = String.format(Locale.ROOT, "%02d:%02d", elapsedSeconds / 60L, elapsedSeconds % 60L);
+        Component status = Component.text("Duel  ", NamedTextColor.AQUA)
+            .append(Component.text("Elapsed " + elapsed, NamedTextColor.GRAY));
+        for (UUID id : new UUID[]{match.a, match.b}) {
+            RtpQueueEntry entry = match.entry(id);
+            this.dispatchRtpDuelPlayerAction(id, entry == null ? null : entry.sessionPlayer, participant -> {
+                if (this.isPendingRtpDuelMatch(match)) participant.sendActionBar(status);
+            });
+        }
+        PlatformScheduler.TaskHandle nextStatus = PlatformScheduler.globalLater(this,
+            () -> this.tickRtpDuelSearchElapsed(match), 20L);
+        if (!nextStatus.wasAccepted()) {
+            // Status is best-effort; the independent match deadline still guarantees terminal cleanup.
+            return;
+        }
+    }
+
+    private void dispatchRtpDuelPlayerAction(UUID uuid, java.util.function.Consumer<Player> action) {
+        this.dispatchRtpDuelPlayerAction(uuid, null, action);
+    }
+
+    private void dispatchRtpDuelPlayerAction(UUID uuid, Player expectedSession,
+            java.util.function.Consumer<Player> action) {
+        Player player = Bukkit.getPlayer(uuid); // Called by the global owner; only captures an entity handle.
+        if (player == null || (expectedSession != null && player != expectedSession)) return;
+        PlatformScheduler.TaskHandle delivery = PlatformScheduler.entityNow(this, player, () -> {
+            if (player.isOnline()) action.accept(player);
+        }, null);
+        if (!delivery.wasAccepted()) return; // Presentation/cleanup only; match state has a separate owner.
+    }
+
+    // Find one existing, generated overworld spot. Candidate terrain inspection is region-owned.
+    private void beginDuelSearch(RtpDuelMatch match, float yaw) {
+        if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.SEARCHING) return;
+        World world = Bukkit.getWorld("world");
+        if (world == null && !Bukkit.getWorlds().isEmpty()) world = Bukkit.getWorlds().getFirst();
+        if (world == null) { this.failRtpDuelMatch(match); return; }
+        double borderRadius = 5000.0, centerX = 0.0, centerZ = 0.0;
+        if (world.getWorldBorder() != null) {
+            centerX = world.getWorldBorder().getCenter().getX();
+            centerZ = world.getWorldBorder().getCenter().getZ();
+            borderRadius = Math.max(256.0, world.getWorldBorder().getSize() / 2.0 - (double)this.getRtpBorderPadding());
+        }
+        RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ,
+            Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius,
+            Math.max(16, this.settings.getInt("rtp.search-attempts", 120)), yaw);
+        match.searchWorld = world;
+        this.duelSearchAttempt(match, plan, 0);
+    }
+
+    private boolean isPendingRtpDuelMatch(RtpDuelMatch match) {
+        return match != null && !this.shuttingDown && !match.state.terminal()
+            && this.isCurrentRtpDuelMatch(match)
+            && this.rtpDuelSessionGenerations.getOrDefault(match.a, 0L) == match.entryA.sessionGeneration
+            && this.rtpDuelSessionGenerations.getOrDefault(match.b, 0L) == match.entryB.sessionGeneration;
+    }
+
+    private boolean isCurrentRtpDuelMatch(RtpDuelMatch match) {
+        return match != null && this.pendingRtpDuelMatches.get(match.a) == match
+            && this.pendingRtpDuelMatches.get(match.b) == match;
+    }
+
+    private void cancelRtpDuelMatchOnGlobal(RtpDuelMatch match, UUID participant) {
+        if (!this.isCurrentRtpDuelMatch(match)) return;
+        RtpQueueEntry entry = match.entry(participant);
+        if (entry != null) this.cancelRtpQueueOnGlobal(participant, null, entry.sessionPlayer,
+            entry.sessionGeneration);
+    }
+
+    // Every terminal outcome is decided on the global scheduler. Compare-and-remove makes a late
+    // timeout/search/cancel callback harmless once a competing outcome has won.
+    private void failRtpDuelMatch(RtpDuelMatch match) {
+        if (!this.isPendingRtpDuelMatch(match)) return;
+        match.state = RtpDuelMatch.State.FAILED;
+        this.pendingRtpDuelMatches.remove(match.a, match);
+        this.pendingRtpDuelMatches.remove(match.b, match);
+        for (UUID id : new UUID[]{match.a, match.b}) {
+            RtpQueueEntry queueEntry = match.entry(id);
+            this.dispatchRtpDuelPlayerAction(id, queueEntry == null ? null : queueEntry.sessionPlayer, player -> {
+                if (queueEntry != null) {
+                    try { player.stopSound(queueEntry.disc, org.bukkit.SoundCategory.RECORDS); } catch (Throwable ignored) { }
+                }
+                this.showDuelStatusTitle(player, "No Safe Location", "Try /rtpq again");
+            });
+        }
+    }
+
+    private void duelSearchAttempt(RtpDuelMatch match, RtpSearchPlan plan, int attempt) {
+        if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.SEARCHING) return;
+        if (attempt >= plan.maxAttempts || System.currentTimeMillis() >= match.deadline) {
+            this.failRtpDuelMatch(match);
+            return;
+        }
+        World world = match.searchWorld;
+        if (world == null) { this.failRtpDuelMatch(match); return; }
+        double angle = ThreadLocalRandom.current().nextDouble(0.0, Math.PI * 2);
+        double radius = plan.minRadius >= plan.maxRadius ? plan.maxRadius
+            : ThreadLocalRandom.current().nextDouble(plan.minRadius, plan.maxRadius);
+        int x = NumberConversions.floor(plan.centerX + Math.cos(angle) * radius);
+        int z = NumberConversions.floor(plan.centerZ + Math.sin(angle) * radius);
+        Location candidate = new Location(world, x, 0.0, z);
+        PlatformScheduler.regionNow(this, candidate, () -> {
+            if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.SEARCHING) return;
+            boolean generated;
+            try { generated = world.isChunkGenerated(x >> 4, z >> 4); }
+            catch (Throwable ignored) { generated = false; }
+            if (!generated) {
+                PlatformScheduler.globalLater(this, () -> this.duelSearchAttempt(match, plan, attempt + 1), 1L);
+                return;
+            }
+            try {
+                world.getChunkAtAsync(x >> 4, z >> 4, false).whenComplete((chunk, failure) -> {
+                    if (failure != null || chunk == null) {
+                        PlatformScheduler.globalLater(this, () -> this.duelSearchAttempt(match, plan, attempt + 1), 1L);
+                        return;
+                    }
+                    PlatformScheduler.regionNow(this, candidate, () -> {
+                        if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.SEARCHING) return;
+                        RtpDuelSafeSpot safeSpot = null;
+                        try {
+                            Location safe = this.findSafeRtpLocation(world, x, z, plan.yaw);
+                            if (safe != null) safeSpot = new RtpDuelSafeSpot(safe.getX(), safe.getY(), safe.getZ(),
+                                safe.getYaw(), safe.getPitch());
+                        } catch (Throwable ignored) { }
+                        RtpDuelSafeSpot result = safeSpot;
+                        PlatformScheduler.globalNow(this, () -> this.onRtpDuelCandidateChecked(match, plan, attempt, result));
+                    });
+                });
+            } catch (Throwable ignored) {
+                PlatformScheduler.globalLater(this, () -> this.duelSearchAttempt(match, plan, attempt + 1), 1L);
+            }
+        });
+    }
+
+    private void onRtpDuelCandidateChecked(RtpDuelMatch match, RtpSearchPlan plan, int attempt,
+            RtpDuelSafeSpot safeSpot) {
+        if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.SEARCHING) return;
+        if (System.currentTimeMillis() >= match.deadline) {
+            this.failRtpDuelMatch(match);
+            return;
+        }
+        if (safeSpot == null) {
+            PlatformScheduler.globalLater(this, () -> this.duelSearchAttempt(match, plan, attempt + 1), 1L);
+            return;
+        }
+        match.safeSpot = safeSpot;
+        match.state = RtpDuelMatch.State.ANIMATING;
+        this.showRtpDuelMatchAnimation(match, match.a);
+        this.showRtpDuelMatchAnimation(match, match.b);
+    }
+
+    private void showRtpDuelMatchAnimation(RtpDuelMatch match, UUID uuid) {
+        Player player = Bukkit.getPlayer(uuid);
+        RtpQueueEntry queueEntry = match.entry(uuid);
+        if (player == null || queueEntry == null || player != queueEntry.sessionPlayer) {
+            this.cancelRtpDuelMatchOnGlobal(match, uuid);
+            return;
+        }
+        PlatformScheduler.TaskHandle animation = PlatformScheduler.entityNow(this, player, () -> {
+            if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.ANIMATING
+                    || !player.isOnline()) {
+                this.scheduleRtpDuelGlobal(() -> this.cancelRtpDuelMatchOnGlobal(match, uuid));
+                return;
+            }
+            this.showDuelMatchAnimation(player);
+            this.scheduleRtpDuelGlobal(() -> this.onRtpDuelAnimationShown(match, uuid));
+        }, () -> this.scheduleRtpDuelGlobal(() -> this.cancelRtpDuelMatchOnGlobal(match, uuid)));
+        if (!animation.wasAccepted()) this.cancelRtpDuelMatchOnGlobal(match, uuid);
+    }
+
+    private void onRtpDuelAnimationShown(RtpDuelMatch match, UUID uuid) {
+        if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.ANIMATING
+                || !match.animationParticipants.add(uuid)) return;
+        if (match.animationParticipants.size() == 2) {
+            PlatformScheduler.TaskHandle animationDelay = PlatformScheduler.globalLater(this,
+                () -> this.finishRtpDuelAnimation(match), 60L);
+            if (!animationDelay.wasAccepted()) this.failRtpDuelMatch(match);
+        }
+    }
+
+    private void finishRtpDuelAnimation(RtpDuelMatch match) {
+        if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.ANIMATING) return;
+        if (System.currentTimeMillis() >= match.deadline) {
+            this.failRtpDuelMatch(match);
+            return;
+        }
+        match.state = RtpDuelMatch.State.VERIFYING;
+        this.verifyRtpDuelParticipant(match, match.a);
+        this.verifyRtpDuelParticipant(match, match.b);
+    }
+
+    private void verifyRtpDuelParticipant(RtpDuelMatch match, UUID uuid) {
+        Player player = Bukkit.getPlayer(uuid);
+        RtpQueueEntry queueEntry = match.entry(uuid);
+        if (player == null || queueEntry == null || player != queueEntry.sessionPlayer) {
+            this.onRtpDuelParticipantVerified(match, uuid, false);
+            return;
+        }
+        PlatformScheduler.TaskHandle verification = PlatformScheduler.entityNow(this, player, () -> {
+            boolean online = player.isOnline();
+            this.scheduleRtpDuelGlobal(() -> this.onRtpDuelParticipantVerified(match, uuid, online));
+        }, () -> this.scheduleRtpDuelGlobal(() -> this.onRtpDuelParticipantVerified(match, uuid, false)));
+        if (!verification.wasAccepted()) this.onRtpDuelParticipantVerified(match, uuid, false);
+    }
+
+    private void onRtpDuelParticipantVerified(RtpDuelMatch match, UUID uuid, boolean online) {
+        if (!this.isPendingRtpDuelMatch(match) || match.state != RtpDuelMatch.State.VERIFYING
+                || !match.verifiedParticipants.add(uuid)) return;
+        if (!online) {
+            this.cancelRtpDuelMatchOnGlobal(match, uuid);
+            return;
+        }
+        if (match.verifiedParticipants.size() != 2) return;
+        if (System.currentTimeMillis() >= match.deadline || match.safeSpot == null || match.searchWorld == null) {
+            this.failRtpDuelMatch(match);
+            return;
+        }
+        if (!this.scheduleRtpDuelistTeleport(match, match.a)) {
+            this.cancelRtpDuelMatchOnGlobal(match, match.a);
+            return;
+        }
+        if (!this.scheduleRtpDuelistTeleport(match, match.b)) {
+            this.cancelRtpDuelMatchOnGlobal(match, match.b);
+            return;
+        }
+        // Both entity schedulers accepted their guarded tasks. They wait until this global owner
+        // commits success, so the first participant cannot move before the second submission resolves.
+        match.state = RtpDuelMatch.State.SUCCEEDED;
+        this.pendingRtpDuelMatches.remove(match.a, match);
+        this.pendingRtpDuelMatches.remove(match.b, match);
+    }
+
+    private boolean scheduleRtpDuelistTeleport(RtpDuelMatch match, UUID uuid) {
+        RtpQueueEntry entry = match.entry(uuid);
+        Player player = Bukkit.getPlayer(uuid); // Global-registry lookup; the handle is used only for scheduling.
+        if (entry == null || player == null || player != entry.sessionPlayer) return false;
+        PlatformScheduler.TaskHandle[] scheduled = new PlatformScheduler.TaskHandle[1];
+        PlatformScheduler.TaskHandle teleport = PlatformScheduler.entityRepeating(this, player, () -> {
+            RtpDuelMatch.State state = match.state;
+            if (state == RtpDuelMatch.State.VERIFYING) return;
+            if (state == RtpDuelMatch.State.SUCCEEDED && player.isOnline())
+                this.teleportDuelist(player, match.searchWorld, match.safeSpot);
+            scheduled[0].cancel();
+        }, () -> this.scheduleRtpDuelGlobal(() -> this.cancelRtpDuelMatchOnGlobal(match, uuid)), 1L, 1L);
+        scheduled[0] = teleport;
+        return teleport.wasAccepted();
+    }
+
+    // Called on the target entity scheduler. Completion only touches that same player's entity.
+    private void teleportDuelist(Player player, World world, RtpDuelSafeSpot safeSpot) {
+        if (!player.isOnline()) return;
+        Location target = new Location(world, safeSpot.x(), safeSpot.y(), safeSpot.z(), safeSpot.yaw(), safeSpot.pitch());
+        player.teleportAsync(target).whenComplete((ok, failure) -> PlatformScheduler.entityNow(this, player, () -> {
+            if (failure != null || !Boolean.TRUE.equals(ok) || !player.isOnline()) return;
+            this.resetFallAfterTeleport(player);
+            this.showDuelStatusTitle(player, "Fight", null);
+            if (this.isSettingEnabledCached(player.getUniqueId(), "music_sound_notifications")) {
+                player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 1.2f);
+            }
+        }, null));
+    }
+
+    // ============================================================================
+    // /duel: challenge -> settings GUI (wager) -> both RTP'd to a fresh arena SPACED
+    // apart, frozen + invincible during a 3-2-1 countdown, then FIGHT. Winner takes the
+    // wager pot; a victory song plays from the arena. /spectate lets others fly-watch
+    // without phasing through blocks.
+    // ============================================================================
+
+    private void handleDuelCommand(Player p, String[] args) {
+        this.getLogger().info("[duel] cmd by " + p.getName() + " args=" + java.util.Arrays.toString(args));
+        if (args.length >= 1) {
+            String sub = args[0].toLowerCase(Locale.ROOT);
+            if (sub.equals("accept") || sub.equals("yes"))  { this.handleDuelAccept(p, args.length >= 2 ? args[1] : null); return; }
+            if (sub.equals("deny") || sub.equals("no") || sub.equals("decline")) { this.handleDuelDeny(p, args.length >= 2 ? args[1] : null); return; }
+            if (sub.equals("cancel")) { this.cancelOutgoingDuelRequest(p.getUniqueId(), p); return; }
+            if (sub.equals("again")) {
+                DuelSession session = this.activeDuels.get(p.getUniqueId());
+                if (session != null && !session.arenaEntered && !session.fightBegan && !session.postMatchLootWindow) {
+                    if (session.soloTest) this.finishSoloDuel(session, null, true);
+                    else this.abortDuel(session, null);
+                    p.sendActionBar(Component.text("Duel cancelled before transport.", NamedTextColor.GRAY));
+                } else if (session != null) {
+                    p.sendActionBar(Component.text("You can only cancel before the duel transport.", NamedTextColor.GRAY));
+                } else {
+                    if (this.cancelOutgoingDuelRequest(p.getUniqueId(), null))
+                        p.sendActionBar(Component.text("Duel challenge cancelled.", NamedTextColor.GRAY));
+                    else p.sendActionBar(Component.text("No duel is waiting to start.", NamedTextColor.GRAY));
+                }
+                return;
+            }
+            if (sub.equals("test") || sub.equals("solo")) {
+                if (!p.hasPermission("pizzasmp.admin.dueltest")) { p.sendMessage("§cThis command does not exist."); return; }
+                if (this.activeDuels.containsKey(p.getUniqueId())) { p.sendActionBar(Component.text("§cYou're already in a duel.")); return; }
+                this.openSoloDuelSetup(p);
+                return;
+            }
+            if (sub.equals("reset")) {
+                if (!p.hasPermission("pizzasmp.admin.dueltest")) { p.sendMessage("§cThis command does not exist."); return; }
+                DuelSession session = this.activeDuels.get(p.getUniqueId());
+                if (session != null) {
+                    if (session.soloTest) this.finishSoloDuel(session, "§7Duel test reset.", true);
+                    else if (session.postMatchLootWindow) this.resolveMatch(session, session.pendingRoundWinner, session.pendingRoundLoser);
+                    else this.abortDuel(session, "§7Duel reset.");
+                } else {
+                    this.clearDuelMovementState(p);
+                    p.sendActionBar(Component.text("§7Duel state reset."));
+                }
+                return;
+            }
+            if (sub.equals("exit") || sub.equals("leave")) {
+                DuelSession session = this.activeDuels.get(p.getUniqueId());
+                if (session == null || !session.soloTest) { p.sendActionBar(Component.text("§cYou aren't in a solo duel test.")); return; }
+                this.finishSoloDuel(session, "§7Solo duel test ended.", true);
+                return;
+            }
+        }
+        if (args.length < 1) { p.sendActionBar(Component.text("§cUsage: /duel <player> [wager] [rounds] [restored] [arena]")); return; }
+        Player target = this.fuzzyOnlinePlayer(p, args[0]);
+        if (target == null) { p.sendActionBar(Component.text("§cPlayer not found: " + args[0])); return; }
+        String err = this.duelPrecheck(p, target);
+        if (err != null) { p.sendActionBar(this.legacyColorize(err)); return; }
+        if (args.length == 1 && this.useDialogUi(p)) {
+            this.openDuelSetup(p, target);
+            return;
+        }
+        // Send directly so the accepter always has a stored request. Examples:
+        // /duel Alex 10k 3 restored open   or   /duel Alex bo5 any
+        double wager = 0.0;
+        int rounds = 1;
+        boolean restoredLoadout = false;
+        String arenaPreference = "open";
+        boolean wagerParsed = false;
+        for (int i = 1; i < args.length; i++) {
+            String token = args[i].toLowerCase(Locale.ROOT);
+            if (token.equals("restored") || token.equals("safe") || token.equals("friendly")) { restoredLoadout = true; continue; }
+            if (token.equals("standard") || token.equals("normal")) { restoredLoadout = false; continue; }
+            String arena = this.normalizeDuelArenaPreference(token);
+            if (arena != null) { arenaPreference = arena; continue; }
+            String roundText = token.startsWith("bestof") ? token.substring(6) : (token.startsWith("bo") ? token.substring(2) : (i >= 2 ? token : ""));
+            if (!roundText.isBlank() && roundText.matches("[0-9]+")) {
+                rounds = Integer.parseInt(roundText);
+                continue;
+            }
+            if (!wagerParsed) {
+                ParsedAmount pa = this.parseCompactAmount(token);
+                if (pa == null || pa.value < 0.0) { p.sendActionBar(Component.text("§cInvalid duel option: " + args[i])); return; }
+                wager = pa.value;
+                wagerParsed = true;
+                continue;
+            }
+            p.sendActionBar(Component.text("§cInvalid duel option: " + args[i]));
+            return;
+        }
+        if (rounds < 1 || rounds > 100) { p.sendActionBar(Component.text("§cRounds must be between 1 and 100.")); return; }
+        if (wager > 0 && this.getMoneyBalance(p) < wager) { p.sendActionBar(Component.text("§cYou can't afford that wager.")); return; }
+        this.sendDuelChallenge(p, target, wager, rounds, restoredLoadout, arenaPreference);
+    }
+
+    // Shared validation. Returns a legacy-colored error, or null if the pair may duel.
+    private String duelPrecheck(Player a, Player b) {
+        if (b.getUniqueId().equals(a.getUniqueId())) return "§cYou can't duel yourself.";
+        if (this.activeDuels.containsKey(a.getUniqueId())) return "§cYou're already in a duel.";
+        if (this.activeDuels.containsKey(b.getUniqueId())) return "§c" + b.getName() + " is already in a duel.";
+        if (a.getGameMode() != GameMode.SURVIVAL || b.getGameMode() != GameMode.SURVIVAL) return "§cBoth players must be in survival mode.";
+        if (this.spectating.containsKey(a.getUniqueId())) return "§cStop spectating first (/spectate).";
+        if (this.spectating.containsKey(b.getUniqueId())) return "§c" + b.getName() + " is currently spectating.";
+        if (this.isCombatTagged(a) || this.isCombatTagged(b)) return "§cYou can't do this in combat";
+        if (this.maintenanceQueueManager != null && this.maintenanceQueueManager.isServerUnderMaintenance("survival"))
+            return "§cSurvival is under maintenance. Try again later.";
+        return null;
+    }
+
+    // Settings dialog (dialog clients only): a wager field + Send Challenge / Cancel.
+    // Duel setup GUI (dialog clients): wager + rounds inputs, and two inventory rules. Esc cancels.
+    private void openDuelSetup(Player challenger, Player target) {
+        UUID tu = target.getUniqueId();
+        List<DialogInput> inputs = List.of(
+            DialogInput.text("wager", Component.text("Wager (optional)", NamedTextColor.GRAY)).width(240).maxLength(16).build(),
+            DialogInput.numberRange("rounds", Component.text("Rounds", NamedTextColor.GRAY), 1.0f, 100.0f).initial(1.0f).step(1.0f).width(240).build(),
+            DialogInput.singleOption("arena", Component.text("Arena", NamedTextColor.GRAY), this.duelArenaDialogOptions()).width(240).build());
+        ActionButton ranked = ActionButton.builder(Component.text("Standard", NamedTextColor.GRAY)).width(150)
+            .action(DialogAction.customClick((view, aud) -> {
+                if (aud instanceof Player pl) this.submitDuelSetup(pl, tu, view.getText("wager"), view.getFloat("rounds"), view.getText("arena"), false);
+            }, ClickCallback.Options.builder().build())).build();
+        ActionButton restored = ActionButton.builder(Component.text("Snapshot Loadout", DIALOG_BRAND)).width(150)
+            .action(DialogAction.customClick((view, aud) -> {
+                if (aud instanceof Player pl) this.submitDuelSetup(pl, tu, view.getText("wager"), view.getFloat("rounds"), view.getText("arena"), true);
+            }, ClickCallback.Options.builder().build())).build();
+        Dialog dialog = this.buildDialog(Component.text("Duel " + target.getName(), DIALOG_BRAND),
+            List.of(DialogBody.plainMessage(Component.text("Challenge " + target.getName() + " to a 1v1. Press Esc to cancel.", NamedTextColor.GRAY))),
+            inputs, DialogType.confirmation(ranked, restored));
+        if (!DialogCompat.show(challenger, dialog)) this.openLegacyDuelSetup(challenger, target, false);
+    }
+
+    private java.util.List<DialogInput.OptionEntry> duelArenaDialogOptions() {
+        return List.of(
+            DialogInput.OptionEntry.create("open", Component.text("Any open area"), true),
+            DialogInput.OptionEntry.create("plains", Component.text("Plains"), false),
+            DialogInput.OptionEntry.create("desert", Component.text("Desert"), false),
+            DialogInput.OptionEntry.create("savanna", Component.text("Savanna"), false),
+            DialogInput.OptionEntry.create("badlands", Component.text("Badlands"), false),
+            DialogInput.OptionEntry.create("snowy_plains", Component.text("Snowy Plains"), false),
+            DialogInput.OptionEntry.create("meadow", Component.text("Meadow"), false),
+            DialogInput.OptionEntry.create("beach", Component.text("Beach"), false),
+            DialogInput.OptionEntry.create("any", Component.text("Any terrain"), false));
+    }
+
+    private void openSoloDuelSetup(Player player) {
+        if (!this.useDialogUi(player)) {
+            this.openLegacyDuelSetup(player, null, true);
+            return;
+        }
+        List<DialogInput> inputs = List.of(
+            DialogInput.text("wager", Component.text("Wager (optional)", NamedTextColor.GRAY)).width(240).maxLength(16).build(),
+            DialogInput.numberRange("rounds", Component.text("Rounds", NamedTextColor.GRAY), 1.0f, 100.0f).initial(1.0f).step(1.0f).width(240).build(),
+            DialogInput.singleOption("arena", Component.text("Arena", NamedTextColor.GRAY), this.duelArenaDialogOptions()).width(240).build());
+        ActionButton standard = ActionButton.builder(Component.text("Standard", NamedTextColor.GRAY)).width(150)
+            .action(DialogAction.customClick((view, aud) -> {
+                if (aud instanceof Player pl) this.submitSoloDuelSetup(pl, view.getText("wager"), view.getFloat("rounds"), view.getText("arena"), false);
+            }, ClickCallback.Options.builder().build())).build();
+        ActionButton restored = ActionButton.builder(Component.text("Snapshot Loadout", DIALOG_BRAND)).width(150)
+            .action(DialogAction.customClick((view, aud) -> {
+                if (aud instanceof Player pl) this.submitSoloDuelSetup(pl, view.getText("wager"), view.getFloat("rounds"), view.getText("arena"), true);
+            }, ClickCallback.Options.builder().build())).build();
+        Dialog dialog = this.buildDialog(Component.text("Solo Duel Test", DIALOG_BRAND),
+            List.of(DialogBody.plainMessage(Component.text("Test duel settings without an opponent. Wagers are disabled.", NamedTextColor.GRAY))),
+            inputs, DialogType.confirmation(standard, restored));
+        if (!DialogCompat.show(player, dialog)) this.openLegacyDuelSetup(player, null, true);
+    }
+
+    private void openLegacyDuelSetup(Player player, Player target, boolean soloTest) {
+        DuelSetupState state = new DuelSetupState(target == null ? null : target.getUniqueId(),
+            target == null ? null : target.getName(), soloTest);
+        this.duelSetupStates.put(player.getUniqueId(), state);
+        this.renderLegacyDuelSetup(player, state);
+    }
+
+    private void renderLegacyDuelSetup(Player player, DuelSetupState state) {
+        Inventory inventory = Bukkit.createInventory(null, 27, TITLE_DUEL_SETUP);
+        ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, "§8", null, List.of());
+        for (int slot = 0; slot < inventory.getSize(); slot++) inventory.setItem(slot, filler);
+        if (state.soloTest) {
+            inventory.setItem(10, this.namedWithLore(Material.BARRIER, "§7Wager disabled", null, List.of("§7Solo tests never use wagers.")));
+        } else {
+            String wager = state.wager <= 0.0 ? "No wager" : "$" + this.formatCompactNumber(state.wager);
+            inventory.setItem(10, this.namedWithLore(Material.GOLD_INGOT, "§fWager: §6" + wager, "duel_setup_wager",
+                List.of("§7Click to enter a value in chat.")));
+        }
+        inventory.setItem(12, this.namedWithLore(Material.ARROW, "§7− Round", "duel_setup_round_down", List.of()));
+        inventory.setItem(13, this.namedWithLore(Material.PAPER, "§fRounds: §b" + state.rounds, null, List.of("§71–100")));
+        inventory.setItem(14, this.namedWithLore(Material.ARROW, "§7+ Round", "duel_setup_round_up", List.of()));
+        inventory.setItem(15, this.namedWithLore(Material.COMPASS, "§fArena: §b" + this.duelArenaLabel(state.arenaPreference),
+            "duel_setup_arena", List.of("§7Click to cycle arena choices.")));
+        inventory.setItem(16, this.namedWithLore(state.restoredLoadout ? Material.CHEST : Material.IRON_SWORD,
+            state.restoredLoadout ? "§fLoadout: §bSnapshot" : "§fLoadout: §bStandard", "duel_setup_loadout",
+            List.of("§7Click to switch mode.")));
+        inventory.setItem(22, this.namedWithLore(Material.LIME_WOOL, state.soloTest ? "§aStart Test" : "§aSend Challenge",
+            "duel_setup_submit", state.soloTest ? List.of("§7Wagers are disabled for solo tests.") : List.of()));
+        inventory.setItem(26, this.namedWithLore(Material.BARRIER, "§cCancel", "duel_setup_cancel", List.of()));
+        player.openInventory(inventory);
+    }
+
+    private void handleLegacyDuelSetupClick(Player player, ItemStack item) {
+        String action = this.uiActionId(item);
+        if (action == null) return;
+        UUID playerId = player.getUniqueId();
+        DuelSetupState state = this.duelSetupStates.get(playerId);
+        if (state == null) {
+            player.closeInventory();
+            return;
+        }
+        switch (action) {
+            case "duel_setup_wager" -> {
+                player.sendMessage("§7Enter a wager amount, or type cancel.");
+                this.pendingDuelSetupInput.put(playerId, text -> {
+                    if ("cancel".equalsIgnoreCase(text.trim())) {
+                        this.renderLegacyDuelSetup(player, state);
+                        return;
+                    }
+                    ParsedAmount amount = this.parseCompactAmount(text.trim());
+                    if (amount == null || amount.value < 0.0) {
+                        player.sendActionBar(Component.text("§cEnter a valid non-negative wager."));
+                    } else {
+                        state.wager = amount.value;
+                    }
+                    this.renderLegacyDuelSetup(player, state);
+                });
+                player.closeInventory();
+            }
+            case "duel_setup_round_down" -> {
+                state.rounds = Math.max(1, state.rounds - 1);
+                this.renderLegacyDuelSetup(player, state);
+            }
+            case "duel_setup_round_up" -> {
+                state.rounds = Math.min(100, state.rounds + 1);
+                this.renderLegacyDuelSetup(player, state);
+            }
+            case "duel_setup_arena" -> {
+                List<String> arenas = List.of("open", "plains", "desert", "savanna", "badlands", "snowy_plains", "meadow", "beach", "any");
+                int current = arenas.indexOf(state.arenaPreference);
+                state.arenaPreference = arenas.get((current + 1 + arenas.size()) % arenas.size());
+                this.renderLegacyDuelSetup(player, state);
+            }
+            case "duel_setup_loadout" -> {
+                state.restoredLoadout = !state.restoredLoadout;
+                this.renderLegacyDuelSetup(player, state);
+            }
+            case "duel_setup_submit" -> {
+                this.duelSetupStates.remove(playerId, state);
+                player.closeInventory();
+                if (state.soloTest) {
+                    this.submitSoloDuelSetup(player, null, (float)state.rounds, state.arenaPreference, state.restoredLoadout);
+                } else {
+                    this.submitDuelSetup(player, state.target, state.wager <= 0.0 ? "" : Double.toString(state.wager),
+                        (float)state.rounds, state.arenaPreference, state.restoredLoadout);
+                }
+            }
+            case "duel_setup_cancel" -> {
+                this.duelSetupStates.remove(playerId, state);
+                this.pendingDuelSetupInput.remove(playerId);
+                player.closeInventory();
+            }
+            default -> { }
+        }
+    }
+
+    private void submitSoloDuelSetup(Player player, String rawWager, Float rawRounds, String rawArena, boolean restoredLoadout) {
+        if (!player.hasPermission("pizzasmp.admin.dueltest")) return;
+        int rounds = rawRounds == null ? 1 : Math.round(rawRounds);
+        if (rounds < 1 || rounds > 100) { player.sendActionBar(Component.text("§cRounds must be between 1 and 100.")); return; }
+        String arenaPreference = this.normalizeDuelArenaPreference(rawArena);
+        if (arenaPreference == null) { player.sendActionBar(Component.text("§cInvalid arena selection.")); return; }
+        this.runOnPlayerThread(player, () -> {
+            DialogCloseCompat.close(player);
+            if (this.activeDuels.containsKey(player.getUniqueId())) { player.sendActionBar(Component.text("§cYou're already in a duel.")); return; }
+            if (player.getGameMode() != GameMode.SURVIVAL) { player.sendActionBar(Component.text("§cSwitch to survival mode first.")); return; }
+            if (this.spectating.containsKey(player.getUniqueId())) { player.sendActionBar(Component.text("§cStop spectating first.")); return; }
+            this.startSoloDuel(player, rounds, restoredLoadout, arenaPreference);
+        });
+    }
+
+    private void submitDuelSetup(Player pl, UUID targetUuid, String rawWager, Float rawRounds, String rawArena, boolean restoredLoadout) {
+        double wager = 0.0;
+        if (rawWager != null && !rawWager.isBlank()) {
+            ParsedAmount pa = this.parseCompactAmount(rawWager.trim());
+            if (pa == null || pa.value < 0.0) { this.runOnPlayerThread(pl, () -> pl.sendActionBar(Component.text("§cInvalid wager."))); return; }
+            wager = pa.value;
+        }
+        int rounds = rawRounds == null ? 1 : Math.round(rawRounds);
+        if (rounds < 1 || rounds > 100) { pl.sendActionBar(Component.text("§cRounds must be between 1 and 100.")); return; }
+        String arenaPreference = this.normalizeDuelArenaPreference(rawArena);
+        if (arenaPreference == null) { pl.sendActionBar(Component.text("§cInvalid arena selection.")); return; }
+        final double fw = wager; final int fr = rounds; final boolean restored = restoredLoadout; final String arena = arenaPreference;
+        this.runOnPlayerThread(pl, () -> {
+            DialogCloseCompat.close(pl);
+            Player t = Bukkit.getPlayer(targetUuid);
+            if (t == null || !t.isOnline()) { pl.sendActionBar(Component.text("§cThat player is offline.")); return; }
+            String err = this.duelPrecheck(pl, t);
+            if (err != null) { pl.sendActionBar(this.legacyColorize(err)); return; }
+            if (fw > 0 && this.getMoneyBalance(pl) < fw) { pl.sendActionBar(Component.text("§cYou can't afford that wager.")); return; }
+            this.sendDuelChallenge(pl, t, fw, fr, restored, arena);
+        });
+    }
+
+    private void sendDuelChallenge(Player challenger, Player target, double wager, int rounds, boolean restoredLoadout, String arenaPreference) {
+        UUID cu = challenger.getUniqueId(), tu = target.getUniqueId();
+        rounds = Math.max(1, Math.min(100, rounds));
+        this.cancelOutgoingDuelRequest(cu, null);   // one outgoing request at a time
+        DuelRequest req = new DuelRequest(cu, tu, wager, rounds, restoredLoadout, arenaPreference, System.currentTimeMillis());
+        this.pendingDuelRequests.put(tu, req);
+        this.getLogger().info("[duel] challenge stored: challenger=" + challenger.getName() + "/" + cu
+            + " target=" + target.getName() + "/" + tu + " wager=" + wager + " rounds=" + rounds
+            + " restoredLoadout=" + restoredLoadout + " arena=" + arenaPreference);
+        String wtxt = wager > 0 ? " §7for §a$" + this.formatCompactNumber(wager) : "";
+        if (rounds > 1) wtxt = wtxt + " §7(" + rounds + " rounds)";
+        if (restoredLoadout) wtxt = wtxt + " §7(snapshot loadout)";
+        wtxt = wtxt + " §7(" + this.duelArenaLabel(arenaPreference).toLowerCase(Locale.ROOT) + ")";
+        Component chat = this.legacyColorize("&#00BFFF" + challenger.getName() + "§7 challenges you to a duel")
+            .append(this.legacyColorize(wtxt)).append(Component.text(". "))
+            .append(Component.text("[Accept]", NamedTextColor.GREEN)
+                .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand("/duel accept " + challenger.getName()))
+                .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text("Click to accept"))))
+            .append(Component.text(" "))
+            .append(Component.text("[Deny]", NamedTextColor.RED)
+                .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand("/duel deny " + challenger.getName()))
+                .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text("Click to deny"))));
+        if (this.useDialogUi(target)) this.openDuelRequestDialog(target, challenger, req);
+        else target.sendMessage(chat);
+        this.hotbarWithSound(target, "&#00BFFF" + challenger.getName() + " §7challenged you to a duel", Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.5f);
+        this.hotbarWithSound(challenger, "&#00BFFFDuel challenge sent to §7" + target.getName(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.9f);
+        PlatformScheduler.globalLater(this, () -> {
+            if (this.pendingDuelRequests.get(tu) == req) {
+                this.pendingDuelRequests.remove(tu);
+                this.runOnPlayerThread(target, () -> target.sendActionBar(Component.text("§cDuel challenge from " + challenger.getName() + " expired")));
+            }
+        }, 60L * 20L);
+    }
+
+    private void openDuelRequestDialog(Player target, Player challenger, DuelRequest req) {
+        String wagerText = req.wager() > 0 ? "$" + this.formatCompactNumber(req.wager()) : "No wager";
+        String modeText = req.restoredLoadout() ? "Snapshot Loadout" : "Standard";
+        Component summary = this.legacyColorize("&f" + req.rounds() + " &7rounds  &8•  &f" + wagerText
+            + "  &8•  &f" + modeText + "\n&7Arena: &f" + this.duelArenaLabel(req.arenaPreference()));
+        ActionButton accept = ActionButton.builder(Component.text("Accept", NamedTextColor.GREEN)).width(150)
+            .action(DialogAction.customClick((view, aud) -> {
+                if (aud instanceof Player pl) {
+                    DialogCloseCompat.close(pl);
+                    this.handleDuelAccept(pl, challenger.getName());
+                }
+            }, ClickCallback.Options.builder().build())).build();
+        ActionButton decline = ActionButton.builder(Component.text("Decline", NamedTextColor.RED)).width(150)
+            .action(DialogAction.customClick((view, aud) -> {
+                if (aud instanceof Player pl) {
+                    DialogCloseCompat.close(pl);
+                    this.handleDuelDeny(pl, challenger.getName());
+                }
+            }, ClickCallback.Options.builder().build())).build();
+        Dialog dialog = this.buildDialog(Component.text("Duel Challenge", DIALOG_BRAND),
+            List.of(DialogBody.plainMessage(Component.text(challenger.getName() + " challenged you", NamedTextColor.GRAY)),
+                DialogBody.plainMessage(summary)), List.of(), DialogType.confirmation(accept, decline));
+        DialogCompat.show(target, dialog);
+    }
+
+    private String normalizeDuelArenaPreference(String raw) {
+        if (raw == null || raw.isBlank()) return "open";
+        return switch (raw.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_')) {
+            case "open", "clear" -> "open";
+            case "any", "wild" -> "any";
+            case "plains", "desert", "savanna", "badlands", "snowy_plains", "meadow", "beach" -> raw.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
+            default -> null;
+        };
+    }
+
+    private String duelArenaLabel(String preference) {
+        return switch (preference == null ? "open" : preference) {
+            case "plains" -> "Plains";
+            case "desert" -> "Desert";
+            case "savanna" -> "Savanna";
+            case "badlands" -> "Badlands";
+            case "snowy_plains" -> "Snowy Plains";
+            case "meadow" -> "Meadow";
+            case "beach" -> "Beach";
+            case "any" -> "Any terrain";
+            default -> "Any open area";
+        };
+    }
+
+    private org.bukkit.block.Biome duelArenaBiome(String preference) {
+        return switch (preference == null ? "open" : preference) {
+            case "plains" -> org.bukkit.block.Biome.PLAINS;
+            case "desert" -> org.bukkit.block.Biome.DESERT;
+            case "savanna" -> org.bukkit.block.Biome.SAVANNA;
+            case "badlands" -> org.bukkit.block.Biome.BADLANDS;
+            case "snowy_plains" -> org.bukkit.block.Biome.SNOWY_PLAINS;
+            case "meadow" -> org.bukkit.block.Biome.MEADOW;
+            case "beach" -> org.bukkit.block.Biome.BEACH;
+            default -> null;
+        };
+    }
+
+    private boolean cancelOutgoingDuelRequest(UUID challengerUuid, Player notify) {
+        boolean removed = false;
+        for (java.util.Iterator<Map.Entry<UUID, DuelRequest>> it = this.pendingDuelRequests.entrySet().iterator(); it.hasNext(); ) {
+            if (it.next().getValue().challenger().equals(challengerUuid)) { it.remove(); removed = true; }
+        }
+        if (removed && notify != null) notify.sendActionBar(Component.text("§aDuel challenge cancelled"));
+        return removed;
+    }
+
+    private void saveDuelReturnLocation(Player player, Location location) {
+        if (player == null || location == null || location.getWorld() == null || this.duelReturnLocationKey == null) return;
+        String encoded = location.getWorld().getUID() + "," + location.getX() + "," + location.getY() + ","
+            + location.getZ() + "," + location.getYaw() + "," + location.getPitch();
+        player.getPersistentDataContainer().set(this.duelReturnLocationKey, PersistentDataType.STRING, encoded);
+        player.saveData();
+    }
+
+    private Location loadDuelReturnLocation(Player player) {
+        if (player == null || this.duelReturnLocationKey == null) return null;
+        String encoded = player.getPersistentDataContainer().get(this.duelReturnLocationKey, PersistentDataType.STRING);
+        if (encoded == null) return null;
+        try {
+            String[] fields = encoded.split(",", 6);
+            if (fields.length != 6) return null;
+            World world = Bukkit.getWorld(UUID.fromString(fields[0]));
+            if (world == null) return null;
+            return new Location(world, Double.parseDouble(fields[1]), Double.parseDouble(fields[2]),
+                Double.parseDouble(fields[3]), Float.parseFloat(fields[4]), Float.parseFloat(fields[5]));
+        } catch (IllegalArgumentException ex) {
+            this.getLogger().warning("Ignoring an invalid saved duel return marker.");
+            return null;
+        }
+    }
+
+    private void clearDuelReturnLocation(Player player) {
+        if (player == null || this.duelReturnLocationKey == null) return;
+        player.getPersistentDataContainer().remove(this.duelReturnLocationKey);
+        player.saveData();
+    }
+
+    private void handleDuelAccept(Player accepter, String challengerNameOrNull) {
+        UUID tu = accepter.getUniqueId();
+        DuelRequest req = this.pendingDuelRequests.get(tu);
+        this.getLogger().info("[duel] accept by " + accepter.getName() + "/" + tu + " name-arg=" + challengerNameOrNull
+            + " req=" + (req == null ? "NONE" : ("challenger=" + req.challenger() + " wager=" + req.wager())));
+        if (req == null) { accepter.sendActionBar(Component.text("§cNo pending duel challenge")); return; }
+        Player challenger = Bukkit.getPlayer(req.challenger());
+        if ((challenger == null || !challenger.isOnline()) && challengerNameOrNull != null) {
+            challenger = Bukkit.getPlayerExact(challengerNameOrNull);   // fallback: resolve by the name in the accept command
+        }
+        if (challenger == null || !challenger.isOnline()) { this.pendingDuelRequests.remove(tu); accepter.sendActionBar(Component.text("§cThat player is no longer online")); return; }
+        if (challengerNameOrNull != null && !challenger.getName().equalsIgnoreCase(challengerNameOrNull)) {
+            accepter.sendActionBar(Component.text("§cNo duel challenge from " + challengerNameOrNull)); return;
+        }
+        this.pendingDuelRequests.remove(tu);
+        // Check from the ACCEPTER's side (their combat/spectating + both players' active-duel state);
+        // the challenger's combat was already gated at send time.
+        String err = this.duelPrecheck(accepter, challenger);
+        if (err != null) { accepter.sendActionBar(this.legacyColorize(err)); challenger.sendActionBar(this.legacyColorize(err)); return; }
+        double wager = req.wager();
+        if (wager > 0) {
+            if (this.getMoneyBalance(challenger) < wager) { accepter.sendActionBar(Component.text("§c" + challenger.getName() + " can't cover the wager")); challenger.sendActionBar(Component.text("§cYou can't cover the wager anymore")); return; }
+            if (this.getMoneyBalance(accepter) < wager)   { accepter.sendActionBar(Component.text("§cYou can't afford the wager")); challenger.sendActionBar(Component.text("§c" + accepter.getName() + " can't afford the wager")); return; }
+            if (!this.withdrawMoney(challenger, wager)) { accepter.sendActionBar(Component.text("§cWager escrow failed")); return; }
+            if (!this.withdrawMoney(accepter, wager))   { this.depositMoney(challenger, wager); accepter.sendActionBar(Component.text("§cWager escrow failed")); return; }
+        }
+        this.startDuel(challenger, accepter, wager, req.rounds(), req.restoredLoadout(), req.arenaPreference());
+    }
+
+    private void handleDuelDeny(Player p, String nameOrNull) {
+        DuelRequest req = this.pendingDuelRequests.remove(p.getUniqueId());
+        if (req == null) { p.sendActionBar(Component.text("§cNo pending duel challenge")); return; }
+        p.sendActionBar(Component.text("§7Duel challenge denied"));
+        Player challenger = Bukkit.getPlayer(req.challenger());
+        if (challenger != null && challenger.isOnline()) challenger.sendActionBar(Component.text("§c" + p.getName() + " denied your duel"));
+    }
+
+    private void startSoloDuel(Player player, int rounds, boolean restoredLoadout, String arenaPreference) {
+        DuelSession s = new DuelSession(player.getUniqueId(), UUID.randomUUID(), 0.0, rounds,
+            restoredLoadout, arenaPreference, true, player.getLocation());
+        s.borderRadius = Math.max(64.0, this.settings.getDouble("duel.border-radius", 64.0));
+        s.startInvA = this.duelSnapshot(player);
+        s.returnA = player.getLocation().clone();
+        this.saveDuelReturnLocation(player, s.returnA);
+        this.captureDuelBorder(player);
+        this.activeDuels.put(s.a, s);
+        this.beginDuelArena(s);
+    }
+
+    private void startDuel(Player a, Player b, double wager, int rounds, boolean restoredLoadout, String arenaPreference) {
+        DuelSession s = new DuelSession(a.getUniqueId(), b.getUniqueId(), wager, rounds, restoredLoadout, arenaPreference);
+        s.borderRadius = Math.max(64.0, this.settings.getDouble("duel.border-radius", 64.0));
+        // Snapshot both full inventories at the start. Every later round starts from this exact snapshot;
+        // Restored Loadout mode also restores it when the match ends.
+        s.startInvA = this.duelSnapshot(a);
+        s.startInvB = this.duelSnapshot(b);
+        s.returnA = a.getLocation().clone();
+        s.returnB = b.getLocation().clone();
+        this.saveDuelReturnLocation(a, s.returnA);
+        this.saveDuelReturnLocation(b, s.returnB);
+        this.captureDuelBorder(a); this.captureDuelBorder(b);
+        this.activeDuels.put(a.getUniqueId(), s);
+        this.activeDuels.put(b.getUniqueId(), s);
+        long tagUntil = System.currentTimeMillis() + Math.max(30, this.getCombatTagSeconds()) * 1000L;
+        this.applyCombatTag(a, tagUntil); this.applyCombatTag(b, tagUntil);
+        this.beginDuelArena(s);
+    }
+
+    private World duelSourceWorld() {
+        String sourceName = this.settings.getString("duel.source-world", "world");
+        World source = Bukkit.getWorld(sourceName);
+        if (source == null) source = Bukkit.getWorld("world");
+        if (source == null && !Bukkit.getWorlds().isEmpty()) source = Bukkit.getWorlds().getFirst();
+        return source;
+    }
+
+    private void tickDuelArenaSearchElapsed(DuelSession session, long searchStartedAt) {
+        if (session.ended || session.arena != null || session.arenaSearchStartedAt != searchStartedAt) return;
+        long elapsedSeconds = Math.max(0L, (System.currentTimeMillis() - searchStartedAt) / 1000L);
+        String elapsed = String.format(Locale.ROOT, "%02d:%02d", elapsedSeconds / 60L, elapsedSeconds % 60L);
+        Component status = Component.text("Duel  ", NamedTextColor.AQUA)
+            .append(Component.text("Elapsed " + elapsed, NamedTextColor.GRAY));
+        for (UUID id : session.soloTest ? new UUID[]{session.a} : new UUID[]{session.a, session.b}) {
+            Player participant = Bukkit.getPlayer(id);
+            if (participant != null && participant.isOnline()) {
+                this.runOnPlayerThread(participant, () -> {
+                    if (!session.ended && session.arena == null && participant.isOnline()) participant.sendActionBar(status);
+                });
+            }
+        }
+        Player anchor = Bukkit.getPlayer(session.a);
+        if (anchor == null || !anchor.isOnline()) anchor = Bukkit.getPlayer(session.b);
+        if (anchor != null && anchor.isOnline()) {
+            Player taskAnchor = anchor;
+            this.runPlayerTaskLater(taskAnchor, () -> this.tickDuelArenaSearchElapsed(session, searchStartedAt), 20L);
+        }
+    }
+
+    // Duels use a private world, so rollback cannot touch survival builds. The world must already
+    // have region data; arena selection below never generates chunks during matchmaking.
+    private World duelArenaWorld() {
+        String name = this.settings.getString("duel.world-name", "duel_arena").trim();
+        if (name.isEmpty()) name = "duel_arena";
+        World existing = Bukkit.getWorld(name);
+        if (existing != null) {
+            World source = this.duelSourceWorld();
+            if (source != null && existing.getDifficulty() != source.getDifficulty()) {
+                existing.setDifficulty(source.getDifficulty());
+            }
+            return existing;
+        }
+        File worldDirectory = new File(Bukkit.getWorldContainer(), name);
+        File regionDirectory = new File(worldDirectory, "region");
+        File[] storedRegions = regionDirectory.listFiles((dir, file) -> file.matches("r\\.-?\\d+\\.-?\\d+\\.mca"));
+        if (!new File(worldDirectory, "level.dat").isFile() || storedRegions == null || storedRegions.length == 0) return null;
+        World source = this.duelSourceWorld();
+        WorldCreator creator = new WorldCreator(name).environment(World.Environment.NORMAL)
+            .generateStructures(false).keepSpawnLoaded(net.kyori.adventure.util.TriState.FALSE);
+        if (source != null) {
+            creator.seed(source.getSeed());
+            creator.generateStructures(source.canGenerateStructures());
+        }
+        World created = Bukkit.createWorld(creator);
+        if (created != null) {
+            created.setAutoSave(true);
+            created.setDifficulty(source == null ? Difficulty.HARD : source.getDifficulty());
+            created.setGameRule(GameRule.DO_MOB_SPAWNING, false);
+            created.setGameRule(GameRule.DO_DAYLIGHT_CYCLE, false);
+            created.setGameRule(GameRule.DO_WEATHER_CYCLE, false);
+            created.setTime(6000L);
+            created.setStorm(false);
+            created.setThundering(false);
+        }
+        return created;
+    }
+
+    private boolean isDuelArenaWorld(World world) {
+        return world != null && world.getName().equalsIgnoreCase(this.settings.getString("duel.world-name", "duel_arena"));
+    }
+
+    // Select from a bounded pool of chunks already stored in the private world's region files.
+    // No search path may generate a new chunk or modify the survival world.
+    private void beginDuelArena(DuelSession s) {
+        World arenaWorld = this.duelArenaWorld();
+        if (arenaWorld == null) { this.abortDuel(s, "§cDuel arena is unavailable. Wager refunded."); return; }
+        int timeoutSeconds = Math.max(5, Math.min(60, this.settings.getInt("duel.arena-search-timeout-seconds", 20)));
+        long searchDeadline = System.currentTimeMillis() + timeoutSeconds * 1000L;
+        s.arenaSearchDeadline = searchDeadline;
+        s.stuckDeadline = searchDeadline;
+        s.arenaSearchStartedAt = System.currentTimeMillis();
+        this.tickDuelArenaSearchElapsed(s, s.arenaSearchStartedAt);
+        PlatformScheduler.TaskHandle searchTimeout = PlatformScheduler.globalLater(this, () -> {
+            if (!s.ended && s.startA == null && s.arenaSearchDeadline == searchDeadline) {
+                this.abortDuel(s, this.duelArenaNotFoundMessage(s));
+            }
+        }, timeoutSeconds * 20L);
+        if (!searchTimeout.wasAccepted()) {
+            this.getLogger().warning("[duel] arena timeout task was rejected; the global duel failsafe will enforce the deadline");
+        }
+        int maxRegions = Math.max(1, Math.min(32, this.settings.getInt("duel.pre-generated-region-count", 8)));
+        int chunkRadius = Math.max(3, (int)Math.ceil((s.borderRadius + 16.0) / 16.0));
+        this.runAsyncTask(() -> {
+            List<Long> stored = this.duelArenaCandidateChunks;
+            if (stored == null) {
+                stored = this.readStoredDuelArenaCandidates(arenaWorld, maxRegions, chunkRadius);
+                this.duelArenaCandidateChunks = stored;
+            }
+            List<Long> candidates = new java.util.ArrayList<>(stored);
+            java.util.Collections.shuffle(candidates);
+            this.getLogger().info("[duel] existing arena candidates=" + candidates.size()
+                + " preference=" + s.arenaPreference);
+            this.retryDuelArenaAttempt(s, arenaWorld, candidates, 0);
+        });
+    }
+
+    private List<Long> readStoredDuelArenaCandidates(World world, int maxRegions, int chunkRadius) {
+        File regionDir = new File(world.getWorldFolder(), "region");
+        File[] files = regionDir.listFiles((dir, name) -> name.matches("r\\.-?\\d+\\.-?\\d+\\.mca"));
+        if (files == null) return List.of();
+        java.util.Set<Long> generated = new java.util.HashSet<>();
+        List<List<Long>> regions = new java.util.ArrayList<>();
+        for (File file : files) {
+            String[] parts = file.getName().substring(2, file.getName().length() - 4).split("\\.");
+            if (parts.length != 2) continue;
+            int regionX, regionZ;
+            try { regionX = Integer.parseInt(parts[0]); regionZ = Integer.parseInt(parts[1]); }
+            catch (NumberFormatException ex) { continue; }
+            try (java.io.FileInputStream input = new java.io.FileInputStream(file)) {
+                byte[] header = input.readNBytes(4096);
+                if (header.length != 4096) continue;
+                List<Long> chunks = new java.util.ArrayList<>();
+                for (int index = 0; index < 1024; index++) {
+                    int offset = index * 4;
+                    if (header[offset] == 0 && header[offset + 1] == 0 && header[offset + 2] == 0) continue;
+                    int chunkX = regionX * 32 + index % 32, chunkZ = regionZ * 32 + index / 32;
+                    long key = duelChunkKey(chunkX, chunkZ);
+                    chunks.add(key);
+                    generated.add(key);
+                }
+                if (!chunks.isEmpty()) regions.add(chunks);
+            } catch (IOException ex) {
+                this.getLogger().warning("Unable to inspect an existing duel region: " + ex.getMessage());
+            }
+        }
+        regions.sort((left, right) -> Integer.compare(right.size(), left.size()));
+        List<Long> candidates = new java.util.ArrayList<>();
+        for (int i = 0; i < Math.min(maxRegions, regions.size()); i++) {
+            for (long key : regions.get(i)) {
+                int chunkX = (int)(key >> 32), chunkZ = (int)key;
+                boolean complete = true;
+                for (int dx = -chunkRadius; dx <= chunkRadius && complete; dx++) {
+                    for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                        if (!generated.contains(duelChunkKey(chunkX + dx, chunkZ + dz))) { complete = false; break; }
+                    }
+                }
+                if (complete) candidates.add(key);
+            }
+        }
+        return List.copyOf(candidates);
+    }
+
+    private static long duelChunkKey(int x, int z) {
+        return ((long)x << 32) | (z & 0xffffffffL);
+    }
+
+    private void duelArenaAttempt(DuelSession s, World world, List<Long> candidates, int attempt) {
+        if (s.ended || s.paused || s.celebrating || s.pendingMatchOver || s.startA != null || s.arenaLease != null) return;
+        Player pa = Bukkit.getPlayer(s.a), pb = s.soloTest ? null : Bukkit.getPlayer(s.b);
+        if (pa == null || !pa.isOnline()) { if (s.soloTest) this.finishSoloDuel(s, null, false); else this.forfeitDuel(s, s.a); return; }
+        if (!s.soloTest && (pb == null || !pb.isOnline())) { this.forfeitDuel(s, s.b); return; }
+        int maxAttempts = Math.max(16, this.settings.getInt("duel.pre-generated-search-attempts", 400));
+        if (attempt >= Math.min(maxAttempts, candidates.size())
+                || (s.arenaSearchDeadline > 0L && System.currentTimeMillis() >= s.arenaSearchDeadline)) {
+            this.abortDuel(s, this.duelArenaNotFoundMessage(s));
+            return;
+        }
+        long key = candidates.get(attempt);
+        int x = ((int)(key >> 32) << 4) + 8, z = ((int)key << 4) + 8;
+        this.preparePrivateDuelArena(s, world, candidates, attempt, pa, x, z);
+    }
+
+    private void preparePrivateDuelArena(DuelSession s, World arenaWorld, List<Long> candidates, int attempt, Player anchor, int x, int z) {
+        int spacing = Math.max(3, this.settings.getInt("duel.spacing", 6));
+        int openScan = Math.max(8, Math.min(32, this.settings.getInt("duel.open-arena-scan-radius", 24)));
+        int outerScan = Math.max(openScan, Math.min(48, (int)s.borderRadius - 8));
+        int maxDelta = Math.max(2, Math.min(16, this.settings.getInt("duel.open-arena-max-height-difference", 7)));
+        org.bukkit.block.Biome requestedBiome = this.duelArenaBiome(s.arenaPreference);
+        long candidateDeadlineMillis = System.currentTimeMillis()
+            + Math.max(1L, Math.min(2500L, s.arenaSearchDeadline - System.currentTimeMillis()));
+        List<DuelArenaColumnProbe> probes = this.duelArenaColumnProbes(x, z, spacing, openScan, outerScan,
+            requestedBiome != null);
+        Map<Long, List<DuelArenaColumnProbe>> probesByChunk = new java.util.HashMap<>();
+        for (DuelArenaColumnProbe probe : probes) {
+            long chunkKey = duelChunkKey(probe.x() >> 4, probe.z() >> 4);
+            probesByChunk.computeIfAbsent(chunkKey, ignored -> new java.util.ArrayList<>()).add(probe);
+        }
+        if (probesByChunk.isEmpty() || !this.isDuelArenaSearchCurrent(s)) {
+            this.retryDuelArenaAttempt(s, arenaWorld, candidates, attempt + 1);
+            return;
+        }
+
+        java.util.concurrent.atomic.AtomicBoolean candidateActive = new java.util.concurrent.atomic.AtomicBoolean(true);
+        Map<DuelArenaColumnKey, DuelArenaColumnResult> results = new ConcurrentHashMap<>();
+        List<java.util.concurrent.CompletableFuture<Boolean>> chunkWork = new java.util.ArrayList<>();
+        java.util.concurrent.atomic.AtomicBoolean rejectionLogged = new java.util.concurrent.atomic.AtomicBoolean();
+        for (Map.Entry<Long, List<DuelArenaColumnProbe>> entry : probesByChunk.entrySet()) {
+            int chunkX = (int)(entry.getKey() >> 32), chunkZ = (int)(long)entry.getKey();
+            List<DuelArenaColumnProbe> chunkProbes = List.copyOf(entry.getValue());
+            java.util.concurrent.CompletableFuture<Boolean> checked = new java.util.concurrent.CompletableFuture<>();
+            chunkWork.add(checked);
+            boolean generatedCheckAccepted = this.scheduleDuelArenaRegionTask(arenaWorld, chunkX, chunkZ, () -> {
+                if (!candidateActive.get() || !this.isDuelArenaSearchCurrent(s)) {
+                    checked.complete(false);
+                    return;
+                }
+                try {
+                    if (!arenaWorld.isChunkGenerated(chunkX, chunkZ)) {
+                        checked.complete(false);
+                        return;
+                    }
+                    java.util.concurrent.CompletableFuture<org.bukkit.Chunk> load = arenaWorld.getChunkAtAsync(chunkX, chunkZ, false);
+                    if (load == null) {
+                        checked.complete(false);
+                        return;
+                    }
+                    load.whenComplete((chunk, loadError) -> {
+                        if (!candidateActive.get() || loadError != null || chunk == null) {
+                            checked.complete(false);
+                            return;
+                        }
+                        boolean inspectionAccepted = this.scheduleDuelArenaRegionTask(arenaWorld, chunkX, chunkZ, () -> {
+                            if (!candidateActive.get() || !this.isDuelArenaSearchCurrent(s)) {
+                                checked.complete(false);
+                                return;
+                            }
+                            boolean addedTicket = false;
+                            try {
+                                if (!arenaWorld.isChunkLoaded(chunkX, chunkZ)) {
+                                    checked.complete(false);
+                                    return;
+                                }
+                                org.bukkit.Chunk inspectionChunk = arenaWorld.getChunkAt(chunkX, chunkZ, false);
+                                if (!inspectionChunk.getPluginChunkTickets().contains(this)) {
+                                    addedTicket = inspectionChunk.addPluginChunkTicket(this);
+                                    if (!addedTicket && !inspectionChunk.getPluginChunkTickets().contains(this)) {
+                                        checked.complete(false);
+                                        return;
+                                    }
+                                }
+                                for (DuelArenaColumnProbe probe : chunkProbes) {
+                                    if (!candidateActive.get() || !this.isDuelArenaSearchCurrent(s)) {
+                                        checked.complete(false);
+                                        return;
+                                    }
+                                    results.put(new DuelArenaColumnKey(probe.x(), probe.z()),
+                                        this.inspectDuelArenaColumn(arenaWorld, probe));
+                                }
+                                checked.complete(true);
+                            } catch (Throwable inspectionError) {
+                                checked.complete(false);
+                            } finally {
+                                if (addedTicket) {
+                                    try {
+                                        org.bukkit.Chunk cleanupChunk = arenaWorld.getChunkAt(chunkX, chunkZ, false);
+                                        if (cleanupChunk.getPluginChunkTickets().contains(this)) cleanupChunk.removePluginChunkTicket(this);
+                                    } catch (Throwable cleanupError) {
+                                        this.getLogger().warning("[duel] unable to release a temporary arena-search chunk ticket");
+                                    }
+                                }
+                            }
+                        });
+                        if (!inspectionAccepted) {
+                            if (rejectionLogged.compareAndSet(false, true))
+                                this.getLogger().warning("[duel] region scheduler rejected arena inspection; trying another stored candidate");
+                            checked.complete(false);
+                        }
+                    });
+                } catch (Throwable loadError) {
+                    checked.complete(false);
+                }
+            });
+            if (!generatedCheckAccepted) {
+                if (rejectionLogged.compareAndSet(false, true))
+                    this.getLogger().warning("[duel] region scheduler rejected arena chunk check; trying another stored candidate");
+                checked.complete(false);
+            }
+        }
+
+        long candidateTimeoutMillis = Math.max(1L, candidateDeadlineMillis - System.currentTimeMillis());
+        java.util.concurrent.CompletableFuture.allOf(chunkWork.toArray(new java.util.concurrent.CompletableFuture[0]))
+            .orTimeout(candidateTimeoutMillis, TimeUnit.MILLISECONDS)
+            .whenComplete((ignored, error) -> {
+                candidateActive.set(false);
+                if (error != null || chunkWork.stream().anyMatch(work -> !Boolean.TRUE.equals(work.getNow(false)))
+                        || !this.isDuelArenaSearchCurrent(s)) {
+                    this.retryDuelArenaAttempt(s, arenaWorld, candidates, attempt + 1);
+                    return;
+                }
+                DuelArenaValidationResult validation = this.isOpenDuelArena(probes, results, maxDelta, requestedBiome);
+                if (validation == null) {
+                    this.retryDuelArenaAttempt(s, arenaWorld, candidates, attempt + 1);
+                    return;
+                }
+                this.reserveDuelArenaCandidate(s, arenaWorld, anchor, candidates, attempt, x, z, spacing,
+                    validation, candidateDeadlineMillis);
+            });
+    }
+
+    private boolean isDuelArenaSearchCurrent(DuelSession session) {
+        return session != null && !this.shuttingDown && !session.ended && !session.paused && !session.celebrating
+            && !session.pendingMatchOver && session.startA == null && session.arenaLease == null
+            && session.arenaSearchDeadline > System.currentTimeMillis();
+    }
+
+    private boolean scheduleDuelArenaRegionTask(World world, int chunkX, int chunkZ, Runnable task) {
+        if (world == null || task == null) return false;
+        try {
+            return PlatformScheduler.regionNow(this,
+                new Location(world, (chunkX << 4) + 8, 0.0, (chunkZ << 4) + 8), task).wasAccepted();
+        } catch (Throwable rejected) {
+            return false;
+        }
+    }
+
+    private boolean isDuelArenaSetupPending(DuelSession session) {
+        return session != null && !this.shuttingDown && !session.ended && !session.paused && !session.celebrating
+            && !session.pendingMatchOver && session.startA == null && session.arenaLease != null
+            && session.arenaSearchDeadline == 0L;
+    }
+
+    private void retryDuelArenaAttempt(DuelSession session, World world, List<Long> candidates, int attempt) {
+        if (!this.isDuelArenaSearchCurrent(session)) return;
+        PlatformScheduler.TaskHandle queued = PlatformScheduler.globalNow(this, () -> {
+            if (!this.isDuelArenaSearchCurrent(session)) return;
+            if (attempt >= Math.min(Math.max(16, this.settings.getInt("duel.pre-generated-search-attempts", 400)), candidates.size())) {
+                this.abortDuel(session, this.duelArenaNotFoundMessage(session));
+                return;
+            }
+            Player retryAnchor = Bukkit.getPlayer(session.a);
+            if (retryAnchor == null || !retryAnchor.isOnline()) return; // the duel lifecycle handles a disconnected anchor
+            Player scheduledAnchor = retryAnchor;
+            PlatformScheduler.TaskHandle retry = PlatformScheduler.entityLater(this, scheduledAnchor,
+                () -> {
+                    if (!this.isDuelArenaSearchCurrent(session)) return;
+                    if (scheduledAnchor.isOnline()) this.duelArenaAttempt(session, world, candidates, attempt);
+                    else this.retryDuelArenaAttempt(session, world, candidates, attempt);
+                },
+                () -> this.retryDuelArenaAttempt(session, world, candidates, attempt), 1L);
+            if (!retry.wasAccepted()) {
+                this.getLogger().warning("[duel] participant scheduler rejected the next arena candidate");
+                PlatformScheduler.globalLater(this, () -> this.retryDuelArenaAttempt(session, world, candidates, attempt), 1L);
+            }
+        });
+        if (!queued.wasAccepted()) {
+            this.getLogger().warning("[duel] global scheduler rejected arena retry; the arena-search deadline remains armed");
+        }
+    }
+
+    private List<DuelArenaColumnProbe> duelArenaColumnProbes(int centerX, int centerZ, int spacing,
+            int openScan, int outerScan, boolean checkBiome) {
+        Map<DuelArenaColumnKey, Integer> roles = new java.util.LinkedHashMap<>();
+        this.addDuelArenaProbe(roles, centerX, centerZ, DUEL_PROBE_SAFE_SPAWN | DUEL_PROBE_OPEN_CENTER
+            | (checkBiome ? DUEL_PROBE_REQUESTED_BIOME : 0));
+        this.addDuelArenaProbe(roles, centerX - spacing, centerZ, DUEL_PROBE_SAFE_SPAWN | DUEL_PROBE_START_A);
+        this.addDuelArenaProbe(roles, centerX + spacing, centerZ, DUEL_PROBE_SAFE_SPAWN | DUEL_PROBE_START_B);
+        for (int dx = -openScan; dx <= openScan; dx += 4) {
+            for (int dz = -openScan; dz <= openScan; dz += 4)
+                this.addDuelArenaProbe(roles, centerX + dx, centerZ + dz, DUEL_PROBE_OPEN_CENTER);
+        }
+        for (int dx = -outerScan; dx <= outerScan; dx += 16) {
+            for (int dz = -outerScan; dz <= outerScan; dz += 16)
+                this.addDuelArenaProbe(roles, centerX + dx, centerZ + dz, DUEL_PROBE_OPEN_OUTER);
+        }
+        // The old interpolation samples every block along this horizontal line (and may repeat some
+        // columns if the two safe Y values differ). This superset preserves all distinct columns.
+        for (int sampleX = centerX - spacing; sampleX <= centerX + spacing; sampleX++)
+            this.addDuelArenaProbe(roles, sampleX, centerZ, DUEL_PROBE_START_LINE);
+        List<DuelArenaColumnProbe> probes = new java.util.ArrayList<>(roles.size());
+        roles.forEach((key, flags) -> probes.add(new DuelArenaColumnProbe(key.x(), key.z(), flags)));
+        return List.copyOf(probes);
+    }
+
+    private void addDuelArenaProbe(Map<DuelArenaColumnKey, Integer> probes, int x, int z, int role) {
+        DuelArenaColumnKey key = new DuelArenaColumnKey(x, z);
+        probes.merge(key, role, (left, right) -> left | right);
+    }
+
+    private DuelArenaColumnResult inspectDuelArenaColumn(World world, DuelArenaColumnProbe probe) {
+        Location safe = (probe.roles() & DUEL_PROBE_SAFE_SPAWN) == 0 ? null
+            : this.findSafeRtpLocation(world, probe.x(), probe.z(), 0.0f);
+        int safeY = safe == null ? Integer.MIN_VALUE : safe.getBlockY();
+        Material safeGround = safe == null ? Material.AIR : world.getBlockAt(probe.x(), safeY - 1, probe.z()).getType();
+        int surfaceY = world.getHighestBlockYAt(probe.x(), probe.z());
+        Material top = world.getBlockAt(probe.x(), surfaceY, probe.z()).getType();
+        boolean unsafe = this.isUnsafeRtpBlock(world.getBlockAt(probe.x(), surfaceY, probe.z()));
+        boolean clearHeadroom = world.getBlockAt(probe.x(), surfaceY + 1, probe.z()).isPassable()
+            && world.getBlockAt(probe.x(), surfaceY + 2, probe.z()).isPassable();
+        boolean foliage = org.bukkit.Tag.LOGS.isTagged(top) || org.bukkit.Tag.LEAVES.isTagged(top);
+        org.bukkit.block.Biome biome = (probe.roles() & DUEL_PROBE_REQUESTED_BIOME) != 0 && safe != null
+            ? world.getBlockAt(probe.x(), safeY, probe.z()).getBiome() : null;
+        return new DuelArenaColumnResult(safeY, safeGround, surfaceY, top.isSolid(), unsafe,
+            clearHeadroom, foliage, biome);
+    }
+
+    private DuelArenaValidationResult isOpenDuelArena(List<DuelArenaColumnProbe> probes,
+            Map<DuelArenaColumnKey, DuelArenaColumnResult> results, int maxDelta,
+            org.bukkit.block.Biome requestedBiome) {
+        int minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE, centerY = Integer.MIN_VALUE;
+        int startAY = Integer.MIN_VALUE, startBY = Integer.MIN_VALUE, samples = 0;
+        for (DuelArenaColumnProbe probe : probes) {
+            DuelArenaColumnResult result = results.get(new DuelArenaColumnKey(probe.x(), probe.z()));
+            if (result == null) return null;
+            int roles = probe.roles();
+            if ((roles & DUEL_PROBE_SAFE_SPAWN) != 0) {
+                if (result.safeY() == Integer.MIN_VALUE || result.safeGround() == Material.ICE
+                        || result.safeGround() == Material.PACKED_ICE || result.safeGround() == Material.BLUE_ICE
+                        || result.safeGround() == Material.FROSTED_ICE) return null;
+                if ((roles & DUEL_PROBE_OPEN_CENTER) != 0) centerY = result.safeY();
+                if ((roles & DUEL_PROBE_START_A) != 0) startAY = result.safeY();
+                if ((roles & DUEL_PROBE_START_B) != 0) startBY = result.safeY();
+            }
+            if ((roles & DUEL_PROBE_REQUESTED_BIOME) != 0 && requestedBiome != null
+                    && result.biome() != requestedBiome) return null;
+            if ((roles & DUEL_PROBE_OPEN_CENTER) != 0) {
+                if (!result.groundSolid() || result.groundUnsafe() || result.foliage() || !result.clearHeadroom()) return null;
+                minY = Math.min(minY, result.surfaceY());
+                maxY = Math.max(maxY, result.surfaceY());
+                samples++;
+            }
+            if ((roles & DUEL_PROBE_OPEN_OUTER) != 0 && (!result.groundSolid() || result.groundUnsafe())) return null;
+            if ((roles & DUEL_PROBE_START_LINE) != 0 && !result.clearHeadroom()) return null;
+        }
+        if (samples == 0 || maxY - minY > maxDelta || centerY == Integer.MIN_VALUE
+                || startAY == Integer.MIN_VALUE || startBY == Integer.MIN_VALUE) return null;
+        return new DuelArenaValidationResult(centerY, startAY, startBY);
+    }
+
+    private void reserveDuelArenaCandidate(DuelSession session, World world, Player anchor,
+            List<Long> candidates, int attempt, int x, int z, int spacing, DuelArenaValidationResult validation,
+            long candidateDeadlineMillis) {
+        if (candidateDeadlineMillis <= System.currentTimeMillis()) {
+            this.retryDuelArenaAttempt(session, world, candidates, attempt + 1);
+            return;
+        }
+        java.util.concurrent.atomic.AtomicInteger state = new java.util.concurrent.atomic.AtomicInteger(); // pending, running, cancelled, completed
+        java.util.concurrent.CompletableFuture<Boolean> result = new java.util.concurrent.CompletableFuture<>();
+        boolean reservationAccepted = this.scheduleDuelArenaRegionTask(world, x >> 4, z >> 4, () -> {
+            if (!state.compareAndSet(0, 1)) return;
+            if (!this.isDuelArenaSearchCurrent(session)) {
+                if (state.compareAndSet(1, 3)) result.complete(false);
+                return;
+            }
+            Location center = new Location(world, x + 0.5, validation.centerY(), z + 0.5, 0.0f, 0.0f);
+            boolean reserved = this.reserveDuelArena(session, center);
+            if (state.compareAndSet(1, 3)) {
+                if (reserved) {
+                    session.arenaSearchDeadline = 0L;
+                    session.stuckDeadline = System.currentTimeMillis() + 10000L;
+                }
+                result.complete(reserved);
+            } else if (reserved) {
+                this.releaseDuelArenaLease(session);
+            }
+        });
+        if (!reservationAccepted) {
+            state.compareAndSet(0, 2);
+            this.getLogger().warning("[duel] region scheduler rejected arena reservation; trying another stored candidate");
+            result.complete(false);
+        }
+        long timeoutDelayMillis = Math.max(1L, candidateDeadlineMillis - System.currentTimeMillis());
+        long timeoutDelayTicks = Math.max(1L, (timeoutDelayMillis + 49L) / 50L);
+        Runnable expireReservation = () -> {
+            if (state.compareAndSet(0, 2) || state.compareAndSet(1, 2)) result.complete(false);
+        };
+        PlatformScheduler.TaskHandle timeout = PlatformScheduler.globalLater(this, expireReservation, timeoutDelayTicks);
+        if (!timeout.wasAccepted()) {
+            this.getLogger().warning("[duel] global scheduler rejected arena reservation timeout; using async timeout fallback");
+        }
+        java.util.concurrent.CompletableFuture.delayedExecutor(timeoutDelayMillis, TimeUnit.MILLISECONDS).execute(expireReservation);
+        result.whenComplete((reserved, error) -> {
+            timeout.cancel();
+            if (error != null || !Boolean.TRUE.equals(reserved) || !this.isDuelArenaSetupPending(session)) {
+                if (Boolean.TRUE.equals(reserved) && session.startA == null) this.releaseDuelArenaLease(session);
+                this.retryDuelArenaAttempt(session, world, candidates, attempt + 1);
+                return;
+            }
+            this.scheduleDuelArenaSetup(session, world, anchor, x, z, spacing, validation);
+        });
+    }
+
+    private void scheduleDuelArenaSetup(DuelSession session, World world, Player anchor,
+            int x, int z, int spacing, DuelArenaValidationResult validation) {
+        PlatformScheduler.TaskHandle setup = PlatformScheduler.entityNow(this, anchor, () -> {
+            if (!this.isDuelArenaSetupPending(session)) {
+                if (session.startA == null) this.releaseDuelArenaLease(session);
+                return;
+            }
+            Location center = new Location(world, x + 0.5, validation.centerY(), z + 0.5, 0.0f, 0.0f);
+            Location aLoc = new Location(world, x - spacing + 0.5, validation.startAY(), z + 0.5, 0.0f, 0.0f);
+            Location bLoc = new Location(world, x + spacing + 0.5, validation.startBY(), z + 0.5, 0.0f, 0.0f);
+            session.arena = center;
+            session.startA = aLoc;
+            session.startB = bLoc;
+            this.startDuelArenaMatchEffects(session, anchor);
+        }, () -> this.releaseDuelArenaLease(session));
+        if (!setup.wasAccepted()) {
+            this.releaseDuelArenaLease(session);
+            this.getLogger().warning("[duel] participant scheduler rejected arena setup; duel failsafe will recover the match");
+        }
+    }
+
+    private void startDuelArenaMatchEffects(DuelSession session, Player anchor) {
+        if (!this.isDuelArenaPresentationCurrent(session)) return;
+        java.util.concurrent.CompletableFuture<Boolean> first = this.showDuelMatchAnimationOnPlayer(session, session.a);
+        java.util.concurrent.CompletableFuture<Boolean> second = session.soloTest
+            ? java.util.concurrent.CompletableFuture.completedFuture(true)
+            : this.showDuelMatchAnimationOnPlayer(session, session.b);
+        java.util.concurrent.CompletableFuture.allOf(first, second).orTimeout(3L, TimeUnit.SECONDS)
+            .whenComplete((ignored, error) -> {
+                if (!this.isDuelArenaPresentationCurrent(session)) return;
+                if (error != null || !Boolean.TRUE.equals(first.getNow(false)) || !Boolean.TRUE.equals(second.getNow(false))) {
+                    this.getLogger().warning("[duel] match animation could not be delivered to every participant; duel failsafe remains armed");
+                    return;
+                }
+                PlatformScheduler.TaskHandle entry = PlatformScheduler.entityLater(this, anchor, () -> {
+                    if (!session.ended && !session.paused && !session.celebrating && !session.pendingMatchOver)
+                        this.enterRound(session, true);
+                }, () -> this.getLogger().warning("[duel] arena-entry task retired; duel failsafe remains armed"), 60L);
+                if (!entry.wasAccepted())
+                    this.getLogger().warning("[duel] arena-entry task was rejected; duel failsafe remains armed");
+        });
+    }
+
+    private boolean isDuelArenaPresentationCurrent(DuelSession session) {
+        return session != null && !this.shuttingDown && !session.ended && !session.paused && !session.celebrating
+            && !session.pendingMatchOver && session.startA != null && session.arenaSearchDeadline == 0L;
+    }
+
+    private java.util.concurrent.CompletableFuture<Boolean> showDuelMatchAnimationOnPlayer(DuelSession session, UUID playerId) {
+        java.util.concurrent.CompletableFuture<Boolean> result = new java.util.concurrent.CompletableFuture<>();
+        PlatformScheduler.TaskHandle lookup = PlatformScheduler.globalNow(this, () -> {
+            if (!this.isDuelArenaPresentationCurrent(session)) {
+                result.complete(false);
+                return;
+            }
+            Player player = Bukkit.getPlayer(playerId);
+            if (player == null || !player.isOnline()) {
+                result.complete(false);
+                return;
+            }
+            PlatformScheduler.TaskHandle animation = PlatformScheduler.entityNow(this, player, () -> {
+                if (!this.isDuelArenaPresentationCurrent(session) || !player.isOnline()) {
+                    result.complete(false);
+                    return;
+                }
+                this.showDuelMatchAnimation(player);
+                result.complete(true);
+            }, () -> result.complete(false));
+            if (!animation.wasAccepted()) result.complete(false);
+        });
+        if (!lookup.wasAccepted()) result.complete(false);
+        return result;
+    }
+
+    // Client-only totem activation with a sword model. The real inventory and offhand are untouched.
+    private void showDuelMatchAnimation(Player player) {
+        if (player == null || !player.isOnline()) return;
+        if (Bukkit.getPluginManager().getPlugin("ProtocolLib") == null) {
+            this.showDuelStatusTitle(player, "Match Found", null);
+            return;
+        }
+        try {
+            Material[] animationModels = {Material.DIAMOND_SWORD, Material.END_CRYSTAL, Material.MACE};
+            Material selectedModel = animationModels[ThreadLocalRandom.current().nextInt(animationModels.length)];
+            ItemStack swordTotem = new ItemStack(Material.TOTEM_OF_UNDYING);
+            swordTotem.setData(io.papermc.paper.datacomponent.DataComponentTypes.ITEM_MODEL,
+                NamespacedKey.minecraft(selectedModel.getKey().getKey()));
+            com.comphenix.protocol.ProtocolManager manager = ProtocolLibrary.getProtocolManager();
+            for (int slot : new int[]{36 + player.getInventory().getHeldItemSlot(), 45}) {
+                PacketContainer fakeSlot = manager.createPacket(PacketType.Play.Server.SET_SLOT);
+                fakeSlot.getIntegers().write(0, 0).write(1, 0).write(2, slot);
+                fakeSlot.getItemModifier().write(0, swordTotem);
+                manager.sendServerPacket(player, fakeSlot, false);
+            }
+            PacketContainer activation = manager.createPacket(PacketType.Play.Server.ENTITY_STATUS);
+            activation.getIntegers().write(0, player.getEntityId());
+            activation.getBytes().write(0, (byte)35);
+            manager.sendServerPacket(player, activation, false);
+            player.playSound(player, Sound.ENTITY_GENERIC_EXPLODE, org.bukkit.SoundCategory.MASTER, 0.8f, 1.0f);
+            this.runPlayerTaskLater(player, () -> { if (player.isOnline()) player.updateInventory(); }, 2L);
+        } catch (Exception ex) {
+            player.updateInventory();
+            this.getLogger().warning("Duel match animation unavailable: " + ex.getMessage());
+            this.showDuelStatusTitle(player, "Match Found", null);
+        }
+    }
+
+    // Reserve before showing the match animation so concurrent searches cannot claim the same rollback volume.
+    private boolean reserveDuelArena(DuelSession session, Location center) {
+        World world = center == null ? null : center.getWorld();
+        if (session == null || world == null) return false;
+        UUID worldId = world.getUID();
+        double x = center.getX(), z = center.getZ(), halfSize = session.borderRadius + 16.0;
+        synchronized (this.duelArenaLeaseLock) {
+            if (session.arenaLease != null) return session.arenaLease.worldId.equals(worldId)
+                && session.arenaLease.centerX == x && session.arenaLease.centerZ == z;
+            for (DuelArenaLease lease : this.duelArenaLeases) {
+                if (lease.overlaps(worldId, x, z, halfSize)) return false;
+            }
+            DuelArenaLease lease = new DuelArenaLease(session, world, x, z, halfSize);
+            this.duelArenaLeases.add(lease);
+            session.arenaLease = lease;
+            return true;
+        }
+    }
+
+    private void releaseDuelArenaLease(DuelSession session) {
+        if (session == null) return;
+        synchronized (this.duelArenaLeaseLock) {
+            DuelArenaLease lease = session.arenaLease;
+            if (lease == null) return;
+            if (!lease.pinnedChunks.isEmpty()) return;
+            this.duelArenaLeases.remove(lease);
+            session.arenaLease = null;
+        }
+    }
+
+    private String duelArenaNotFoundMessage(DuelSession s) {
+        String suffix = s.soloTest ? "" : " Wagers refunded.";
+        if (this.duelArenaBiome(s.arenaPreference) != null) {
+            return "§cNo " + this.duelArenaLabel(s.arenaPreference) + " arenas found." + suffix;
+        }
+        return "§cNo suitable arena found." + suffix;
+    }
+
+    // Teleport for initial entry/reconnect. A successful between-round launch can start in place.
+    private void enterRound(DuelSession s, boolean firstRound) {
+        this.enterRound(s, firstRound, false);
+    }
+
+    private void enterRound(DuelSession s, boolean firstRound, boolean returnedByLaunch) {
+        if (s.ended || s.paused || s.celebrating || s.pendingMatchOver) return;
+        Player pa = Bukkit.getPlayer(s.a), pb = s.soloTest ? null : Bukkit.getPlayer(s.b);
+        if (pa == null || !pa.isOnline()) { if (s.soloTest) this.finishSoloDuel(s, null, false); else this.forfeitDuel(s, s.a); return; }
+        if (!s.soloTest && (pb == null || !pb.isOnline())) { this.forfeitDuel(s, s.b); return; }
+        if (s.startA == null || (!s.soloTest && s.startB == null)) { this.abortDuel(s, "§cDuel arena lost. Wager refunded."); return; }
+        // A deferred restore must finish before either player can enter the next round.
+        if (s.resetPending || !s.changed.isEmpty() || !s.changedData.isEmpty()) {
+            this.resetDuelArena(s).thenAccept(restored -> {
+                if (restored && !s.ended && !s.paused && !s.celebrating && !s.pendingMatchOver) {
+                    this.runOnPlayerThread(pa, () -> this.enterRound(s, firstRound, returnedByLaunch));
+                }
+            });
+            return;
+        }
+        s.stuckDeadline = System.currentTimeMillis() + 45000L;   // arm the anti-stuck watchdog for this transition
+        // A duel starts from a neutral combat state. Inventory snapshots intentionally do not preserve
+        // transient effects or absorption, which otherwise make the opening round inconsistent.
+        this.leaveDuelDeathSpectator(pa);
+        this.leaveDuelDeathSpectator(pb);
+        this.healDuelist(pa);
+        this.healDuelist(pb);
+        pa.setGravity(true);
+        pa.setAllowFlight(false);
+        pa.setFlying(false);
+        pa.setInvulnerable(false);
+        if (pb != null) { pb.setGravity(true); pb.setAllowFlight(false); pb.setFlying(false); pb.setInvulnerable(false); }
+        boolean alreadyAtStarts = returnedByLaunch && this.atDuelStart(pa, s.startA)
+            && (s.soloTest || this.atDuelStart(pb, s.startB));
+        if (alreadyAtStarts) {
+            this.duelFrozen.add(s.a);
+            if (!s.soloTest) this.duelFrozen.add(s.b);
+        }
+        java.util.concurrent.CompletableFuture<Boolean> fa = alreadyAtStarts
+            ? java.util.concurrent.CompletableFuture.completedFuture(true)
+            : this.teleportIntoDuel(pa, s.startA.clone(), s);
+        java.util.concurrent.CompletableFuture<Boolean> fb = s.soloTest
+            ? java.util.concurrent.CompletableFuture.completedFuture(true)
+            : alreadyAtStarts ? java.util.concurrent.CompletableFuture.completedFuture(true)
+                : this.teleportIntoDuel(pb, s.startB.clone(), s);
+        fa.thenCombine(fb, (oka, okb) -> oka && okb).thenAccept(bothOk -> this.runOnPlayerThread(pa, () -> {
+            if (s.ended || s.paused || s.celebrating || s.pendingMatchOver) return;
+            if (!Boolean.TRUE.equals(bothOk)) { this.abortDuel(s, "§cTeleport failed. Wager refunded."); return; }
+            this.duelFrozen.add(s.a);
+            if (!s.soloTest) this.duelFrozen.add(s.b);   // guarantee frozen before countdown
+            if (firstRound) {
+                this.startDuelCountdown(s);
+            } else {
+                Player la = Bukkit.getPlayer(s.a), lb = s.soloTest ? null : Bukkit.getPlayer(s.b);
+                if (la != null) this.duelLaunchEffect(la);
+                if (lb != null) this.duelLaunchEffect(lb);
+                this.startDuelCountdown(s);
+            }
+        }));
+    }
+
+    private boolean atDuelStart(Player player, Location start) {
+        return player != null && player.isOnline() && start != null && player.getWorld().equals(start.getWorld())
+            && player.isOnGround() && player.getLocation().distanceSquared(start) <= 1.0;
+    }
+
+    private void duelLaunchEffect(Player p) {
+        try {
+            p.getWorld().spawnParticle(org.bukkit.Particle.CLOUD, p.getLocation().add(0, 0.5, 0), 30, 0.3, 0.4, 0.3, 0.05);
+            p.playSound(p, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, org.bukkit.SoundCategory.MASTER, 1.0f, 1.2f);
+        } catch (Throwable ignored) {}
+    }
+
+    // Duel teleports never turn the player's head: forcing a view toward the opponent was disorienting.
+    // Same world: relative yaw/pitch with zero delta leaves the client camera exactly where it is.
+    // Cross-world: relative flags don't apply, so carry the current rotation, read on the player's thread.
+    private java.util.concurrent.CompletableFuture<Boolean> teleportKeepingView(Player p, Location dest) {
+        java.util.concurrent.CompletableFuture<Boolean> result = new java.util.concurrent.CompletableFuture<>();
+        PlatformScheduler.TaskHandle handle = PlatformScheduler.entityNow(this, p, () -> {
+            if (!p.isOnline() || dest.getWorld() == null) { result.complete(false); return; }
+            Location to = dest.clone();
+            java.util.concurrent.CompletableFuture<Boolean> move;
+            if (p.getWorld().equals(to.getWorld())) {
+                to.setYaw(0.0f);
+                to.setPitch(0.0f);
+                move = p.teleportAsync(to, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN,
+                    io.papermc.paper.entity.TeleportFlag.Relative.YAW, io.papermc.paper.entity.TeleportFlag.Relative.PITCH);
+            } else {
+                to.setYaw(p.getYaw());
+                to.setPitch(p.getPitch());
+                move = p.teleportAsync(to);
+            }
+            move.whenComplete((ok, error) -> result.complete(error == null && Boolean.TRUE.equals(ok)));
+        }, () -> result.complete(false));
+        if (!handle.wasAccepted()) result.complete(false);
+        return result;
+    }
+
+    private java.util.concurrent.CompletableFuture<Boolean> teleportIntoDuel(Player p, Location loc, DuelSession s) {
+        return this.teleportKeepingView(p, loc).thenApply(ok -> {
+            this.runOnPlayerThread(p, () -> {
+                if (!ok || !p.isOnline()) return;
+                s.arenaEntered = true;
+                if (s.ended) {
+                    if (this.isDuelArenaWorld(p.getWorld())) {
+                        this.returnDuelist(p.getUniqueId(), p, p.getUniqueId().equals(s.a) ? s.returnA : s.returnB);
+                    }
+                    return;
+                }
+                if (s.celebrating || s.pendingMatchOver) return;
+                this.resetFallAfterTeleport(p);
+                p.setFallDistance(0.0f);
+                this.applyDuelBorder(p, s);
+                this.duelFrozen.add(p.getUniqueId());                       // frozen + invincible until FIGHT
+                // Combat-tag both for the duel so neither can /rtp, /home, or /tpa away mid-fight.
+                if (!s.soloTest) this.applyCombatTag(p, System.currentTimeMillis() + Math.max(30, this.getCombatTagSeconds()) * 1000L);
+            });
+            return ok;
+        });
+    }
+
+    private void applyDuelBorder(Player player, DuelSession session) {
+        if (session.arena == null || !this.duelBorderApplied.add(player.getUniqueId())) return;
+        org.bukkit.WorldBorder border = Bukkit.createWorldBorder();
+        border.setCenter(session.arena.getX(), session.arena.getZ());
+        border.setSize(session.borderRadius * 2.0);
+        border.setWarningDistance(0);
+        border.setDamageAmount(0.0);
+        player.setWorldBorder(border);
+    }
+
+    private void captureDuelBorder(Player player) {
+        org.bukkit.WorldBorder previous = player.getWorldBorder();
+        if (previous != null) this.duelPreviousWorldBorders.put(player.getUniqueId(), previous);
+    }
+
+    private void startDuelCountdown(DuelSession s) {
+        if (s.ended || s.paused || s.celebrating || s.pendingMatchOver) return;
+        // Both participants must finish the return before this countdown begins.
+        int secs = s.round > 1 ? Math.max(1, Math.min(5, this.settings.getInt("duel.round-reset-seconds", 3)))
+            : Math.max(3, Math.min(5, this.settings.getInt("duel.countdown-seconds", 5)));
+        this.duelCountdownStep(s, secs);
+    }
+
+    private void duelCountdownStep(DuelSession s, int n) {
+        if (s.ended || s.paused || s.celebrating || s.pendingMatchOver) return;
+        Player pa = Bukkit.getPlayer(s.a), pb = s.soloTest ? null : Bukkit.getPlayer(s.b);
+        if (pa == null || !pa.isOnline()) { if (s.soloTest) this.finishSoloDuel(s, null, false); else this.forfeitDuel(s, s.a); return; }
+        if (!s.soloTest && (pb == null || !pb.isOnline())) { this.forfeitDuel(s, s.b); return; }
+        if (n > 0) {
+            net.kyori.adventure.title.Title.Times times = net.kyori.adventure.title.Title.Times.times(
+                java.time.Duration.ZERO, java.time.Duration.ofMillis(1000), java.time.Duration.ZERO);
+            net.kyori.adventure.title.Title t = net.kyori.adventure.title.Title.title(
+                Component.text(String.valueOf(n), NamedTextColor.RED),
+                Component.text("Get ready…", NamedTextColor.GRAY), times);
+            pa.showTitle(t); if (pb != null) pb.showTitle(t);
+            float pitch = Math.max(0.5f, 2.0f - n * 0.25f);   // rises as the count drops, any start value
+            pa.playSound(pa, Sound.BLOCK_NOTE_BLOCK_PLING, org.bukkit.SoundCategory.MASTER, 1.0f, pitch);
+            if (pb != null) pb.playSound(pb, Sound.BLOCK_NOTE_BLOCK_PLING, org.bukkit.SoundCategory.MASTER, 1.0f, pitch);
+            this.runPlayerTaskLater(pa, () -> this.duelCountdownStep(s, n - 1), 20L);
+        } else {
+            net.kyori.adventure.title.Title.Times times = net.kyori.adventure.title.Title.Times.times(
+                java.time.Duration.ZERO, java.time.Duration.ofMillis(700), java.time.Duration.ofMillis(300));
+            net.kyori.adventure.title.Title t = net.kyori.adventure.title.Title.title(
+                Component.text("FIGHT!", NamedTextColor.GREEN), Component.empty(), times);
+            pa.showTitle(t); if (pb != null) pb.showTitle(t);
+            pa.playSound(pa, Sound.BLOCK_NOTE_BLOCK_PLING, org.bukkit.SoundCategory.MASTER, 1.0f, 2.0f);
+            if (pb != null) pb.playSound(pb, Sound.BLOCK_NOTE_BLOCK_PLING, org.bukkit.SoundCategory.MASTER, 1.0f, 2.0f);
+            this.duelFrozen.remove(s.a);
+            if (!s.soloTest) this.duelFrozen.remove(s.b);
+            s.started = true;
+            s.fightBegan = true;
+            s.stuckDeadline = 0L;   // fight resumed — disarm the watchdog
+        }
+    }
+
+    private void showDuelStatusTitle(Player player, String title, String subtitle) {
+        if (player == null || !player.isOnline()) return;
+        net.kyori.adventure.title.Title.Times times = net.kyori.adventure.title.Title.Times.times(
+            java.time.Duration.ofMillis(150), java.time.Duration.ofMillis(1200), java.time.Duration.ofMillis(150));
+        player.showTitle(net.kyori.adventure.title.Title.title(Component.text(title, NamedTextColor.AQUA),
+            subtitle == null ? Component.empty() : Component.text(subtitle, NamedTextColor.GRAY), times));
+    }
+
+    private void showDuelFailureTitle(Player player, String detail) {
+        if (player == null || !player.isOnline()) return;
+        net.kyori.adventure.title.Title.Times times = net.kyori.adventure.title.Title.Times.times(
+            java.time.Duration.ofMillis(100), java.time.Duration.ofMillis(2000), java.time.Duration.ofMillis(300));
+        player.showTitle(net.kyori.adventure.title.Title.title(
+            Component.text("Duel Cancelled", NamedTextColor.RED), this.legacyColorize(detail), times));
+    }
+
+    // Duels don't cause real deaths: a lethal hit during a round is INTERCEPTED (no death, no loot drop)
+    // and turned into a round loss. HIGH so damage modifiers (armor/effects) are already applied.
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDuelLethalDamage(EntityDamageEvent e) {
+        if (!(e.getEntity() instanceof Player p)) return;
+        DuelSession s = this.activeDuels.get(p.getUniqueId());
+        if (s == null || s.ended || !s.started) return;
+        // Final damage already includes absorption's reduction; adding absorption hearts again
+        // can miss a genuinely lethal hit and let the vanilla death screen appear.
+        if (p.getHealth() - e.getFinalDamage() > 0.0) return;   // survivable
+        // Let a Totem of Undying do its job — a totem pop is NOT a loss. The round ends only on an
+        // actual death (a lethal hit with no totem to save them).
+        if (this.holdingTotem(p)) return;
+        e.setCancelled(true);
+        this.onDuelRoundLoss(s, p.getUniqueId(), p.getLocation().clone());
+    }
+
+    private boolean holdingTotem(Player p) {
+        return p.getInventory().getItemInMainHand().getType() == Material.TOTEM_OF_UNDYING
+            || p.getInventory().getItemInOffHand().getType() == Material.TOTEM_OF_UNDYING;
+    }
+
+    // A duel "death" (intercepted lethal hit): the loser watches from exactly where they fell, in spectator,
+    // until their return launch begins — startDuelReturnLaunch flips them straight back to SURVIVAL.
+    // onDuelRoundSpectatorMove keeps them inside the arena and out of solid blocks meanwhile.
+    private void enterDuelDeathSpectator(DuelSession s, Player p) {
+        if (p == null || !p.isOnline() || s.ended) return;
+        UUID id = p.getUniqueId();
+        this.duelIntermission.remove(id);          // the gear-up window is for the survivor
+        this.duelRoundSpectators.add(id);
+        p.setVelocity(new org.bukkit.util.Vector());
+        p.setFallDistance(0.0f);
+        p.setGameMode(GameMode.SPECTATOR);
+        if (p.getGameMode() != GameMode.SPECTATOR) {   // vetoed by another plugin: fall back to the old window
+            this.duelRoundSpectators.remove(id);
+            this.duelIntermission.add(id);
+            return;
+        }
+        p.setAllowFlight(true);                    // allowFlight first: setFlying(true) throws without it
+        p.setFlying(true);                         // hover in place; never sink while spectating
+    }
+
+    // Idempotent: back to SURVIVAL (grounded flight flags) if this player is a duel death-spectator.
+    private void leaveDuelDeathSpectator(Player p) {
+        if (p == null) return;
+        boolean wasSpectating = this.duelRoundSpectators.remove(p.getUniqueId());
+        if (p.getGameMode() == GameMode.SPECTATOR && (wasSpectating || this.activeDuels.containsKey(p.getUniqueId()))) {
+            p.setGameMode(GameMode.SURVIVAL);
+            p.setFlying(false);
+            p.setAllowFlight(false);
+            p.setFallDistance(0.0f);
+        }
+    }
+
+    // Safety net: if a duelist somehow dies for real (a source with no damage event), end the match.
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onDuelDeath(PlayerDeathEvent e) {
+        DuelSession s = this.activeDuels.get(e.getPlayer().getUniqueId());
+        if (s == null || s.ended) return;
+        Player loser = e.getPlayer();
+        UUID loserId = loser.getUniqueId();
+        Location knockout = loser.getLocation().clone();
+        e.deathMessage(null); e.setKeepInventory(true); e.getDrops().clear(); e.setDroppedExp(0);
+        e.setKeepLevel(true);
+        this.runOnPlayerThread(loser, () -> {
+            if (!loser.isOnline() || s.ended) return;
+            loser.spigot().respawn();
+            this.runPlayerTaskLater(loser, () -> {
+                if (!s.ended && s.started) this.onDuelRoundLoss(s, loserId, knockout);
+            }, 1L);
+        });
+    }
+
+    // If a real death ever slips past the lethal-hit interception, a duelist must respawn AT the arena
+    // start, never at their bed/world-spawn.
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onDuelRespawn(org.bukkit.event.player.PlayerRespawnEvent e) {
+        DuelSession s = this.activeDuels.get(e.getPlayer().getUniqueId());
+        if (s == null || s.ended) return;
+        Location start = e.getPlayer().getUniqueId().equals(s.a) ? s.startA : s.startB;
+        if (start != null && start.getWorld() != null) {
+            Location respawn = start.clone();
+            respawn.setYaw(e.getPlayer().getYaw());
+            respawn.setPitch(e.getPlayer().getPitch());
+            e.setRespawnLocation(respawn);
+        }
+    }
+
+    // One round ended. Award it; if the match is decided, resolve it; else reset the arena and run the
+    // next round after a short gap.
+    private void onDuelRoundLoss(DuelSession s, UUID loserId, Location knockoutLocation) {
+        if (s.ended || !s.started) return;
+        if (s.soloTest) {
+            this.onSoloDuelRoundLoss(s, knockoutLocation);
+            return;
+        }
+        s.started = false;                                    // round over; stops re-entry
+        s.stuckDeadline = System.currentTimeMillis() + 45000L;
+        UUID winnerId = s.other(loserId);
+        s.addWin(winnerId);
+        Player lp = Bukkit.getPlayer(loserId), wp = Bukkit.getPlayer(winnerId);
+        this.healDuelist(lp); this.healDuelist(wp);
+        if (lp != null) lp.playSound(lp, Sound.ENTITY_WITHER_HURT, org.bukkit.SoundCategory.MASTER, 0.6f, 0.9f);
+        if (wp != null) wp.playSound(wp, Sound.ENTITY_PLAYER_LEVELUP, org.bukkit.SoundCategory.MASTER, 0.7f, 1.4f);
+        // The configured value is a round limit. An even limit that ends tied proceeds to one
+        // sudden-death round, so every match still has exactly one winner.
+        boolean roundLimitReached = s.round >= s.rounds;
+        boolean matchOver = s.winsFor(winnerId) >= s.needed()
+            || (roundLimitReached && s.winsA != s.winsB);
+        s.pendingRoundWinner = winnerId; s.pendingRoundLoser = loserId; s.pendingMatchOver = matchOver;
+        if (matchOver) {
+            s.celebrating = true;
+            this.duelFrozen.remove(loserId); this.duelFrozen.remove(winnerId);
+            this.duelIntermission.add(winnerId);
+            this.dropFinalStandardDuelInventory(s, winnerId, loserId);
+            this.finalizeDuelInventoriesForResult(s, winnerId, loserId);
+            this.enterDuelDeathSpectator(s, lp);
+            this.showDuelResultTitles(s, winnerId, loserId);
+            s.finalPresentationShown = true;
+            Player anchor = wp != null && wp.isOnline() ? wp : lp;
+            if (anchor == null) { this.resolveMatch(s, winnerId, loserId); return; }
+            this.runPlayerTaskLater(anchor, () -> {
+                if (!s.ended && !s.paused) this.beginDuelLootWindow(s, winnerId, loserId);
+            }, 100L);
+            return;
+        }
+        // Non-final round: a free-move window (both may walk/build, no combat), then a
+        // COORDINATED launch of BOTH players back to their start spots, then the next-round countdown.
+        this.duelFrozen.remove(loserId); this.duelFrozen.remove(winnerId);
+        this.duelIntermission.add(winnerId);
+        this.enterDuelDeathSpectator(s, lp);
+        this.showDuelRoundScore(s, lp, wp);
+        int windowTicks = Math.max(5, this.settings.getInt("duel.intermission-seconds", 5)) * 20;
+        Player anchor = wp != null && wp.isOnline() ? wp : lp;
+        if (anchor == null) { this.abortDuel(s, null); return; }
+        this.runPlayerTaskLater(anchor, () -> { if (!s.ended && !s.paused) this.beginDuelReturn(s); }, windowTicks);
+    }
+
+    // Launch both participants in Survival. The next round waits for both landings.
+    private void beginDuelReturn(DuelSession s) {
+        if (s.ended || s.paused) return;
+        s.stuckDeadline = System.currentTimeMillis() + 45000L;
+        Player pa = Bukkit.getPlayer(s.a), pb = Bukkit.getPlayer(s.b);
+        this.duelIntermission.remove(s.a); this.duelIntermission.remove(s.b);
+        this.duelReturning.add(s.a); this.duelReturning.add(s.b);
+        s.returnResetDone = false;
+        s.returnLaunchArrivals.clear();
+        int token = ++s.returnLaunchToken;
+        if (pa != null && pa.isOnline()) {
+            this.startDuelReturnLaunch(s, pa, s.startA, token, () -> this.onDuelReturnArrival(s, s.a, token));
+        } else {
+            this.onDuelReturnArrival(s, s.a, token);
+        }
+        if (pb != null && pb.isOnline()) {
+            this.startDuelReturnLaunch(s, pb, s.startB, token, () -> this.onDuelReturnArrival(s, s.b, token));
+        } else {
+            this.onDuelReturnArrival(s, s.b, token);
+        }
+    }
+
+    // Return in upright Survival by moving the player along a server-driven arc. Gravity is disabled only
+    // during the short return; incremental same-world teleports let the path pass through terrain without a
+    // vehicle/sitting pose or a flight permission. The final step is the exact start, so landing needs no snap.
+    private void startDuelReturnLaunch(DuelSession s, Player player, Location destination, int token, Runnable arrived) {
+        this.leaveDuelDeathSpectator(player);
+        if (player == null || !player.isOnline() || destination == null || destination.getWorld() == null
+                || !destination.getWorld().equals(player.getWorld())) {
+            arrived.run();
+            return;
+        }
+        if (this.atDuelStart(player, destination)) {
+            this.finishDuelReturnMotion(player);
+            arrived.run();
+            return;
+        }
+        Location origin = player.getLocation().clone();
+        World world = origin.getWorld();
+        double dist = Math.hypot(destination.getX() - origin.getX(), destination.getZ() - origin.getZ());
+        int ticks = Math.max(36, Math.min(56, (int) Math.ceil(dist / 1.3) + 28));
+        double ground = this.duelRestoreGroundNear(s, origin, Integer.MAX_VALUE);
+        double highEnd = Math.max(origin.getY(), destination.getY());
+        double apexY = Math.max(highEnd + 14.0 + Math.min(18.0, dist * 0.24),
+            (ground == Double.NEGATIVE_INFINITY ? highEnd : ground) + 8.0);
+        double control = 2.0 * apexY - (origin.getY() + destination.getY()) / 2.0;
+        player.setGravity(false);
+        player.setAllowFlight(false);
+        player.setFlying(false);
+        player.setVelocity(new org.bukkit.util.Vector());
+        player.setFallDistance(0.0f);
+        try {
+            world.spawnParticle(org.bukkit.Particle.CLOUD, origin.clone().add(0.0, 0.4, 0.0), 20, 0.3, 0.3, 0.3, 0.05);
+            player.playSound(player, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, org.bukkit.SoundCategory.MASTER, 0.9f, 1.2f);
+        } catch (Throwable ignored) {}
+        this.stepDuelReturnFlight(s, player, origin, destination.clone(), control, token, 1, ticks, arrived);
+    }
+
+    private void stepDuelReturnFlight(DuelSession s, Player player, Location origin,
+            Location destination, double control, int token, int step, int ticks, Runnable arrived) {
+        this.runPlayerTaskLater(player, () -> {
+            if (s.ended || token != s.returnLaunchToken || !player.isOnline()) return;
+            if (s.paused) {   // opponent disconnected mid-flight: set this player down safely at their start
+                this.landDuelReturn(s, player, destination, token, () -> {});
+                return;
+            }
+            double u = Math.min(1.0, step / (double)ticks);
+            double horizontal = u * u * (3.0 - 2.0 * u);
+            double x = origin.getX() + (destination.getX() - origin.getX()) * horizontal;
+            double z = origin.getZ() + (destination.getZ() - origin.getZ()) * horizontal;
+            double y = (1 - u) * (1 - u) * origin.getY() + 2 * u * (1 - u) * control + u * u * destination.getY();
+            Location waypoint = step >= ticks ? destination.clone()
+                : new Location(destination.getWorld(), x, y, z, player.getLocation().getYaw(), player.getLocation().getPitch());
+            if (step >= ticks) {
+                waypoint.setYaw(player.getLocation().getYaw());
+                waypoint.setPitch(player.getLocation().getPitch());
+            }
+            if (!player.teleport(waypoint)) {
+                this.landDuelReturn(s, player, destination, token, arrived);
+                return;
+            }
+            player.setVelocity(new org.bukkit.util.Vector());
+            player.setFallDistance(0.0f);
+            this.maybeResetArenaMidReturn(s);
+            if (step >= ticks) {
+                this.finishDuelReturnMotion(player);
+                arrived.run();
+                return;
+            }
+            this.stepDuelReturnFlight(s, player, origin, destination, control, token, step + 1, ticks, arrived);
+        }, 1L);
+    }
+
+    private void landDuelReturn(DuelSession s, Player player, Location destination, int token, Runnable arrived) {
+        if (s.ended || token != s.returnLaunchToken || !player.isOnline()) return;
+        Location landing = destination.clone();
+        landing.setYaw(player.getLocation().getYaw());
+        landing.setPitch(player.getLocation().getPitch());
+        boolean alreadyLanded = player.getWorld().equals(landing.getWorld())
+            && player.getLocation().distanceSquared(landing) <= 0.0001;
+        boolean landed = alreadyLanded || player.teleport(landing);
+        if (!landed || !player.getWorld().equals(destination.getWorld())
+                || player.getLocation().distanceSquared(destination) > 0.0001) {
+            if (s.soloTest) this.finishSoloDuel(s, "§cReturn failed.", true);
+            else this.abortDuel(s, "§cReturn failed. Wagers refunded.");
+            return;
+        }
+        this.finishDuelReturnMotion(player);
+        arrived.run();
+    }
+
+    private void finishDuelReturnMotion(Player player) {
+        if (player == null || !player.isOnline()) return;
+        player.setGravity(true);
+        player.setFlying(false);
+        player.setAllowFlight(false);
+        player.setVelocity(new org.bukkit.util.Vector());
+        player.setFallDistance(0.0f);
+    }
+
+    // Restore the arena once, mid-flight, as soon as every participant is above the ground it puts back.
+    private void maybeResetArenaMidReturn(DuelSession s) {
+        if (s.returnResetDone) return;
+        this.resetDuelArena(s).thenAccept(restored -> {
+            if (restored && !s.ended) s.returnResetDone = true;
+        });
+    }
+
+    // A disconnect during the arc must not save no-gravity or residual motion into playerdata.
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onDuelReturnAnimationQuit(PlayerQuitEvent e) {
+        Player player = e.getPlayer();
+        if (!this.duelReturning.contains(player.getUniqueId())) return;
+        player.setGravity(true);
+        player.setFlying(false);
+        player.setAllowFlight(false);
+        player.setVelocity(new org.bukkit.util.Vector());
+        player.setFallDistance(0.0f);
+    }
+
+    private void onDuelReturnArrival(DuelSession s, UUID id, int token) {
+        if (s.ended || s.paused || token != s.returnLaunchToken || !s.returnLaunchArrivals.add(id)) return;
+        this.duelReturning.remove(id);
+        if (!s.returnLaunchArrivals.contains(s.a) || !s.returnLaunchArrivals.contains(s.b)) return;
+        this.completeDuelRoundTransition(s, true);
+    }
+
+    private void onSoloDuelRoundLoss(DuelSession s, Location knockoutLocation) {
+        s.started = false;
+        s.stuckDeadline = System.currentTimeMillis() + 45000L;
+        Player player = Bukkit.getPlayer(s.a);
+        this.healDuelist(player);
+        if (player == null || !player.isOnline()) { this.finishSoloDuel(s, null, false); return; }
+        player.playSound(player, Sound.ENTITY_WITHER_HURT, org.bukkit.SoundCategory.MASTER, 0.6f, 0.9f);
+        boolean testOver = s.round >= s.rounds;
+        this.enterDuelDeathSpectator(s, player);   // watch from where they fell until the return launch
+        this.runPlayerTaskLater(player, () -> {
+            this.duelIntermission.remove(s.a);
+            if (s.ended) return;
+            if (testOver) {
+                Player done = Bukkit.getPlayer(s.a);
+                if (done != null) done.showTitle(net.kyori.adventure.title.Title.title(Component.text("TEST COMPLETE", NamedTextColor.GREEN), Component.empty()));
+                this.duelReturning.add(s.a);
+                s.returnResetDone = false;
+                int token = ++s.returnLaunchToken;
+                this.startDuelReturnLaunch(s, player, s.startA, token, () -> this.finishSoloDuel(s, null, true));
+                return;
+            }
+            Player pl = Bukkit.getPlayer(s.a);
+            this.duelReturning.add(s.a);
+            s.returnResetDone = false;
+            this.restoreDuelInventory(pl, s.startInvA);
+            if (pl == null || !pl.isOnline()) { this.duelReturning.remove(s.a); this.finishSoloDuel(s, null, false); return; }
+            int token = ++s.returnLaunchToken;
+            this.startDuelReturnLaunch(s, pl, s.startA, token, () -> {
+                this.duelReturning.remove(s.a);
+                if (s.ended) return;
+                this.resetDuelArena(s).thenAccept(restored -> {
+                    if (!restored || s.ended || s.paused) return;
+                    s.round++;
+                    this.runOnPlayerThread(pl, () -> this.enterRound(s, false, true));
+                });
+            });
+        }, Math.max(5, this.settings.getInt("duel.intermission-seconds", 5)) * 20L);
+    }
+
+    private void completeDuelRoundTransition(DuelSession s) {
+        this.completeDuelRoundTransition(s, false);
+    }
+
+    private void completeDuelRoundTransition(DuelSession s, boolean returnedByLaunch) {
+        UUID winnerId = s.pendingRoundWinner, loserId = s.pendingRoundLoser;
+        if (s.ended || s.paused || winnerId == null || loserId == null) return;
+        boolean matchOver = s.pendingMatchOver;
+        s.pendingRoundWinner = null; s.pendingRoundLoser = null; s.pendingMatchOver = false;
+        if (matchOver) {
+            this.resolveMatch(s, winnerId, loserId);
+            return;
+        }
+        this.resetDuelArena(s).thenAccept(restored -> {
+            if (!restored || s.ended || s.paused || s.celebrating) return;
+            s.round++;
+            this.restoreDuelInventories(s);
+            this.enterRound(s, false, returnedByLaunch);
+        });
+    }
+
+    // Guaranteed anti-stuck: nobody may stay invincible/frozen from a hung transition. Runs every second.
+    // (1) Any flagged player whose duel is gone/ended is restored. (2) Any active session sitting in a
+    // non-fighting transition past its watchdog deadline is force-recovered.
+    private void duelStateFailsafe() {
+        java.util.Set<UUID> flagged = new java.util.HashSet<>();
+        flagged.addAll(this.duelFrozen); flagged.addAll(this.duelIntermission);
+        flagged.addAll(this.duelReturning); flagged.addAll(this.duelRoundSpectators);
+        for (UUID id : flagged) {
+            DuelSession s = this.activeDuels.get(id);
+            if (s != null && !s.ended) continue;
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) {
+                this.clearDuelMovementState(p);
+            } else {
+                this.duelFrozen.remove(id); this.duelIntermission.remove(id); this.duelReturning.remove(id);
+                this.duelRoundSpectators.remove(id); this.duelSpectatorTransitions.remove(id);
+            }
+        }
+        long now = System.currentTimeMillis();
+        for (DuelSession s : new java.util.HashSet<>(this.activeDuels.values())) {
+            if (s.ended) continue;
+            if (s.postMatchLootWindow) {
+                if (s.lootWindowEndsAt > 0L && now >= s.lootWindowEndsAt)
+                    this.resolveMatch(s, s.pendingRoundWinner, s.pendingRoundLoser);
+                continue;
+            }
+            if (s.paused) {
+                for (UUID disconnectedId : new java.util.HashSet<>(s.reconnectTimerFallbacks)) {
+                    Long deadline = this.duelReconnectDeadlines.get(disconnectedId);
+                    if (deadline == null) {
+                        s.reconnectTimerFallbacks.remove(disconnectedId);
+                    } else if (now >= deadline) {
+                        this.tickDuelReconnectGrace(s, disconnectedId, deadline);
+                    }
+                }
+                continue;
+            }
+            if (s.started) continue;
+            if (s.startA == null && s.arenaSearchDeadline > 0L && now >= s.arenaSearchDeadline) {
+                this.abortDuel(s, this.duelArenaNotFoundMessage(s));
+                continue;
+            }
+            if (s.stuckDeadline <= 0L || now < s.stuckDeadline) continue;
+            this.getLogger().warning("[duel] recovering a hung duel (stuck transition) a=" + s.a + " b=" + s.b);
+            if (s.soloTest) this.finishSoloDuel(s, "§7Duel test recovered.", true);
+            else if (s.pendingMatchOver && s.pendingRoundWinner != null && s.pendingRoundLoser != null)
+                this.resolveMatch(s, s.pendingRoundWinner, s.pendingRoundLoser);
+            else this.abortDuel(s, "§cDuel interrupted — recovered. Wager refunded.");
+        }
+    }
+
+    private void clearDuelMovementState(Player player) {
+        if (player == null) return;
+        UUID id = player.getUniqueId();
+        boolean customBorderApplied = this.duelBorderApplied.remove(id);
+        if (customBorderApplied) player.setWorldBorder(null);
+        else this.duelPreviousWorldBorders.remove(id);
+        this.duelFrozen.remove(id);
+        this.duelRoundSpectators.remove(id);
+        this.duelSpectatorTransitions.remove(id);
+        this.duelIntermission.remove(id);
+        this.duelReturning.remove(id);
+        // A death-spectator may have phased underground. Outside the return arc (which carries them out),
+        // lift them to the surface before dropping to survival so they can't suffocate in place.
+        if (player.getGameMode() == GameMode.SPECTATOR && this.isBuriedInBlocks(player)) {
+            player.teleport(player.getWorld().getHighestBlockAt(player.getLocation()).getLocation().add(0.5, 1.0, 0.5));
+        }
+        player.setGameMode(GameMode.SURVIVAL);
+        player.setGravity(true);
+        player.setFlying(false);
+        player.setAllowFlight(false);
+        player.setInvulnerable(false);
+        player.setVelocity(new org.bukkit.util.Vector());
+        player.setFallDistance(0.0f);
+        player.removePotionEffect(org.bukkit.potion.PotionEffectType.SLOW_FALLING);
+        player.removePotionEffect(org.bukkit.potion.PotionEffectType.LEVITATION);
+    }
+
+    private boolean isBuriedInBlocks(Player p) {
+        Location l = p.getLocation();
+        return !l.getBlock().isPassable() || !l.clone().add(0.0, 1.0, 0.0).getBlock().isPassable();
+    }
+
+    private void forgetOfflineDuelBorder(UUID id) {
+        if (id == null) return;
+        this.duelBorderApplied.remove(id);
+        this.duelPreviousWorldBorders.remove(id);
+    }
+
+    private void restorePreviousDuelBorder(Player player) {
+        org.bukkit.WorldBorder previous = this.duelPreviousWorldBorders.remove(player.getUniqueId());
+        if (previous != null && (previous.getWorld() == null || previous.getWorld().equals(player.getWorld()))) {
+            player.setWorldBorder(previous);
+        }
+    }
+
+    private void returnDuelistAfterArenaReset(UUID id, Player player, Location destination) {
+        if (id == null || destination == null || destination.getWorld() == null) return;
+        if (player == null || !player.isOnline()) {
+            this.returnDuelist(id, player, destination);
+            return;
+        }
+        Location target = destination.clone();
+        Runnable queueOfflineReturn = () -> this.pendingDuelReturns.put(id, target.clone());
+        try {
+            PlatformScheduler.TaskHandle scheduled = PlatformScheduler.entityNow(this, player, () -> {
+                if (!player.isOnline()) {
+                    queueOfflineReturn.run();
+                    return;
+                }
+                this.clearDuelMovementState(player);
+                this.returnDuelist(id, player, target);
+            }, queueOfflineReturn);
+            if (!scheduled.wasAccepted()) queueOfflineReturn.run();
+        } catch (RuntimeException ex) {
+            queueOfflineReturn.run();
+        }
+    }
+
+    private void returnDuelist(UUID id, Player player, Location destination) {
+        this.returnDuelist(id, player, destination, null);
+    }
+
+    private void returnDuelist(UUID id, Player player, Location destination, Runnable afterReturn) {
+        if (id == null || destination == null || destination.getWorld() == null) return;
+        if (player == null || !player.isOnline()) {
+            this.pendingDuelReturns.put(id, destination.clone());
+            return;
+        }
+        Location target = destination.clone();
+        if (this.shuttingDown) {
+            this.returnDuelistSynchronously(player, target, afterReturn);
+            return;
+        }
+        player.teleportAsync(target).whenComplete((ok, ex) -> this.runOnPlayerThread(player, () -> {
+            if (!player.isOnline()) {
+                this.pendingDuelReturns.put(id, target.clone());
+                return;
+            }
+            if (!Boolean.TRUE.equals(ok) || !player.getWorld().equals(target.getWorld())
+                    || player.getLocation().distanceSquared(target) > 0.0001) {
+                this.returnDuelistSynchronously(player, target, afterReturn);
+                return;
+            }
+            this.resetFallAfterTeleport(player);
+            this.restorePreviousDuelBorder(player);
+            this.clearDuelReturnLocation(player);
+            if (afterReturn != null) afterReturn.run();
+        }));
+    }
+
+    private void returnDuelistSynchronously(Player player, Location destination) {
+        this.returnDuelistSynchronously(player, destination, null);
+    }
+
+    private void returnDuelistSynchronously(Player player, Location destination, Runnable afterReturn) {
+        if (player.teleport(destination)) {
+            this.resetFallAfterTeleport(player);
+            this.restorePreviousDuelBorder(player);
+            this.clearDuelReturnLocation(player);
+            if (afterReturn != null) afterReturn.run();
+            return;
+        }
+        World source = this.duelSourceWorld();
+        if (source != null && player.teleport(source.getSpawnLocation())) {
+            this.pendingDuelReturns.put(player.getUniqueId(), destination.clone());
+            this.resetFallAfterTeleport(player);
+            this.restorePreviousDuelBorder(player);
+            if (afterReturn != null) afterReturn.run();
+        } else {
+            this.pendingDuelReturns.put(player.getUniqueId(), destination.clone());
+            this.showDuelFailureTitle(player, "§cUnable to return from the arena. Contact staff.");
+        }
+    }
+
+    // A compact action-bar score leaves titles for status, countdowns, and final results.
+    private void showDuelRoundScore(DuelSession s, Player first, Player second) {
+        if (first != null && first.isOnline()) first.sendActionBar(this.duelRoundScore(s, first.getUniqueId()));
+        if (second != null && second.isOnline()) second.sendActionBar(this.duelRoundScore(s, second.getUniqueId()));
+    }
+
+    private Component duelRoundScore(DuelSession s, UUID viewer) {
+        UUID opponentId = s.other(viewer);
+        Player viewerPlayer = Bukkit.getPlayer(viewer);
+        Player opponent = Bukkit.getPlayer(opponentId);
+        String viewerName = viewerPlayer == null ? "You" : viewerPlayer.getName();
+        String opponentName = opponent == null ? "Opponent" : opponent.getName();
+        int viewerWins = s.winsFor(viewer);
+        int opponentWins = s.winsFor(opponentId);
+        Component score = Component.empty();
+        Component viewerHead = AdventureObjectComponents.playerHead(viewer);
+        if (viewerHead != null) score = score.append(viewerHead).append(Component.space());
+        score = score.append(Component.text(viewerName + " ", NamedTextColor.WHITE))
+            .append(Component.text(viewerWins, NamedTextColor.GOLD))
+            .append(Component.text("  -  ", NamedTextColor.DARK_GRAY));
+        Component opponentHead = AdventureObjectComponents.playerHead(opponentId);
+        if (opponentHead != null) score = score.append(opponentHead).append(Component.space());
+        return score.append(Component.text(opponentName + " ", NamedTextColor.WHITE))
+            .append(Component.text(opponentWins, NamedTextColor.GOLD));
+    }
+
+    private void showDuelResultTitles(DuelSession s, UUID winnerId, UUID loserId) {
+        Player winner = Bukkit.getPlayer(winnerId), loser = Bukkit.getPlayer(loserId);
+        // Start the music with the result, while both players are still in the arena.
+        this.playDuelVictorySong(s, DUEL_VICTORY_SONGS[ThreadLocalRandom.current().nextInt(DUEL_VICTORY_SONGS.length)]);
+        net.kyori.adventure.title.Title.Times times = net.kyori.adventure.title.Title.Times.times(
+            java.time.Duration.ofMillis(200), java.time.Duration.ofMillis(3500), java.time.Duration.ofMillis(700));
+        if (winner != null && winner.isOnline()) {
+            winner.showTitle(net.kyori.adventure.title.Title.title(
+                Component.text("Victory", NamedTextColor.GOLD), Component.empty(), times));
+            winner.playSound(winner, Sound.UI_TOAST_CHALLENGE_COMPLETE, org.bukkit.SoundCategory.MASTER, 1.0f, 1.0f);
+        }
+        if (loser != null && loser.isOnline()) {
+            loser.showTitle(net.kyori.adventure.title.Title.title(
+                Component.text("Defeat", NamedTextColor.RED), Component.empty(), times));
+            loser.playSound(loser, Sound.ENTITY_WITHER_DEATH, org.bukkit.SoundCategory.MASTER, 0.65f, 0.8f);
+        }
+    }
+
+    private void forfeitDuelByChoice(DuelSession s, UUID loserId) {
+        if (s == null || s.ended || s.soloTest) return;
+        if (s.celebrating) return;   // already on the result screen — ignore /leave, no sub-message
+        UUID winnerId = s.other(loserId);
+        s.started = false;
+        s.celebrating = true;
+        s.stuckDeadline = System.currentTimeMillis() + 45000L;
+        s.pendingRoundWinner = winnerId;
+        s.pendingRoundLoser = loserId;
+        s.pendingMatchOver = true;
+        ++s.returnLaunchToken;
+        s.returnLaunchArrivals.clear();
+        this.duelReturning.remove(s.a); this.duelReturning.remove(s.b);
+        this.duelFrozen.remove(s.a); this.duelFrozen.remove(s.b);
+        this.duelIntermission.add(s.a); this.duelIntermission.add(s.b);
+        for (UUID id : new UUID[]{s.a, s.b}) {
+            Player participant = Bukkit.getPlayer(id);
+            if (participant != null && participant.isOnline()) participant.setVelocity(new org.bukkit.util.Vector());
+        }
+        this.dropFinalStandardDuelInventory(s, winnerId, loserId);
+        this.finalizeDuelInventoriesForResult(s, winnerId, loserId);
+        this.showDuelResultTitles(s, winnerId, loserId);
+        s.finalPresentationShown = true;
+        Player anchor = Bukkit.getPlayer(winnerId);
+        if (anchor == null || !anchor.isOnline()) anchor = Bukkit.getPlayer(loserId);
+        if (anchor == null || !anchor.isOnline()) { this.resolveMatch(s, winnerId, loserId); return; }
+        Player taskAnchor = anchor;
+        this.runPlayerTaskLater(taskAnchor, () -> {
+            if (s.ended || s.paused) return;
+            if (s.arena != null && s.startA != null && s.startB != null) this.beginDuelLootWindow(s, winnerId, loserId);
+            else this.resolveMatch(s, winnerId, loserId);
+        }, 100L);
+    }
+
+    private void finalizeDuelInventoriesForResult(DuelSession s, UUID winnerId, UUID loserId) {
+        if (!s.restoredLoadout) return;
+        ItemStack[] winnerSnapshot = winnerId.equals(s.a) ? s.startInvA : s.startInvB;
+        ItemStack[] loserSnapshot = loserId.equals(s.a) ? s.startInvA : s.startInvB;
+        Player winner = Bukkit.getPlayer(winnerId);
+        Player loser = Bukkit.getPlayer(loserId);
+        if (!s.winnerInventoryFinalized) {
+            this.restoreDuelInventory(winner, winnerSnapshot);
+            if (winner == null || !winner.isOnline())
+                this.pendingDuelInventoryRestores.put(winnerId, this.cloneInventorySnapshot(winnerSnapshot));
+            s.winnerInventoryFinalized = true;
+        }
+        if (!s.loserInventoryFinalized) {
+            this.restoreDuelInventory(loser, loserSnapshot);
+            if (loser == null || !loser.isOnline())
+                this.pendingDuelInventoryRestores.put(loserId, this.cloneInventorySnapshot(loserSnapshot));
+            s.loserInventoryFinalized = true;
+        }
+    }
+
+    private void dropFinalStandardDuelInventory(DuelSession s, UUID winnerId, UUID loserId) {
+        if (s == null || s.ended || s.restoredLoadout || !s.arenaEntered || s.loserInventoryDropped
+                || winnerId == null || loserId == null) return;
+        Player winner = Bukkit.getPlayer(winnerId);
+        Player loser = Bukkit.getPlayer(loserId);
+        if (winner == null || !winner.isOnline() || loser == null || !loser.isOnline()) return;
+
+        Location dropLocation = loser.getLocation().clone();
+        World dropWorld = dropLocation.getWorld();
+        if (dropWorld == null || !s.inArena(dropLocation)) return;
+
+        ItemStack[] inventory = this.duelSnapshot(loser);
+        ItemStack cursor = loser.getItemOnCursor();
+        ItemStack cursorSnapshot = cursor == null || cursor.getType().isAir() ? null : cursor.clone();
+        List<org.bukkit.entity.Item> drops = new ArrayList<>();
+        // The result presentation delays the loot window; keep drops from expiring before its five minutes end.
+        try {
+            for (ItemStack stack : inventory) {
+                if (stack == null || stack.getType().isAir() || stack.getAmount() <= 0) continue;
+                org.bukkit.entity.Item item = dropWorld.dropItemNaturally(dropLocation, stack.clone());
+                if (item == null) throw new IllegalStateException("Duel inventory item could not be staged.");
+                drops.add(item);
+                this.protectedDeathDrops.add(item.getUniqueId());
+            }
+            if (cursorSnapshot != null) {
+                org.bukkit.entity.Item item = dropWorld.dropItemNaturally(dropLocation, cursorSnapshot.clone());
+                if (item == null) throw new IllegalStateException("Duel cursor item could not be staged.");
+                drops.add(item);
+                this.protectedDeathDrops.add(item.getUniqueId());
+            }
+
+            loser.getInventory().setStorageContents(new ItemStack[36]);
+            loser.getInventory().setArmorContents(new ItemStack[4]);
+            loser.getInventory().setExtraContents(new ItemStack[]{null});
+            loser.setItemOnCursor(null);
+            loser.updateInventory();
+            s.loserInventoryDropped = true;
+        } catch (RuntimeException ex) {
+            for (org.bukkit.entity.Item item : drops) {
+                this.protectedDeathDrops.remove(item.getUniqueId());
+                try { item.remove(); } catch (RuntimeException ignored) {}
+            }
+            try { this.restoreDuelInventory(loser, inventory); } catch (RuntimeException ignored) {}
+            try { loser.setItemOnCursor(cursorSnapshot); } catch (RuntimeException ignored) {}
+            this.getLogger().warning("Could not stage final duel inventory drops; the loser's inventory was retained.");
+        }
+    }
+
+    private void beginDuelLootWindow(DuelSession s, UUID winnerId, UUID loserId) {
+        if (s == null || s.ended || s.paused || s.postMatchLootWindow) return;
+        Player winner = winnerId == null ? null : Bukkit.getPlayer(winnerId);
+        if (winner == null || !winner.isOnline()) {
+            this.resolveMatch(s, winnerId, loserId);
+            return;
+        }
+        s.postMatchLootWindow = true;
+        s.lootWindowEndsAt = System.currentTimeMillis() + 5L * 60L * 1000L;
+        s.stuckDeadline = 0L;
+        this.settleDuelWager(s, winnerId);
+        this.finalizeDuelInventoriesForResult(s, winnerId, loserId);
+        this.duelFrozen.remove(winnerId);
+        this.duelIntermission.add(winnerId);
+
+
+        // The loser leaves immediately; only the winner remains in the arena for the loot window.
+        Player loser = Bukkit.getPlayer(loserId);
+        this.duelFrozen.remove(loserId);
+        this.duelIntermission.remove(loserId);
+        this.duelReturning.remove(loserId);
+        this.duelRoundSpectators.remove(loserId);
+        this.clearCombatTag(s.a); this.clearCombatTag(s.b);
+        if (loser != null && loser.isOnline()) this.duelSpectatorTransitions.add(loserId);
+        this.activeDuels.remove(loserId, s);
+        this.duelReconnectDeadlines.remove(loserId);
+        this.returnDuelist(loserId, loser, loserId.equals(s.a) ? s.returnA : s.returnB,
+            () -> {
+                this.duelBorderApplied.remove(loserId);
+                this.duelPreviousWorldBorders.remove(loserId);
+                this.clearDuelMovementState(loser);
+            });
+        if (loser == null || !loser.isOnline()) this.forgetOfflineDuelBorder(loserId);
+        s.loserReturned = true;
+
+        winner.sendActionBar(Component.text("Loot window  ·  05:00", NamedTextColor.GRAY));
+        this.runPlayerTaskLater(winner, () -> {
+            if (!s.ended && s.postMatchLootWindow) this.resolveMatch(s, winnerId, loserId);
+        }, 5L * 60L * 20L);
+    }
+
+    private void settleDuelWager(DuelSession s, UUID winnerId) {
+        if (s.wagerSettled) return;
+        s.wagerSettled = true;
+        if (s.wager <= 0.0 || winnerId == null) return;
+        double pot = s.wager * 2.0;
+        Player winner = Bukkit.getPlayer(winnerId);
+        if (winner != null && winner.isOnline()) this.depositMoney(winner, pot);
+        else this.depositMoneyOffline(winnerId, pot);
+    }
+
+    // Match decided: pay the pot, heal both, fanfare, final arena cleanup.
+    private void resolveMatch(DuelSession s, UUID winnerId, UUID loserId) {
+        if (s.ended) return;
+        s.ended = true;
+        s.celebrating = false;
+        s.postMatchLootWindow = false;
+        this.activeDuels.remove(s.a, s); this.activeDuels.remove(s.b, s);
+        this.duelReconnectDeadlines.remove(s.a); this.duelReconnectDeadlines.remove(s.b);
+        s.reconnectTimerFallbacks.clear();
+        this.duelFrozen.remove(s.a); this.duelFrozen.remove(s.b);
+        this.duelRoundSpectators.remove(s.a); this.duelRoundSpectators.remove(s.b);
+        this.duelSpectatorTransitions.remove(s.a); this.duelSpectatorTransitions.remove(s.b);
+        this.clearCombatTag(s.a); this.clearCombatTag(s.b);
+        Player winner = winnerId != null ? Bukkit.getPlayer(winnerId) : null;
+        Player loser = loserId != null ? Bukkit.getPlayer(loserId) : null;
+        this.healDuelist(winner);
+        if (!s.loserReturned) this.healDuelist(loser);
+        if (winner != null) { winner.setGravity(true); winner.setFlying(false); winner.setAllowFlight(false); winner.setInvulnerable(false); }
+        if (!s.loserReturned && loser != null) { loser.setGravity(true); loser.setFlying(false); loser.setAllowFlight(false); loser.setInvulnerable(false); }
+        boolean restoreLoadouts = s.restoredLoadout;
+        if (restoreLoadouts) {
+            ItemStack[] winnerSnapshot = winnerId != null && winnerId.equals(s.a) ? s.startInvA : s.startInvB;
+            ItemStack[] loserSnapshot = loserId != null && loserId.equals(s.a) ? s.startInvA : s.startInvB;
+            if (!s.winnerInventoryFinalized) {
+                this.restoreDuelInventory(winner, winnerSnapshot);
+                if (winner == null || !winner.isOnline()) this.pendingDuelInventoryRestores.put(winnerId, this.cloneInventorySnapshot(winnerSnapshot));
+            }
+            if (!s.loserInventoryFinalized) {
+                this.restoreDuelInventory(loser, loserSnapshot);
+                if (loser == null || !loser.isOnline()) this.pendingDuelInventoryRestores.put(loserId, this.cloneInventorySnapshot(loserSnapshot));
+            }
+        }
+        this.settleDuelWager(s, winnerId);
+        if (!s.finalPresentationShown && winnerId != null && loserId != null) this.showDuelResultTitles(s, winnerId, loserId);
+        this.stopDuelSpectators(s);
+        if (winner == null) this.forgetOfflineDuelBorder(winnerId);
+        if (!s.loserReturned && loser == null) this.forgetOfflineDuelBorder(loserId);
+        Location winnerReturn = winnerId != null && winnerId.equals(s.a) ? s.returnA : s.returnB;
+        Location loserReturn = loserId != null && loserId.equals(s.a) ? s.returnA : s.returnB;
+        // Do not race participant clearance against the return teleport. If restore fails, keep the
+        // pending future and arena lease quarantined rather than returning anyone through that volume.
+        this.resetDuelArena(s).thenAccept(restored -> {
+            if (!Boolean.TRUE.equals(restored)) return;
+            this.returnDuelistAfterArenaReset(winnerId, winner, winnerReturn);
+            if (!s.loserReturned) this.returnDuelistAfterArenaReset(loserId, loser, loserReturn);
+        });
+    }
+
+    // Full 41-slot inventory snapshot (main + armor + offhand), deep-cloned.
+    private ItemStack[] duelSnapshot(Player p) {
+        ItemStack[] snapshot = new ItemStack[41];
+        ItemStack[] storage = p.getInventory().getStorageContents();
+        ItemStack[] armor = p.getInventory().getArmorContents();
+        ItemStack[] extra = p.getInventory().getExtraContents();
+        for (int i = 0; i < Math.min(36, storage.length); i++) snapshot[i] = storage[i] == null ? null : storage[i].clone();
+        for (int i = 0; i < Math.min(4, armor.length); i++) snapshot[36 + i] = armor[i] == null ? null : armor[i].clone();
+        if (extra.length > 0 && extra[0] != null) snapshot[40] = extra[0].clone();
+        return snapshot;
+    }
+
+    private ItemStack[] cloneInventorySnapshot(ItemStack[] src) {
+        if (src == null) return null;
+        ItemStack[] out = new ItemStack[src.length];
+        for (int i = 0; i < src.length; i++) out[i] = src[i] == null ? null : src[i].clone();
+        return out;
+    }
+
+    private void restoreDuelInventories(DuelSession s) {
+        this.restoreDuelInventory(Bukkit.getPlayer(s.a), s.startInvA);
+        this.restoreDuelInventory(Bukkit.getPlayer(s.b), s.startInvB);
+    }
+
+    // Restore the exact snapshot, including original durability and item metadata.
+    private void restoreDuelInventory(Player p, ItemStack[] snapshot) {
+        if (p == null || !p.isOnline() || snapshot == null) return;
+        ItemStack[] copy = new ItemStack[snapshot.length];
+        for (int i = 0; i < snapshot.length; i++) {
+            ItemStack it = snapshot[i];
+            if (it == null) { copy[i] = null; continue; }
+            copy[i] = it.clone();
+        }
+        if (copy.length >= 41) {
+            p.getInventory().setStorageContents(java.util.Arrays.copyOfRange(copy, 0, 36));
+            p.getInventory().setArmorContents(java.util.Arrays.copyOfRange(copy, 36, 40));
+            p.getInventory().setExtraContents(new ItemStack[]{ copy[40] });
+        } else {
+            p.getInventory().setContents(copy);
+        }
+        p.updateInventory();
+    }
+
+    private void healDuelist(Player p) {
+        if (p == null || !p.isOnline()) return;
+        try { p.setHealth(p.getMaxHealth()); } catch (Throwable t) { try { p.setHealth(20.0); } catch (Throwable ignored) {} }
+        p.setAbsorptionAmount(0.0);
+        p.setFoodLevel(20); p.setSaturation(20.0f); p.setFireTicks(0); p.setFallDistance(0.0f);
+        try { p.setRemainingAir(p.getMaximumAir()); } catch (Throwable ignored) {}
+        for (org.bukkit.potion.PotionEffect ef : p.getActivePotionEffects()) {
+            try { p.removePotionEffect(ef.getType()); } catch (Throwable ignored) {}
+        }
+    }
+
+    // A reset is one transaction: clear transient entities, prove both participants are clear of the
+    // restored ground, restore each changed chunk on its region, and only then release chunk tickets.
+    // The arena lease remains held for the whole duel and after terminal removal until this completes.
+    private java.util.concurrent.CompletableFuture<Boolean> resetDuelArena(DuelSession s) {
+        if (s == null) return java.util.concurrent.CompletableFuture.completedFuture(true);
+        if (s.arenaLease == null && s.arena != null) this.reserveDuelArena(s, s.arena);
+        if (s.arenaLease == null) {
+            if (!s.changed.isEmpty() || !s.changedData.isEmpty()) {
+                s.resetPending = true;
+                this.getLogger().severe("[duel] changed arena blocks have no reservation; reset is quarantined");
+                return java.util.concurrent.CompletableFuture.completedFuture(false);
+            }
+            return java.util.concurrent.CompletableFuture.completedFuture(true);
+        }
+        synchronized (s) {
+            java.util.concurrent.CompletableFuture<Boolean> current = s.arenaResetCompletion;
+            if (current != null && !current.isDone()) return current;
+            s.resetPending = true;
+            if (s.resetDeferDeadline <= 0L) s.resetDeferDeadline = System.currentTimeMillis() + 8000L;
+            s.arenaResetGeneration++;
+            current = new java.util.concurrent.CompletableFuture<>();
+            s.arenaResetCompletion = current;
+            this.scheduleDuelArenaResetAttempt(s, s.arenaLease, s.arenaResetGeneration, current, 0L);
+            return current;
+        }
+    }
+
+    private boolean isCurrentDuelArenaReset(DuelSession s, DuelArenaLease lease, long generation,
+            java.util.concurrent.CompletableFuture<Boolean> completion) {
+        return s != null && lease != null && s.arenaLease == lease && s.arenaResetGeneration == generation
+            && s.arenaResetCompletion == completion && s.resetPending;
+    }
+
+    private void scheduleDuelArenaResetAttempt(DuelSession s, DuelArenaLease lease, long generation,
+            java.util.concurrent.CompletableFuture<Boolean> completion, long delayTicks) {
+        Runnable attempt = () -> {
+            if (!this.isCurrentDuelArenaReset(s, lease, generation, completion)) return;
+            if (s.started && !s.ended) this.abortDuel(s, "§cArena reset failed. Wagers refunded.");
+            this.clearDuelArenaEntities(lease).whenComplete((cleared, error) ->
+                this.continueDuelArenaReset(s, lease, generation, completion, () -> {
+                    if (error != null || !Boolean.TRUE.equals(cleared)) {
+                        this.retryDuelArenaReset(s, lease, generation, completion, "entity cleanup did not complete");
+                        return;
+                    }
+                    this.duelArenaParticipantsClearOrLift(s, lease).whenComplete((safe, participantError) ->
+                        this.continueDuelArenaReset(s, lease, generation, completion, () -> {
+                            if (participantError != null || !Boolean.TRUE.equals(safe)) {
+                                this.retryDuelArenaReset(s, lease, generation, completion,
+                                    "a participant is still below the restored ground");
+                                return;
+                            }
+                            this.restoreDuelArenaBlocks(s, lease).whenComplete((restored, restoreError) ->
+                                this.continueDuelArenaReset(s, lease, generation, completion, () -> {
+                                    if (restoreError != null || !Boolean.TRUE.equals(restored)
+                                            || !s.changed.isEmpty() || !s.changedData.isEmpty()) {
+                                        this.retryDuelArenaReset(s, lease, generation, completion,
+                                            "one or more block updates remain");
+                                        return;
+                                    }
+                                    this.releaseDuelArenaChunkTickets(lease).whenComplete((unpinned, unpinError) ->
+                                        this.continueDuelArenaReset(s, lease, generation, completion, () -> {
+                                            if (unpinError != null || !Boolean.TRUE.equals(unpinned)
+                                                    || !lease.pinnedChunks.isEmpty()) {
+                                                this.retryDuelArenaReset(s, lease, generation, completion,
+                                                    "chunk-ticket release did not complete");
+                                                return;
+                                            }
+                                            synchronized (s) {
+                                                if (!this.isCurrentDuelArenaReset(s, lease, generation, completion)) return;
+                                                if (!s.changed.isEmpty() || !s.changedData.isEmpty()) {
+                                                    this.retryDuelArenaReset(s, lease, generation, completion,
+                                                        "new block changes arrived during reset");
+                                                    return;
+                                                }
+                                                s.resetPending = false;
+                                                s.resetDeferDeadline = 0L;
+                                            }
+                                            if (s.ended) this.releaseDuelArenaLease(s);
+                                            completion.complete(true);
+                                        }));
+                                }));
+                        }));
+                }));
+        };
+        try {
+            PlatformScheduler.TaskHandle scheduled = delayTicks <= 0L
+                ? PlatformScheduler.globalNow(this, attempt)
+                : PlatformScheduler.globalLater(this, attempt, delayTicks);
+            if (!scheduled.wasAccepted()) {
+                this.getLogger().severe("[duel] arena reset task was rejected; reservation remains quarantined");
+            }
+        } catch (RuntimeException ex) {
+            this.getLogger().severe("[duel] arena reset could not be scheduled; reservation remains quarantined");
+        }
+    }
+
+    private void continueDuelArenaReset(DuelSession s, DuelArenaLease lease, long generation,
+            java.util.concurrent.CompletableFuture<Boolean> completion, Runnable continuation) {
+        try {
+            PlatformScheduler.TaskHandle scheduled = PlatformScheduler.globalNow(this, () -> {
+                if (this.isCurrentDuelArenaReset(s, lease, generation, completion)) continuation.run();
+            });
+            if (!scheduled.wasAccepted()) {
+                this.getLogger().severe("[duel] arena reset continuation was rejected; reservation remains quarantined");
+            }
+        } catch (RuntimeException ex) {
+            this.getLogger().severe("[duel] arena reset continuation failed; reservation remains quarantined");
+        }
+    }
+
+    private void retryDuelArenaReset(DuelSession s, DuelArenaLease lease, long generation,
+            java.util.concurrent.CompletableFuture<Boolean> completion, String reason) {
+        if (this.shuttingDown) {
+            this.getLogger().severe("[duel] arena reset stopped at disable with its lease quarantined (" + reason + ")");
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - s.resetLastWarningAt >= 5000L) {
+            s.resetLastWarningAt = now;
+            this.getLogger().warning("[duel] arena reset remains quarantined (" + reason + ")");
+        }
+        this.scheduleDuelArenaResetAttempt(s, lease, generation, completion, 20L);
+    }
+
+    private CompletableFuture<Boolean> scheduleDuelArenaChunk(DuelArenaLease lease, DuelArenaChunkKey key,
+            boolean pin, java.util.function.Function<org.bukkit.Chunk,
+                java.util.concurrent.CompletableFuture<Boolean>> operation) {
+        java.util.concurrent.CompletableFuture<Boolean> result = new java.util.concurrent.CompletableFuture<>();
+        try {
+            lease.world.getChunkAtAsync(key.x(), key.z(), false).whenComplete((chunk, loadError) -> {
+                if (loadError != null || chunk == null) {
+                    result.complete(false);
+                    return;
+                }
+                Location owner = new Location(lease.world, (key.x() << 4) + 8,
+                    lease.world.getMinHeight(), (key.z() << 4) + 8);
+                try {
+                    PlatformScheduler.TaskHandle scheduled = PlatformScheduler.regionNow(this, owner, () -> {
+                        try {
+                            if (pin) {
+                                boolean ticketed = chunk.getPluginChunkTickets().contains(this);
+                                if (!ticketed) ticketed = chunk.addPluginChunkTicket(this);
+                                if (!ticketed && !chunk.getPluginChunkTickets().contains(this)) {
+                                    result.complete(false);
+                                    return;
+                                }
+                                lease.pinnedChunks.add(key);
+                            }
+                            java.util.concurrent.CompletableFuture<Boolean> work = operation.apply(chunk);
+                            if (work == null) {
+                                result.complete(false);
+                                return;
+                            }
+                            work.whenComplete((ok, workError) -> result.complete(
+                                workError == null && Boolean.TRUE.equals(ok)));
+                        } catch (Throwable ex) {
+                            result.complete(false);
+                        }
+                    });
+                    if (!scheduled.wasAccepted()) result.complete(false);
+                } catch (RuntimeException ex) {
+                    result.complete(false);
+                }
+            });
+        } catch (RuntimeException ex) {
+            result.complete(false);
+        }
+        return result;
+    }
+
+    private CompletableFuture<Boolean> clearDuelArenaEntities(DuelArenaLease lease) {
+        List<java.util.concurrent.CompletableFuture<Boolean>> chunks = new ArrayList<>();
+        int minChunkX = Math.floorDiv((int)Math.floor(lease.centerX - lease.halfSize), 16);
+        int maxChunkX = Math.floorDiv((int)Math.floor(lease.centerX + lease.halfSize), 16);
+        int minChunkZ = Math.floorDiv((int)Math.floor(lease.centerZ - lease.halfSize), 16);
+        int maxChunkZ = Math.floorDiv((int)Math.floor(lease.centerZ + lease.halfSize), 16);
+        for (int cx = minChunkX; cx <= maxChunkX; cx++) {
+            for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
+                DuelArenaChunkKey key = new DuelArenaChunkKey(cx, cz);
+                chunks.add(this.scheduleDuelArenaChunk(lease, key, true, chunk -> {
+                    List<java.util.concurrent.CompletableFuture<Boolean>> removals = new ArrayList<>();
+                    for (org.bukkit.entity.Entity entity : chunk.getEntities()) {
+                        if (!this.isDuelArenaDebris(entity)) continue;
+                        java.util.concurrent.CompletableFuture<Boolean> removed = new java.util.concurrent.CompletableFuture<>();
+                        try {
+                            PlatformScheduler.TaskHandle scheduled = PlatformScheduler.entityNow(this, entity, () -> {
+                                try {
+                                    if (!entity.isValid() || !this.isDuelArenaDebris(entity)) {
+                                        removed.complete(true);
+                                        return;
+                                    }
+                                    Location current = entity.getLocation();
+                                    if (current.getWorld() == null || !lease.worldId.equals(current.getWorld().getUID())
+                                            || Math.abs(current.getX() - lease.centerX) > lease.halfSize
+                                            || Math.abs(current.getZ() - lease.centerZ) > lease.halfSize) {
+                                        removed.complete(true);
+                                        return;
+                                    }
+                                    if (entity instanceof org.bukkit.entity.Item item)
+                                        this.protectedDeathDrops.remove(item.getUniqueId());
+                                    entity.remove();
+                                    removed.complete(!entity.isValid());
+                                } catch (Throwable ex) {
+                                    removed.complete(false);
+                                }
+                            }, () -> removed.complete(false));
+                            if (!scheduled.wasAccepted()) removed.complete(false);
+                        } catch (RuntimeException ex) {
+                            removed.complete(false);
+                        }
+                        removals.add(removed);
+                    }
+                    return this.allDuelArenaTasks(removals);
+                }));
+            }
+        }
+        return this.allDuelArenaTasks(chunks);
+    }
+
+    private boolean isDuelArenaDebris(org.bukkit.entity.Entity entity) {
+        return entity instanceof org.bukkit.entity.EnderCrystal || entity instanceof org.bukkit.entity.Item
+            || entity instanceof org.bukkit.entity.Firework || entity instanceof org.bukkit.entity.AreaEffectCloud
+            || entity instanceof org.bukkit.entity.ExperienceOrb || entity instanceof org.bukkit.entity.Projectile
+            || entity instanceof org.bukkit.entity.TNTPrimed || entity instanceof org.bukkit.entity.FallingBlock;
+    }
+
+    private CompletableFuture<Boolean> duelArenaParticipantsClearOrLift(DuelSession s, DuelArenaLease lease) {
+        List<java.util.concurrent.CompletableFuture<Boolean>> checks = new ArrayList<>();
+        UUID[] ids = s.soloTest ? new UUID[]{s.a} : new UUID[]{s.a, s.b};
+        for (UUID id : ids) {
+            Player player = Bukkit.getPlayer(id);
+            if (player == null) {
+                checks.add(java.util.concurrent.CompletableFuture.completedFuture(true));
+                continue;
+            }
+            java.util.concurrent.CompletableFuture<Boolean> checked = new java.util.concurrent.CompletableFuture<>();
+            try {
+                PlatformScheduler.TaskHandle scheduled = PlatformScheduler.entityNow(this, player, () -> {
+                    try {
+                        if (!player.isOnline() || !lease.worldId.equals(player.getWorld().getUID())) {
+                            checked.complete(true);
+                            return;
+                        }
+                        Location current = player.getLocation();
+                        double ground = this.duelRestoreGroundNear(s, current, 2);
+                        if (current.getY() + 0.01 >= ground) {
+                            checked.complete(true);
+                            return;
+                        }
+                        if (System.currentTimeMillis() < s.resetDeferDeadline) {
+                            checked.complete(false);
+                            return;
+                        }
+                        Location lift = id.equals(s.a) ? s.startA : s.startB;
+                        if (lift == null || lift.getWorld() == null || !lease.worldId.equals(lift.getWorld().getUID())) {
+                            checked.complete(false);
+                            return;
+                        }
+                        this.teleportKeepingView(player, lift).whenComplete((ok, teleportError) -> {
+                            if (teleportError != null || !Boolean.TRUE.equals(ok)) {
+                                checked.complete(false);
+                                return;
+                            }
+                            try {
+                                PlatformScheduler.TaskHandle verify = PlatformScheduler.entityNow(this, player, () -> {
+                                    try {
+                                        if (!player.isOnline() || !lease.worldId.equals(player.getWorld().getUID())) {
+                                            checked.complete(true);
+                                            return;
+                                        }
+                                        Location moved = player.getLocation();
+                                        double restoredGround = this.duelRestoreGroundNear(s, moved, 2);
+                                        if (moved.getY() + 0.01 < restoredGround) {
+                                            checked.complete(false);
+                                            return;
+                                        }
+                                        this.finishDuelReturnMotion(player);
+                                        player.setVelocity(new org.bukkit.util.Vector());
+                                        player.setFallDistance(0.0f);
+                                        checked.complete(true);
+                                    } catch (Throwable ex) {
+                                        checked.complete(false);
+                                    }
+                                }, () -> checked.complete(false));
+                                if (!verify.wasAccepted()) checked.complete(false);
+                            } catch (RuntimeException ex) {
+                                checked.complete(false);
+                            }
+                        });
+                    } catch (Throwable ex) {
+                        checked.complete(false);
+                    }
+                }, () -> checked.complete(false));
+                if (!scheduled.wasAccepted()) checked.complete(false);
+            } catch (RuntimeException ex) {
+                checked.complete(false);
+            }
+            checks.add(checked);
+        }
+        return this.allDuelArenaTasks(checks);
+    }
+
+    private CompletableFuture<Boolean> restoreDuelArenaBlocks(DuelSession s, DuelArenaLease lease) {
+        Map<DuelArenaChunkKey, List<String>> byChunk = new HashMap<>();
+        for (Map.Entry<String, DuelArenaBlockSnapshot> entry : s.changed.entrySet()) {
+            DuelArenaBlockSnapshot snapshot = entry.getValue();
+            if (snapshot == null || !lease.worldId.equals(snapshot.worldId))
+                return java.util.concurrent.CompletableFuture.completedFuture(false);
+            DuelArenaChunkKey key = new DuelArenaChunkKey(Math.floorDiv(snapshot.x, 16), Math.floorDiv(snapshot.z, 16));
+            byChunk.computeIfAbsent(key, ignored -> new ArrayList<>()).add(entry.getKey());
+        }
+        for (String blockKey : s.changedData.keySet()) {
+            if (s.changed.containsKey(blockKey)) continue;
+            int[] xyz = this.duelBlockCoordinates(blockKey);
+            if (xyz == null) return java.util.concurrent.CompletableFuture.completedFuture(false);
+            DuelArenaChunkKey key = new DuelArenaChunkKey(Math.floorDiv(xyz[0], 16), Math.floorDiv(xyz[2], 16));
+            byChunk.computeIfAbsent(key, ignored -> new ArrayList<>()).add(blockKey);
+        }
+        List<java.util.concurrent.CompletableFuture<Boolean>> restores = new ArrayList<>();
+        for (Map.Entry<DuelArenaChunkKey, List<String>> group : byChunk.entrySet()) {
+            DuelArenaChunkKey key = group.getKey();
+            List<String> keys = List.copyOf(group.getValue());
+            restores.add(this.scheduleDuelArenaChunk(lease, key, true, chunk -> {
+                boolean complete = true;
+                for (String blockKey : keys) {
+                    DuelArenaBlockSnapshot snapshot = s.changed.get(blockKey);
+                    if (snapshot == null) continue;
+                    try {
+                        if (snapshot.state.update(true, false)) {
+                            s.changed.remove(blockKey, snapshot);
+                            s.changedData.remove(blockKey);
+                        } else complete = false;
+                    } catch (Throwable ex) {
+                        complete = false;
+                    }
+                }
+                for (String blockKey : keys) {
+                    if (s.changed.containsKey(blockKey)) continue;
+                    org.bukkit.block.data.BlockData data = s.changedData.get(blockKey);
+                    if (data == null) continue;
+                    int[] xyz = this.duelBlockCoordinates(blockKey);
+                    if (xyz == null || Math.floorDiv(xyz[0], 16) != key.x() || Math.floorDiv(xyz[2], 16) != key.z()) {
+                        complete = false;
+                        continue;
+                    }
+                    try {
+                        lease.world.getBlockAt(xyz[0], xyz[1], xyz[2]).setBlockData(data.clone(), false);
+                        s.changedData.remove(blockKey, data);
+                    } catch (Throwable ex) {
+                        complete = false;
+                    }
+                }
+                return java.util.concurrent.CompletableFuture.completedFuture(complete);
+            }));
+        }
+        return this.allDuelArenaTasks(restores);
+    }
+
+    private CompletableFuture<Boolean> releaseDuelArenaChunkTickets(DuelArenaLease lease) {
+        List<java.util.concurrent.CompletableFuture<Boolean>> removals = new ArrayList<>();
+        for (DuelArenaChunkKey key : new java.util.HashSet<>(lease.pinnedChunks)) {
+            removals.add(this.scheduleDuelArenaChunk(lease, key, false, chunk -> {
+                try {
+                    if (chunk.getPluginChunkTickets().contains(this)) chunk.removePluginChunkTicket(this);
+                    if (chunk.getPluginChunkTickets().contains(this))
+                        return java.util.concurrent.CompletableFuture.completedFuture(false);
+                    lease.pinnedChunks.remove(key);
+                    return java.util.concurrent.CompletableFuture.completedFuture(true);
+                } catch (Throwable ex) {
+                    return java.util.concurrent.CompletableFuture.completedFuture(false);
+                }
+            }));
+        }
+        return this.allDuelArenaTasks(removals);
+    }
+
+    private int[] duelBlockCoordinates(String key) {
+        try {
+            String[] xyz = key.split(":");
+            if (xyz.length != 3) return null;
+            return new int[]{Integer.parseInt(xyz[0]), Integer.parseInt(xyz[1]), Integer.parseInt(xyz[2])};
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    private CompletableFuture<Boolean> allDuelArenaTasks(List<java.util.concurrent.CompletableFuture<Boolean>> tasks) {
+        if (tasks.isEmpty()) return java.util.concurrent.CompletableFuture.completedFuture(true);
+        return java.util.concurrent.CompletableFuture.allOf(tasks.toArray(new java.util.concurrent.CompletableFuture<?>[0]))
+            .handle((ignored, error) -> error == null && tasks.stream().allMatch(task -> Boolean.TRUE.equals(task.getNow(false))));
+    }
+
+    // Ground checks consume only immutable coordinates captured by the block-change event on its owner region.
+    private double duelRestoreGroundNear(DuelSession s, Location at, int radius) {
+        double top = Double.NEGATIVE_INFINITY;
+        int px = at.getBlockX(), pz = at.getBlockZ();
+        DuelArenaLease lease = s.arenaLease;
+        for (DuelArenaBlockSnapshot snapshot : s.changed.values()) {
+            if (lease != null && !lease.worldId.equals(snapshot.worldId)) continue;
+            if (!snapshot.solid || (radius != Integer.MAX_VALUE
+                    && (Math.abs(snapshot.x - px) > radius || Math.abs(snapshot.z - pz) > radius))) continue;
+            top = Math.max(top, snapshot.y + 1.0);
+        }
+        for (Map.Entry<String, org.bukkit.block.data.BlockData> entry : s.changedData.entrySet()) {
+            if (s.changed.containsKey(entry.getKey()) || !entry.getValue().getMaterial().isSolid()) continue;
+            int[] xyz = this.duelBlockCoordinates(entry.getKey());
+            if (xyz == null || (radius != Integer.MAX_VALUE
+                    && (Math.abs(xyz[0] - px) > radius || Math.abs(xyz[2] - pz) > radius))) continue;
+            top = Math.max(top, xyz[1] + 1.0);
+        }
+        return top;
+    }
+
+    private boolean canUseDuelArena(Player player, Location location) {
+        if (player == null || location == null) return false;
+        DuelSession session = this.activeDuels.get(player.getUniqueId());
+        if (session == null || session.ended || session.resetPending || !session.inArena(location)) return false;
+        if (this.duelReturning.contains(player.getUniqueId())) return false;
+        return session.started || session.celebrating || this.duelIntermission.contains(player.getUniqueId());
+    }
+
+    private Location duelPearlBorderLanding(DuelSession session, Location attempted) {
+        if (session == null || session.arena == null || attempted == null || attempted.getWorld() == null) return null;
+        double radius = Math.max(2.0, session.borderRadius - 1.0);
+        double dx = attempted.getX() - session.arena.getX();
+        double dz = attempted.getZ() - session.arena.getZ();
+        double edgeX = session.arena.getX() + Math.max(-radius, Math.min(radius, dx));
+        double edgeZ = session.arena.getZ() + Math.max(-radius, Math.min(radius, dz));
+        int inwardX = Math.abs(dx) > session.borderRadius ? (int)Math.signum(dx) : 0;
+        int inwardZ = Math.abs(dz) > session.borderRadius ? (int)Math.signum(dz) : 0;
+        for (int inset = 0; inset <= 8; inset++) {
+            int x = NumberConversions.floor(edgeX - inwardX * inset);
+            int z = NumberConversions.floor(edgeZ - inwardZ * inset);
+            Location safe = this.findSafeRtpLocation(attempted.getWorld(), x, z, attempted.getYaw());
+            if (safe != null && session.inArena(safe)) {
+                safe.setPitch(attempted.getPitch());
+                return safe;
+            }
+        }
+        // The visual arena border is more important than rejecting a valid pearl. Preserve the impact
+        // height as a final fallback; normal movement/border handling will keep the player inside.
+        int y = Math.max(attempted.getWorld().getMinHeight() + 1,
+            Math.min(attempted.getWorld().getMaxHeight() - 2, attempted.getBlockY()));
+        return new Location(attempted.getWorld(), edgeX, y, edgeZ, attempted.getYaw(), attempted.getPitch());
+    }
+
+    private boolean canViewDuelArena(Player player, Location location) {
+        if (player == null || location == null) return false;
+        SpectateState state = this.spectating.get(player.getUniqueId());
+        if (state == null) return false;
+        DuelSession session = this.activeDuels.get(state.targetId);
+        return session != null && !session.ended && session.inArena(location);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPrivateDuelArenaTeleport(org.bukkit.event.player.PlayerTeleportEvent e) {
+        Location destination = e.getTo();
+        if (destination == null || !this.isDuelArenaWorld(destination.getWorld())) return;
+        if (this.canUseDuelArena(e.getPlayer(), destination) || this.canViewDuelArena(e.getPlayer(), destination)) return;
+        // A duelist's countdown teleport reaches the arena before the round is marked live.
+        DuelSession session = this.activeDuels.get(e.getPlayer().getUniqueId());
+        if (session != null && !session.ended && session.arena != null
+                && e.getCause() == org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.ENDER_PEARL
+                && session.inArena(e.getFrom())) {
+            Location borderLanding = this.duelPearlBorderLanding(session, destination);
+            if (borderLanding != null) {
+                e.setTo(borderLanding);
+                return;
+            }
+        }
+        if (session != null && !session.ended && session.inArena(destination)) return;
+        e.setCancelled(true);
+        e.getPlayer().sendActionBar(Component.text("This duel arena is private.", NamedTextColor.RED));
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPrivateDuelArenaMove(PlayerMoveEvent e) {
+        Location destination = e.getTo();
+        if (destination == null || !this.isDuelArenaWorld(destination.getWorld())) return;
+        if (this.canUseDuelArena(e.getPlayer(), destination) || this.canViewDuelArena(e.getPlayer(), destination)) return;
+        DuelSession session = this.activeDuels.get(e.getPlayer().getUniqueId());
+        if (session != null && !session.ended && session.inArena(destination)) return;
+        e.setTo(e.getFrom());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPrivateDuelArenaInteract(PlayerInteractEvent e) {
+        if (this.isDuelArenaWorld(e.getPlayer().getWorld()) && !this.canUseDuelArena(e.getPlayer(), e.getPlayer().getLocation())) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPrivateDuelArenaBlockPlace(org.bukkit.event.block.BlockPlaceEvent e) {
+        if (this.isDuelArenaWorld(e.getBlock().getWorld()) && !this.canUseDuelArena(e.getPlayer(), e.getBlock().getLocation())) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPrivateDuelArenaBlockBreak(org.bukkit.event.block.BlockBreakEvent e) {
+        if (this.isDuelArenaWorld(e.getBlock().getWorld()) && !this.canUseDuelArena(e.getPlayer(), e.getBlock().getLocation())) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPrivateDuelArenaBucketEmpty(org.bukkit.event.player.PlayerBucketEmptyEvent e) {
+        if (this.isDuelArenaWorld(e.getBlockClicked().getWorld()) && !this.canUseDuelArena(e.getPlayer(), e.getPlayer().getLocation())) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPrivateDuelArenaBucketFill(org.bukkit.event.player.PlayerBucketFillEvent e) {
+        if (this.isDuelArenaWorld(e.getBlockClicked().getWorld()) && !this.canUseDuelArena(e.getPlayer(), e.getPlayer().getLocation())) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPrivateDuelArenaDrop(org.bukkit.event.player.PlayerDropItemEvent e) {
+        if (this.isDuelArenaWorld(e.getPlayer().getWorld()) && !this.canUseDuelArena(e.getPlayer(), e.getPlayer().getLocation())) {
+            e.setCancelled(true);
+        }
+    }
+
+    // Record a block's ORIGINAL data the first time a participant changes it inside an active arena.
+    private void recordDuelBlockChange(org.bukkit.block.BlockState original, UUID actorId) {
+        if (this.activeDuels.isEmpty() || original == null) return;
+        Location loc = original.getLocation();
+        World world = loc.getWorld();
+        if (world == null) return;
+        int x = loc.getBlockX(), y = loc.getBlockY(), z = loc.getBlockZ();
+        String key = x + ":" + y + ":" + z;
+        DuelArenaBlockSnapshot snapshot = new DuelArenaBlockSnapshot(original, world.getUID(), x, y, z,
+            original.getType().isSolid());
+        org.bukkit.block.data.BlockData data = original.getBlockData().clone();
+        for (DuelSession s : this.activeDuels.values()) {
+            if (s.ended || !s.inRollbackVolume(loc)) continue;
+            if (actorId != null && !actorId.equals(s.a) && !actorId.equals(s.b)) continue;
+            synchronized (s) {
+                if (s.ended || !s.inRollbackVolume(loc)) continue;
+                if (actorId != null && !actorId.equals(s.a) && !actorId.equals(s.b)) continue;
+                // Freeze player edits during reset, but keep recording environmental changes until
+                // each region batch has drained them. The first snapshot remains the pre-duel state.
+                boolean tracking = s.started || s.celebrating
+                    || this.duelIntermission.contains(s.a) || this.duelIntermission.contains(s.b)
+                    || this.duelReturning.contains(s.a) || this.duelReturning.contains(s.b);
+                if (!tracking) continue;
+                s.changed.putIfAbsent(key, snapshot);
+                s.changedData.putIfAbsent(key, data);
+                return;
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onDuelBlockPlace(org.bukkit.event.block.BlockPlaceEvent e) {
+        this.recordDuelBlockChange(e.getBlockReplacedState(), e.getPlayer().getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onDuelBlockBreak(org.bukkit.event.block.BlockBreakEvent e) {
+        this.recordDuelBlockChange(e.getBlock().getState(), e.getPlayer().getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelEntityExplode(org.bukkit.event.entity.EntityExplodeEvent e) {
+        for (org.bukkit.block.Block b : e.blockList()) this.recordDuelBlockChange(b.getState(), null);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelBlockExplode(org.bukkit.event.block.BlockExplodeEvent e) {
+        for (org.bukkit.block.Block b : e.blockList()) this.recordDuelBlockChange(b.getState(), null);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelBlockIgnite(org.bukkit.event.block.BlockIgniteEvent e) {
+        this.recordDuelBlockChange(e.getBlock().getState(), null);
+    }
+
+    // Fluids from buckets, and the blocks fluid FLOWS into, are the most common "arena didn't reset"
+    // culprits — plus fire burning blocks away, frost-walker ice, and falling/formed blocks.
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelBucketEmpty(org.bukkit.event.player.PlayerBucketEmptyEvent e) {
+        this.recordDuelBlockChange(e.getBlockClicked().getRelative(e.getBlockFace()).getState(), e.getPlayer().getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelBucketFill(org.bukkit.event.player.PlayerBucketFillEvent e) {
+        this.recordDuelBlockChange(e.getBlockClicked().getState(), e.getPlayer().getUniqueId());
+    }
+
+    // Frost-walker / snow-golem / other entity-formed blocks (fluid flow, burn, and entity-change-block
+    // are tracked elsewhere).
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelEntityBlockForm(org.bukkit.event.block.EntityBlockFormEvent e) {
+        this.recordDuelBlockChange(e.getBlock().getState(), null);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelBlockBurn(org.bukkit.event.block.BlockBurnEvent e) {
+        this.recordDuelBlockChange(e.getBlock().getState(), null);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelBlockSpread(org.bukkit.event.block.BlockSpreadEvent e) {
+        this.recordDuelBlockChange(e.getBlock().getState(), null);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelFluidFlow(org.bukkit.event.block.BlockFromToEvent e) {
+        this.recordDuelBlockChange(e.getToBlock().getState(), null);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDuelEntityChangeBlock(org.bukkit.event.entity.EntityChangeBlockEvent e) {
+        this.recordDuelBlockChange(e.getBlock().getState(), null);
+    }
+
+    // Player-specific square border: only active participants receive its visual or knockback.
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onDuelBorderMove(PlayerMoveEvent e) {
+        DuelSession s = this.activeDuels.get(e.getPlayer().getUniqueId());
+        if (s == null || (!s.started && !s.celebrating
+                && !this.duelIntermission.contains(e.getPlayer().getUniqueId())) || s.arena == null) return;
+        Location to = e.getTo();
+        if (to == null || to.getWorld() == null || !to.getWorld().equals(s.arena.getWorld())) return;
+        double dx = to.getX() - s.arena.getX(), dz = to.getZ() - s.arena.getZ();
+        double r = s.borderRadius;
+        if (Math.abs(dx) > r || Math.abs(dz) > r) {
+            Player p = e.getPlayer();
+            double clampR = r - 1.0;
+            Location clamped = new Location(to.getWorld(),
+                s.arena.getX() + Math.max(-clampR, Math.min(clampR, dx)), to.getY(),
+                s.arena.getZ() + Math.max(-clampR, Math.min(clampR, dz)),
+                to.getYaw(), to.getPitch());
+            e.setTo(clamped);
+            p.setVelocity(new org.bukkit.util.Vector(
+                Math.abs(dx) > r ? -Math.signum(dx) * 0.6 : 0.0,
+                0.25,
+                Math.abs(dz) > r ? -Math.signum(dz) * 0.6 : 0.0));
+        }
+    }
+
+    // Victory song ANCHORED at the duel area (not attached to a player, so it stays around the arena
+    // rather than following whoever walks off). Loud volume raises the audible RANGE to fill the area.
+    // Hard-stopped after the five-minute post-match loot window.
+    private void playDuelVictorySong(DuelSession s, Sound song) {
+        Location arena = s.arena;
+        if (arena == null) {
+            Player pa = Bukkit.getPlayer(s.a);
+            if (pa != null && pa.isOnline()) arena = pa.getLocation();
+        }
+        if (arena == null || arena.getWorld() == null) return;
+        final Location fArena = arena.clone();
+        final World w = fArena.getWorld();
+        for (Player p : w.getPlayers()) {
+            if (p.getLocation().distanceSquared(fArena) <= 160.0 * 160.0
+                    && this.isSettingEnabledCached(p.getUniqueId(), "music_sound_notifications")) {
+                p.playSound(fArena, song, org.bukkit.SoundCategory.RECORDS, 10.0f, 1.0f);
+                this.runPlayerTaskLater(p, () -> {
+                    if (p.isOnline()) p.stopSound(song, org.bukkit.SoundCategory.RECORDS);
+                }, 5L * 60L * 20L + 100L);
+            }
+        }
+    }
+
+    // No fight happened (no arena / disconnect during countdown): refund both wagers.
+    private void abortDuel(DuelSession s, String msgOrNull) {
+        if (s.ended) return;
+        if (s.soloTest) {
+            this.finishSoloDuel(s, msgOrNull == null ? null : msgOrNull
+                .replace(" Wagers refunded.", ".").replace(" Wager refunded.", "."), true);
+            return;
+        }
+        s.ended = true;
+        this.activeDuels.remove(s.a); this.activeDuels.remove(s.b);
+        this.duelReconnectDeadlines.remove(s.a); this.duelReconnectDeadlines.remove(s.b);
+        s.reconnectTimerFallbacks.clear();
+        this.duelFrozen.remove(s.a); this.duelFrozen.remove(s.b);
+        this.clearCombatTag(s.a); this.clearCombatTag(s.b);
+        Player pa = Bukkit.getPlayer(s.a), pb = Bukkit.getPlayer(s.b);
+        if (pa == null) this.forgetOfflineDuelBorder(s.a);
+        if (pb == null) this.forgetOfflineDuelBorder(s.b);
+        if (s.arenaEntered) {
+            this.restoreDuelInventory(pa, s.startInvA);
+            this.restoreDuelInventory(pb, s.startInvB);
+            if (pa == null || !pa.isOnline()) this.pendingDuelInventoryRestores.put(s.a, this.cloneInventorySnapshot(s.startInvA));
+            if (pb == null || !pb.isOnline()) this.pendingDuelInventoryRestores.put(s.b, this.cloneInventorySnapshot(s.startInvB));
+        }
+        if (s.wager > 0) { this.refundDuel(s.a, s.wager); this.refundDuel(s.b, s.wager); }
+        for (UUID id : new UUID[]{ s.a, s.b }) {
+            Player p = Bukkit.getPlayer(id);
+            if (msgOrNull != null) this.showDuelFailureTitle(p, msgOrNull);
+        }
+        this.stopDuelSpectators(s);
+        this.resetDuelArena(s).thenAccept(restored -> {
+            if (!Boolean.TRUE.equals(restored)) return;
+            this.returnDuelistAfterArenaReset(s.a, pa, s.returnA);
+            this.returnDuelistAfterArenaReset(s.b, pb, s.returnB);
+        });
+    }
+
+    private void finishSoloDuel(DuelSession s, String message, boolean returnPlayer) {
+        if (s == null || s.ended) return;
+        s.ended = true;
+        this.activeDuels.remove(s.a, s);
+        this.duelReconnectDeadlines.remove(s.a);
+        this.duelFrozen.remove(s.a);
+        this.duelRoundSpectators.remove(s.a);
+        this.duelSpectatorTransitions.remove(s.a);
+        this.clearCombatTag(s.a);
+        Player player = Bukkit.getPlayer(s.a);
+        if (s.arenaEntered) this.restoreDuelInventory(player, s.startInvA);
+        if (player == null || !player.isOnline()) {
+            this.forgetOfflineDuelBorder(s.a);
+            if (s.arenaEntered) this.pendingDuelInventoryRestores.put(s.a, this.cloneInventorySnapshot(s.startInvA));
+        } else {
+            if (message != null) this.showDuelFailureTitle(player, message);
+        }
+        this.stopDuelSpectators(s);
+        this.resetDuelArena(s).thenAccept(restored -> {
+            if (Boolean.TRUE.equals(restored))
+                this.returnDuelistAfterArenaReset(s.a, player, s.soloReturnLocation);
+        });
+    }
+
+    private void refundDuel(UUID id, double amt) {
+        Player p = Bukkit.getPlayer(id);
+        if (p != null && p.isOnline()) this.depositMoney(p, amt); else this.depositMoneyOffline(id, amt);
+    }
+
+    // A participant gets ten seconds to reconnect. The match is frozen and the current round is
+    // discarded; a timely reconnect restarts that round from both original inventory snapshots.
+    private void forfeitDuel(DuelSession s, UUID quitterId) {
+        if (s.ended) return;
+        Player quitter = Bukkit.getPlayer(quitterId);
+        this.beginDuelReconnectGrace(s, quitterId, quitter, org.bukkit.event.player.PlayerQuitEvent.QuitReason.DISCONNECTED);
+    }
+
+    private void beginDuelReconnectGrace(DuelSession s, UUID quitterId, Player quitter, org.bukkit.event.player.PlayerQuitEvent.QuitReason reason) {
+        if (s.ended || !s.disconnected.add(quitterId)) return;
+        s.disconnectReasons.put(quitterId, reason);
+        s.started = false; s.paused = true;
+        ++s.returnLaunchToken;
+        s.returnLaunchArrivals.clear();
+        this.duelIntermission.remove(s.a); this.duelIntermission.remove(s.b);
+        this.duelReturning.remove(s.a); this.duelReturning.remove(s.b);
+        this.duelFrozen.add(s.a); this.duelFrozen.add(s.b);
+        int graceSeconds = Math.max(3, this.settings.getInt("duel.reconnect-grace-seconds", 10));
+        long deadline = System.currentTimeMillis() + graceSeconds * 1000L;
+        this.duelReconnectDeadlines.put(quitterId, deadline);
+        Player opponent = Bukkit.getPlayer(s.other(quitterId));
+        if (opponent != null && opponent.isOnline()) {
+            opponent.setVelocity(new org.bukkit.util.Vector());
+            opponent.setFallDistance(0.0f);
+            Location safeStart = opponent.getUniqueId().equals(s.a) ? s.startA : s.startB;
+            if (safeStart != null) {
+                this.teleportKeepingView(opponent, safeStart).thenAccept(ok -> this.runOnPlayerThread(opponent, () -> {
+                    if (ok && opponent.isOnline() && !s.ended) this.resetFallAfterTeleport(opponent);
+                }));
+            }
+        }
+        this.healDuelist(opponent);
+        this.restoreDuelInventory(opponent, s.other(quitterId).equals(s.a) ? s.startInvA : s.startInvB);
+        // Keep the reconnect grace countdown independent; the session stays paused and enterRound()
+        // joins this same in-flight future before combat can resume.
+        this.resetDuelArena(s);
+        if (opponent != null && opponent.isOnline()) {
+            opponent.showTitle(net.kyori.adventure.title.Title.title(
+                Component.text("OPPONENT DISCONNECTED", NamedTextColor.RED),
+                Component.text(graceSeconds + " seconds to reconnect", NamedTextColor.GRAY)));
+        }
+        this.tickDuelReconnectGrace(s, quitterId, deadline);
+    }
+
+    private void tickDuelReconnectGrace(DuelSession s, UUID quitterId, long deadline) {
+        if (s.ended || this.duelReconnectDeadlines.getOrDefault(quitterId, 0L) != deadline) return;
+        long remaining = deadline - System.currentTimeMillis();
+        if (remaining <= 0L) {
+            this.duelReconnectDeadlines.remove(quitterId, deadline);
+            s.reconnectTimerFallbacks.remove(quitterId);
+            s.disconnected.remove(quitterId);
+            s.disconnectReasons.remove(quitterId);
+            // A transport disconnect does not prove intent. Only an explicit leave action forfeits;
+            // timeout after the reconnect grace cancels the match and refunds both wagers.
+            this.abortDuel(s, "§cDuel cancelled. Wagers refunded.");
+            return;
+        }
+        Player opponent = Bukkit.getPlayer(s.other(quitterId));
+        if (opponent != null) {
+            int seconds = Math.max(1, (int)Math.ceil(remaining / 1000.0));
+            net.kyori.adventure.title.Title.Times times = net.kyori.adventure.title.Title.Times.times(
+                java.time.Duration.ZERO, java.time.Duration.ofMillis(1000), java.time.Duration.ZERO);
+            this.runOnPlayerThread(opponent, () -> {
+                if (s.ended || !s.paused || this.duelReconnectDeadlines.getOrDefault(quitterId, 0L) != deadline) return;
+                opponent.showTitle(net.kyori.adventure.title.Title.title(
+                    Component.text("Opponent Disconnected", NamedTextColor.RED),
+                    Component.text(seconds + " seconds to reconnect", NamedTextColor.GRAY), times));
+            });
+        }
+        PlatformScheduler.TaskHandle graceTick = PlatformScheduler.globalLater(this,
+            () -> this.tickDuelReconnectGrace(s, quitterId, deadline), 20L);
+        if (!graceTick.wasAccepted()) {
+            s.reconnectTimerFallbacks.add(quitterId);
+            this.getLogger().warning("[duel] reconnect timer was rejected; the global duel failsafe will enforce its deadline");
+        } else {
+            s.reconnectTimerFallbacks.remove(quitterId);
+        }
+    }
+
+    private void noteDuelReconnect(Player player) {
+        UUID id = player.getUniqueId();
+        ItemStack[] pending = this.pendingDuelInventoryRestores.remove(id);
+        DuelSession s = this.activeDuels.get(id);
+        if (s == null) {
+            if (pending != null) this.runPlayerTaskLater(player, () -> this.restoreDuelInventory(player, pending), 20L);
+            return;
+        }
+        Long deadline = this.duelReconnectDeadlines.remove(id);
+        if (deadline == null) return;
+        s.reconnectTimerFallbacks.remove(id);
+        s.disconnected.remove(id);
+        s.disconnectReasons.remove(id);
+        this.runPlayerTaskLater(player, () -> {
+            if (s.ended || !player.isOnline()) return;
+            this.restoreDuelInventory(player, id.equals(s.a) ? s.startInvA : s.startInvB);
+            if (!s.disconnected.isEmpty()) return;
+            Player other = Bukkit.getPlayer(s.other(id));
+            if (other == null || !other.isOnline()) return;
+            s.paused = false;
+            this.restoreDuelInventories(s);
+            this.showDuelStatusTitle(other, "Opponent Reconnected", "Resuming duel");
+            this.showDuelStatusTitle(player, "Reconnected", "Resuming duel");
+            if (s.pendingRoundWinner != null) this.completeDuelRoundTransition(s);
+            else if (s.startA == null || s.startB == null) this.beginDuelArena(s);
+            else this.enterRound(s, s.round == 1 && !s.fightBegan);
+        }, 20L);
+    }
+
+    // Freeze: pin position (look still allowed), block pearls, and grant invincibility during countdown.
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onDuelFreezeMove(PlayerMoveEvent e) {
+        if (this.duelRoundSpectators.contains(e.getPlayer().getUniqueId())) return;
+        if (!this.duelFrozen.contains(e.getPlayer().getUniqueId())) return;
+        if (e instanceof org.bukkit.event.player.PlayerTeleportEvent) return;
+        Location from = e.getFrom(), to = e.getTo();
+        if (to != null && (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ())) {
+            Location pinned = from.clone();
+            pinned.setYaw(to.getYaw()); pinned.setPitch(to.getPitch());
+            e.setTo(pinned);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onDuelRoundSpectatorMove(PlayerMoveEvent e) {
+        Player player = e.getPlayer();
+        UUID id = player.getUniqueId();
+        if (!this.duelRoundSpectators.contains(id) || this.duelSpectatorTransitions.contains(id)) return;
+        DuelSession s = this.activeDuels.get(id);
+        Location to = e.getTo();
+        // Duel arenas live in their own generated world (duel_arena), so a death-spectator may phase through
+        // blocks freely — there is nothing to x-ray. Only keep them inside their own arena's square.
+        if (s == null || to == null || !s.inArena(to)) e.setTo(e.getFrom());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDuelFreezeDamage(EntityDamageEvent e) {
+        if (!(e.getEntity() instanceof Player p)) return;
+        UUID id = p.getUniqueId();
+        DuelSession session = this.activeDuels.get(id);
+        // Invincible during: countdown freeze, the free-move gear-up window, the launch-back arc, and the
+        // final result screen. Combat only deals damage while a round is actually live.
+        if (this.duelFrozen.contains(id) || this.duelIntermission.contains(id) || this.duelReturning.contains(id)
+                || (session != null && session.celebrating)) e.setCancelled(true);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onDuelFreezePearl(org.bukkit.event.entity.ProjectileLaunchEvent e) {
+        if (e.getEntity() instanceof org.bukkit.entity.EnderPearl pearl
+                && pearl.getShooter() instanceof Player sp
+                && this.duelFrozen.contains(sp.getUniqueId())) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDuelFrozenInventoryClick(org.bukkit.event.inventory.InventoryClickEvent e) {
+        if (e.getWhoClicked() instanceof Player p && this.duelFrozen.contains(p.getUniqueId())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDuelFrozenInventoryDrag(org.bukkit.event.inventory.InventoryDragEvent e) {
+        if (e.getWhoClicked() instanceof Player p && this.duelFrozen.contains(p.getUniqueId())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDuelFrozenDrop(org.bukkit.event.player.PlayerDropItemEvent e) {
+        if (this.duelFrozen.contains(e.getPlayer().getUniqueId())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDuelFrozenPickup(org.bukkit.event.entity.EntityPickupItemEvent e) {
+        if (e.getEntity() instanceof Player p && this.duelFrozen.contains(p.getUniqueId())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onDuelSpectateQuit(PlayerQuitEvent e) {
+        UUID id = e.getPlayer().getUniqueId();
+        DuelSession s = this.activeDuels.get(id);
+        if (s != null) {
+            if (s.soloTest) {
+                this.finishSoloDuel(s, null, true);
+            } else if (s.pendingMatchOver && s.pendingRoundWinner != null && s.pendingRoundLoser != null) {
+                if (id.equals(s.pendingRoundWinner)) {
+                    // The winner has no one to collect with while offline; settle and return both now.
+                    this.resolveMatch(s, s.pendingRoundWinner, s.pendingRoundLoser);
+                } else if (!s.postMatchLootWindow) {
+                    // The loser can disconnect after the result without forfeiting the winner's loot time.
+                    this.beginDuelLootWindow(s, s.pendingRoundWinner, s.pendingRoundLoser);
+                }
+            } else if (s.postMatchLootWindow) {
+                this.resolveMatch(s, s.pendingRoundWinner, s.pendingRoundLoser);
+            } else {
+                this.beginDuelReconnectGrace(s, id, e.getPlayer(), e.getReason());
+            }
+        }
+        this.pendingDuelRequests.remove(id);
+        this.cancelOutgoingDuelRequest(id, null);
+        this.stopSpectating(e.getPlayer(), false);
+    }
+
+    // ===== /spectate — fly-around watch (adventure + flight collides with blocks = no phasing) =====
+
+    private void handleSpectateCommand(Player p, String[] args) {
+        boolean toggleOff = args.length == 0 || args[0].equalsIgnoreCase("off") || args[0].equalsIgnoreCase("stop");
+        if ((this.spectating.containsKey(p.getUniqueId()) || this.pendingSpectateStarts.containsKey(p.getUniqueId()))
+                && toggleOff) {
+            this.stopSpectating(p, true);
+            return;
+        }
+        if (args.length < 1) { p.sendActionBar(Component.text("§cUsage: /spectate <player>")); return; }
+        if (this.activeDuels.containsKey(p.getUniqueId())) { p.sendActionBar(Component.text("§cYou can't spectate during your own duel.")); return; }
+        UUID viewerId = p.getUniqueId();
+        SpectateStartRequest request = new SpectateStartRequest(viewerId, null);
+        this.pendingSpectateStarts.put(viewerId, request);
+        try {
+            PlatformScheduler.globalNow(this, () -> this.lookupSpectateTarget(p, args[0], request));
+        } catch (RuntimeException exception) {
+            this.pendingSpectateStarts.remove(viewerId, request);
+            p.sendActionBar(Component.text("§cCould not look up that player."));
+        }
+    }
+
+    private void lookupSpectateTarget(Player viewer, String query, SpectateStartRequest request) {
+        UUID viewerId = request.viewerId;
+        if (this.pendingSpectateStarts.get(viewerId) != request) return;
+        List<Player> onlinePlayers = new ArrayList<>(Bukkit.getOnlinePlayers());
+        java.util.concurrent.ConcurrentLinkedQueue<SpectateCandidate> candidates = new java.util.concurrent.ConcurrentLinkedQueue<>();
+        java.util.concurrent.atomic.AtomicInteger remaining = new java.util.concurrent.atomic.AtomicInteger(onlinePlayers.size());
+        if (onlinePlayers.isEmpty()) {
+            this.finishSpectateLookup(viewer, query, request, candidates);
+            return;
+        }
+        Runnable candidateFinished = () -> {
+            if (remaining.decrementAndGet() == 0) {
+                try {
+                    PlatformScheduler.globalNow(this, () -> this.finishSpectateLookup(viewer, query, request, candidates));
+                } catch (RuntimeException exception) {
+                    this.pendingSpectateStarts.remove(viewerId, request);
+                }
+            }
+        };
+        for (Player candidate : onlinePlayers) {
+            try {
+                PlatformScheduler.entityNow(this, candidate, () -> {
+                    if (this.pendingSpectateStarts.get(viewerId) == request && candidate.isOnline()) {
+                        candidates.add(new SpectateCandidate(candidate, candidate.getUniqueId(), candidate.getName()));
+                    }
+                    candidateFinished.run();
+                }, candidateFinished);
+            } catch (RuntimeException exception) {
+                candidateFinished.run();
+            }
+        }
+    }
+
+    private void finishSpectateLookup(Player viewer, String query, SpectateStartRequest request,
+                                      java.util.concurrent.ConcurrentLinkedQueue<SpectateCandidate> candidates) {
+        UUID viewerId = request.viewerId;
+        if (this.pendingSpectateStarts.get(viewerId) != request) return;
+        List<SpectateCandidate> snapshot = new ArrayList<>(candidates);
+        snapshot.sort(java.util.Comparator.comparing(
+            (SpectateCandidate candidate) -> candidate.name().toLowerCase(Locale.ROOT)));
+        SpectateCandidate selected = null;
+        for (SpectateCandidate candidate : snapshot) {
+            if (candidate.name().equals(query)) {
+                selected = candidate;
+                break;
+            }
+        }
+        if (selected == null) {
+            String foldedQuery = query.toLowerCase(Locale.ROOT);
+            SpectateCandidate prefix = null;
+            int prefixCount = 0;
+            for (SpectateCandidate candidate : snapshot) {
+                if (candidate.name().toLowerCase(Locale.ROOT).startsWith(foldedQuery)) {
+                    prefix = candidate;
+                    prefixCount++;
+                }
+            }
+            if (prefixCount == 1) selected = prefix;
+        }
+        if (selected == null && this.isSettingEnabledCached(viewerId, "search_spell_check")) {
+            String foldedQuery = query.toLowerCase(Locale.ROOT);
+            double bestDistance = foldedQuery.length() <= 4 ? 1.00 : foldedQuery.length() <= 8 ? 1.60 : 2.20;
+            for (SpectateCandidate candidate : snapshot) {
+                String foldedName = candidate.name().toLowerCase(Locale.ROOT);
+                if (Math.abs(foldedName.length() - foldedQuery.length()) > 3) continue;
+                double distance = this.weightedEditDistance(foldedQuery, foldedName, bestDistance);
+                if (distance < bestDistance - 1e-9) {
+                    bestDistance = distance;
+                    selected = candidate;
+                }
+            }
+        }
+        if (selected == null) {
+            this.runOnPlayerThread(viewer, () -> {
+                if (this.pendingSpectateStarts.remove(viewerId, request) && viewer.isOnline()) {
+                    viewer.sendActionBar(Component.text("§cPlayer not found: " + query));
+                }
+            });
+            return;
+        }
+        if (selected.id().equals(viewerId)) {
+            this.runOnPlayerThread(viewer, () -> {
+                if (this.pendingSpectateStarts.remove(viewerId, request) && viewer.isOnline()) {
+                    viewer.sendActionBar(Component.text("§cYou can't spectate yourself."));
+                }
+            });
+            return;
+        }
+        request.targetId = selected.id();
+        this.startSpectating(viewer, selected.player(), request);
+    }
+
+    private void startSpectating(Player p, Player target, SpectateStartRequest request) {
+        UUID viewerId = request.viewerId;
+        PlatformScheduler.entityNow(this, target, () -> {
+            if (this.pendingSpectateStarts.get(viewerId) != request || !target.getUniqueId().equals(request.targetId)) return;
+            if (!target.isOnline()) {
+                if (this.pendingSpectateStarts.remove(viewerId, request)) {
+                    this.runOnPlayerThread(p, () -> {
+                        if (p.isOnline()) p.sendActionBar(Component.text("§cThat player is no longer available."));
+                    });
+                }
+                return;
+            }
+            Location destination = target.getLocation().clone().add(0.0, 3.0, 0.0);
+            String targetName = target.getName();
+            PlatformScheduler.entityNow(this, p, () -> {
+                if (!this.pendingSpectateStarts.remove(viewerId, request) || !p.isOnline()
+                        || this.activeDuels.containsKey(viewerId)) return;
+                SpectateState old = this.spectating.get(viewerId);
+                SpectateState state = old == null
+                    ? new SpectateState(p.getGameMode(), p.getAllowFlight(), p.isFlying(), p.isInvulnerable(),
+                        p.hasPotionEffect(org.bukkit.potion.PotionEffectType.INVISIBILITY), p.getLocation().clone(), request.targetId)
+                    : new SpectateState(old.priorMode, old.priorAllowFlight, old.priorFlying, old.priorInvulnerable,
+                        old.priorInvisible, old.returnLocation, request.targetId);
+                this.spectating.put(viewerId, state);
+                p.setGameMode(GameMode.ADVENTURE);   // adventure flight collides with blocks -> can't phase through
+                p.setAllowFlight(true);
+                p.setFlying(true);
+                p.setInvulnerable(true);             // a watcher shouldn't be killable by a stray crystal/arrow
+                try { p.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.INVISIBILITY, Integer.MAX_VALUE, 0, false, false, false)); } catch (Throwable ignored) {}
+                p.sendActionBar(this.legacyColorize("&#00BFFFSpectating §7" + targetName + " §7— /spectate to stop"));
+                p.teleportAsync(destination).whenComplete((ok, error) -> this.runOnPlayerThread(p, () -> {
+                    if (!p.isOnline() || this.spectating.get(viewerId) != state) return;
+                    if (error != null || !Boolean.TRUE.equals(ok)) {
+                        this.stopSpectating(p, false);
+                        p.sendActionBar(Component.text("§cCould not reach that player."));
+                        return;
+                    }
+                    p.setAllowFlight(true);
+                    p.setFlying(true);
+                    p.setFallDistance(0.0f);
+                }));
+            }, () -> this.pendingSpectateStarts.remove(viewerId, request));
+        }, () -> {
+            if (!this.pendingSpectateStarts.remove(viewerId, request)) return;
+            this.runOnPlayerThread(p, () -> {
+                if (p.isOnline()) p.sendActionBar(Component.text("§cThat player is no longer available."));
+            });
+        });
+    }
+
+    private void stopSpectating(Player p, boolean notify) {
+        UUID viewerId = p.getUniqueId();
+        this.pendingSpectateStarts.remove(viewerId);
+        SpectateState st = this.spectating.remove(viewerId);
+        if (st == null) return;
+        if (!st.priorInvisible) try { p.removePotionEffect(org.bukkit.potion.PotionEffectType.INVISIBILITY); } catch (Throwable ignored) {}
+        p.setInvulnerable(st.priorInvulnerable);
+        p.setGameMode(st.priorMode != null ? st.priorMode : GameMode.SURVIVAL);
+        p.setAllowFlight(st.priorAllowFlight);
+        p.setFlying(st.priorAllowFlight && st.priorFlying);
+        p.setFallDistance(0.0f);
+        if (st.returnLocation != null && st.returnLocation.getWorld() != null) p.teleportAsync(st.returnLocation.clone());
+        if (notify) p.sendActionBar(Component.text("§7Stopped spectating"));
+    }
+
+    private void stopDuelSpectators(DuelSession s) {
+        this.pendingSpectateStarts.entrySet().removeIf(entry ->
+            java.util.Objects.equals(entry.getValue().targetId, s.a)
+                || java.util.Objects.equals(entry.getValue().targetId, s.b));
+        // Plugin disable currently enters here after Folia may have retired its region schedulers.
+        // Keep the existing best-effort synchronous shutdown cleanup until a host-owned drain exists.
+        if (this.shuttingDown) {
+            for (Map.Entry<UUID, SpectateState> entry : new java.util.ArrayList<>(this.spectating.entrySet())) {
+                SpectateState state = entry.getValue();
+                if (!state.targetId.equals(s.a) && !state.targetId.equals(s.b)) continue;
+                Player spectator = Bukkit.getPlayer(entry.getKey());
+                if (spectator != null && spectator.isOnline()) this.stopSpectating(spectator, true);
+                else this.spectating.remove(entry.getKey(), state);
+            }
+            return;
+        }
+        PlatformScheduler.globalNow(this, () -> {
+            for (Map.Entry<UUID, SpectateState> entry : new java.util.ArrayList<>(this.spectating.entrySet())) {
+                SpectateState state = entry.getValue();
+                if (!state.targetId.equals(s.a) && !state.targetId.equals(s.b)) continue;
+                Player spectator = Bukkit.getPlayer(entry.getKey());
+                if (spectator == null) {
+                    this.spectating.remove(entry.getKey(), state);
+                    continue;
+                }
+                PlatformScheduler.entityNow(this, spectator, () -> {
+                    SpectateState current = this.spectating.get(entry.getKey());
+                    if (!spectator.isOnline()) {
+                        this.spectating.remove(entry.getKey(), state);
+                    } else if (current == state && (current.targetId.equals(s.a) || current.targetId.equals(s.b))) {
+                        this.stopSpectating(spectator, true);
+                    }
+                }, () -> this.spectating.remove(entry.getKey(), state));
+            }
+        });
+    }
+
+    // Vanilla lets a spectator warp to ANY player from the spectator hotbar, in any world. Duel death-spectators
+    // and /spectate viewers stay inside the arena they are watching.
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDuelSpectatorWarp(org.bukkit.event.player.PlayerTeleportEvent e) {
+        if (e.getCause() != org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.SPECTATE) return;
+        Player p = e.getPlayer();
+        UUID id = p.getUniqueId();
+        Location to = e.getTo();
+        if (this.duelRoundSpectators.contains(id)) {
+            DuelSession s = this.activeDuels.get(id);
+            if (s == null || to == null || !s.inArena(to)) e.setCancelled(true);
+        } else if (this.spectating.containsKey(id) && (to == null || !this.canViewDuelArena(p, to))) {
+            e.setCancelled(true);
+        }
+    }
+
+    // Spectator fall bug: entering SPECTATOR should never drop the player. Re-assert flight next tick
+    // (something in the stack was clearing it, so staff/spectators sank). Also covers our /spectate exit.
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onSpectatorNoFall(org.bukkit.event.player.PlayerGameModeChangeEvent e) {
+        if (e.getNewGameMode() != GameMode.SPECTATOR) return;
+        Player p = e.getPlayer();
+        this.runPlayerTaskLater(p, () -> {
+            if (!p.isOnline() || p.getGameMode() != GameMode.SPECTATOR) return;
+            p.setAllowFlight(true);   // must precede setFlying(true), which throws if allowFlight is false
+            p.setFlying(true);
+            p.setFallDistance(0.0f);
+        }, 1L);
+    }
+
     private void executeRtp(Player player, String dimension, boolean bypassChecks) {
         if (dimension == null) {
             return;
         }
         if (!bypassChecks && this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot use RTP."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "rtp_execute");
             return;
         }
@@ -6816,7 +12343,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             });
         });
     }
-
     /*
      * Enabled aggressive block sorting
      * Enabled unnecessary exception pruning
@@ -7129,7 +12655,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.getLogger().warning("Failed queueing offline deposit: " + ex.getMessage());
         }
     }
-
     private void upsertMoneyBalance(UUID uuid, double balance) {
         if (uuid == null || !Double.isFinite(balance) || balance < 0.0) {
             return;
@@ -7294,7 +12819,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         this.deliverDirectMessage(sender, target, message);
     }
-
     private void handleReplyCommand(Player sender, String[] args) {
         if (!this.isSettingEnabledCached(sender.getUniqueId(), "private_messages")) {
             sender.sendMessage("\u00a7cYou have private messages disabled in /settings.");
@@ -7334,7 +12858,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         this.deliverDirectMessage(sender, target, message);
     }
-
     private void deliverDirectMessage(Player sender, Player target, String message) {
         String serverName = this.detectServerName();
         this.runAsyncTask(() -> this.logChatMessage(sender.getUniqueId(), sender.getName(), serverName, "direct", message));
@@ -7614,8 +13137,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // follow(a,b) = a follows b. Mutual follow = friends. Per-relationship toggles live on the
     // follower's row. Unfollow removes only your own follow (they keep following you).
 
+    // Note: can_tpa is intentionally NOT in the per-friend menu — TP-request permission is governed by
+    // the /settings Privacy tri-state (Anyone / Friends / Off), not a per-friend toggle. The column
+    // still exists and is read by privacyAllows.
     private static final java.util.List<String> FOLLOW_SETTING_COLS = java.util.List.of(
-        "see_activity", "see_transactions", "can_message", "can_tpa", "auto_accept_tpa", "can_pay");
+        "see_activity", "see_transactions", "can_message", "auto_accept_tpa", "can_pay");
 
     /** True if {@code ignorer} has {@code ignored} on their ignore list. Async only. */
     private boolean isIgnoring(Connection conn, UUID ignorer, UUID ignored) throws Exception {
@@ -7627,7 +13153,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             try (ResultSet rs = ps.executeQuery()) { return rs.next(); }
         }
     }
-
     private boolean isFollowing(Connection conn, UUID follower, UUID target) throws Exception {
         try (PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM follows WHERE follower_uuid=? AND target_uuid=? LIMIT 1")) {
             ps.setString(1, follower.toString());
@@ -7666,6 +13191,24 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return set != null && set.contains(subject);
     }
 
+    /** True if {@code target} has the per-friend "Auto Accept TPAs" toggle on for {@code requester}
+     *  (i.e. target follows requester with auto_accept_tpa=1). Per-player TPA auto-accept. */
+    private boolean targetAutoAcceptsTpaFrom(UUID target, UUID requester) {
+        if (target == null || requester == null || target.equals(requester)) return false;
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "SELECT auto_accept_tpa FROM follows WHERE follower_uuid=? AND target_uuid=? LIMIT 1")) {
+            ps.setString(1, target.toString());
+            ps.setString(2, requester.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getBoolean(1);
+            }
+        } catch (Exception ex) {
+            this.getLogger().warning("auto-accept-tpa check failed: " + ex.getMessage());
+        }
+        return false;
+    }
+
     /** Recompute {@code who}'s mutual-friend set off the main thread (own connection, no transaction). */
     private void scheduleMutualRefresh(UUID who) {
         if (who == null) return;
@@ -7683,19 +13226,23 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // Cached reflection handles for ClientboundTrackedWaypointPacket -> TrackedWaypoint.id() (Either<UUID,String>).
     private volatile java.lang.reflect.Method wpAccessor, wpIdAccessor, eitherLeftAccessor;
+    private volatile boolean wpReflectWarned = false;
 
     /** The tracked player's UUID for a TRACKED_WAYPOINT packet, or null if it isn't a player waypoint. */
     private UUID extractWaypointSubject(com.comphenix.protocol.events.PacketContainer packet) {
         try {
             Object handle = packet.getHandle();
             if (handle == null) return null;
-            if (this.wpAccessor == null) this.wpAccessor = handle.getClass().getMethod("waypoint");
+            if (this.wpAccessor == null) this.wpAccessor = this.publicAccessor(handle, "waypoint");
             Object wp = this.wpAccessor.invoke(handle);
             if (wp == null) return null;
-            if (this.wpIdAccessor == null) this.wpIdAccessor = wp.getClass().getMethod("id");
+            if (this.wpIdAccessor == null) this.wpIdAccessor = this.publicAccessor(wp, "id");
             Object either = this.wpIdAccessor.invoke(wp);
             if (either == null) return null;
-            if (this.eitherLeftAccessor == null) this.eitherLeftAccessor = either.getClass().getMethod("left");
+            // TrackedWaypoint.id() is a Mojang Either<UUID,String>; player waypoints carry the UUID
+            // on the LEFT. Resolve left() from the public Either base (Either$Left is non-public) so the
+            // invoke can't fail with IllegalAccessException and silently break the friends filter.
+            if (this.eitherLeftAccessor == null) this.eitherLeftAccessor = this.publicAccessor(either, "left");
             Object opt = this.eitherLeftAccessor.invoke(either);
             if (opt instanceof java.util.Optional) {
                 Object v = ((java.util.Optional<?>) opt).orElse(null);
@@ -7703,8 +13250,23 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             return null;
         } catch (Throwable t) {
+            if (!this.wpReflectWarned) {
+                this.wpReflectWarned = true;
+                this.getLogger().warning("[locator] waypoint-subject reflection failed — friends-only "
+                    + "locator filter is passing everything through. Cause: " + t);
+            }
             return null;
         }
+    }
+
+    /** Resolve a public accessor, walking up to the first public declaring class so invoking it on a
+     *  non-public concrete subclass (record component / DFU Either$Left) can't throw IllegalAccess. */
+    private java.lang.reflect.Method publicAccessor(Object obj, String name) throws NoSuchMethodException {
+        Class<?> c = obj.getClass();
+        while (c != null && !java.lang.reflect.Modifier.isPublic(c.getModifiers())) c = c.getSuperclass();
+        java.lang.reflect.Method m = (c != null ? c : obj.getClass()).getMethod(name);
+        try { m.setAccessible(true); } catch (Throwable ignored) {}
+        return m;
     }
 
     /** UUIDs that {@code who} follows. */
@@ -7838,7 +13400,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         });
     }
-
     /** Resolve a name to UUID via online players first, then the players table. */
     private UUID playerUuidByNameLookup(String name) {
         Player online = Bukkit.getPlayerExact(name);
@@ -8104,8 +13665,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return p.getUniqueId().toString().startsWith("00000000-0000-0000-");
     }
 
-    /** Dialogs need protocol 771+ (1.21.6). Older ViaVersion clients + Bedrock get the text/GUI fallback. */
+    /** Dialog clients also require a server API capable of building the dialog; others use legacy screens. */
     private boolean useDialogUi(Player p) {
+        if (!DialogCompat.isSupported()) return false;
         if (this.isBedrockPlayer(p)) {
             return false;
         }
@@ -8146,16 +13708,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private Dialog buildDialog(Component title, List<DialogBody> body, List<DialogInput> inputs, DialogType type) {
         // afterAction NONE: a button click does NOT close the screen, so re-showing the dialog
         // (toggle/expand/navigate) swaps content in place with no close/reopen flicker. Terminal
-        // actions (Create Order/Listing) call player.closeDialog() explicitly.
-        return Dialog.create(factory -> factory.empty()
-            .base(DialogBase.builder(title)
-                .canCloseWithEscape(true)
-                .pause(false)
-                .afterAction(DialogBase.DialogAfterAction.NONE)
-                .body(body)
-                .inputs(inputs)
-                .build())
-            .type(type));
+        // actions (Create Order/Listing) close the current screen explicitly.
+        return DialogCompat.create(title, body, inputs, type);
     }
 
     // Per-player Friends-GUI filter: ALL / FRIENDS / FOLLOWING / FOLLOWERS.
@@ -8221,7 +13775,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 .columns(3)
                 .exitAction(this.dialogButton(Component.text("Close"), null, 110, null))
                 .build());
-        this.runOnPlayerThread(p, () -> p.showDialog(dialog));
+        this.runOnPlayerThread(p, () -> DialogCompat.show(p, dialog));
     }
 
     private String titleCase(String s) {
@@ -8253,7 +13807,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             pl -> this.runAsyncTask(() -> this.openFriendsDialog(pl)));
         Dialog dialog = this.buildDialog(Component.text("Search", DIALOG_BRAND), List.of(), inputs,
             DialogType.confirmation(go, back));
-        this.runOnPlayerThread(p, () -> p.showDialog(dialog));
+        this.runOnPlayerThread(p, () -> DialogCompat.show(p, dialog));
     }
 
     /** Relationship panel. ASYNC ONLY. Settings if you follow them, else Follow Back / Follow. */
@@ -8285,7 +13839,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 try (Connection c = this.openSyncConnection()) { this.removeFollow(c, pl.getUniqueId(), otherUuid); } catch (Exception ignored) {}
                 this.openFriendsDialog(pl);
             })));
-            String[] labels = {"See Activity", "See Transactions", "Can Message", "Can Teleport Request", "Auto Accept TPAs", "Can Pay You"};
+            String[] labels = {"See Activity", "See Transactions", "Can Message", "Auto Accept TPAs", "Can Pay You"};
             for (int i = 0; i < labels.length; i++) {
                 boolean on2 = toggles[i];
                 String col = FOLLOW_SETTING_COLS.get(i);
@@ -8311,7 +13865,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             DialogType.multiAction(buttons).columns(1)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 250,
                     pl -> this.runAsyncTask(() -> this.openFriendsDialog(pl)))).build());
-        this.runOnPlayerThread(p, () -> p.showDialog(dialog));
+        this.runOnPlayerThread(p, () -> DialogCompat.show(p, dialog));
     }
 
     /** Add-friend screen: player-name input + confirm. */
@@ -8340,7 +13894,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Add Friend", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text("Sends a friend request.", NamedTextColor.GRAY))),
             inputs, DialogType.confirmation(yes, no));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     /** Incoming requests: one Accept + one Deny button per requester. ASYNC ONLY. */
@@ -8386,7 +13940,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 .exitAction(this.dialogButton(Component.text("Back"), null, 110,
                     pl -> this.runAsyncTask(() -> this.openFriendsDialog(pl))))
                 .build());
-        this.runOnPlayerThread(p, () -> p.showDialog(dialog));
+        this.runOnPlayerThread(p, () -> DialogCompat.show(p, dialog));
     }
 
     private void handleTeamCreate(Player p, String[] args) {
@@ -9357,13 +14911,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.dataSource != null) {
             return this.dataSource;
         }
+        String databaseUser = this.settings.getString("sync.database.user", "");
+        String databasePassword = this.settings.getString("sync.database.password", "");
+        if (databaseUser == null || databaseUser.isBlank() || databasePassword == null || databasePassword.isBlank()) {
+            this.getLogger().warning("Database connection is disabled because credentials are not configured.");
+            return null;
+        }
         try {
             com.zaxxer.hikari.HikariConfig hc = new com.zaxxer.hikari.HikariConfig();
             hc.setPoolName("PizzaNetworkCore");
             hc.setDriverClassName("org.mariadb.jdbc.Driver");
             hc.setJdbcUrl(this.jdbcUrl());
-            hc.setUsername(this.settings.getString("sync.database.user", "pizzasmp"));
-            hc.setPassword(this.settings.getString("sync.database.password", "CHANGE_ME"));
+            hc.setUsername(databaseUser);
+            hc.setPassword(databasePassword);
             // Small pool: a remote 1-ECPU DB runs only a few queries truly in parallel; HikariCP guidance
             // is that a small pool beats a large one. Stays far under the server's 200-connection ceiling.
             hc.setMaximumPoolSize(this.settings.getInt("sync.database.pool.max-size", 20));
@@ -9382,7 +14942,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return this.dataSource;
     }
-
     // Package-private: PlayerSyncManager borrows from the same pool.
     Connection openSyncConnection() throws SQLException {
         com.zaxxer.hikari.HikariDataSource ds = this.dataSource;
@@ -9392,6 +14951,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (ds != null) {
             return ds.getConnection();
         }
+        String databaseUser = this.settings.getString("sync.database.user", "");
+        String databasePassword = this.settings.getString("sync.database.password", "");
+        if (databaseUser == null || databaseUser.isBlank() || databasePassword == null || databasePassword.isBlank()) {
+            throw new SQLException("Database credentials are not configured.");
+        }
         // Fallback: pool unavailable — per-op connection.
         if (!this.mariadbDriverLoaded) {
             try {
@@ -9400,11 +14964,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             catch (ClassNotFoundException ignored) {}
         }
-        return DriverManager.getConnection(this.jdbcUrl(),
-            this.settings.getString("sync.database.user", "pizzasmp"),
-            this.settings.getString("sync.database.password", "CHANGE_ME"));
+        return DriverManager.getConnection(this.jdbcUrl(), databaseUser, databasePassword);
     }
-
     private boolean isTeleportCommand(String label) {
         return switch (label) {
             case "spawn", "warp", "afk", "tp", "teleport", "tphere", "back", "server", "lobby", "survival", "pvp", "duels", "hub" -> true;
@@ -9414,7 +14975,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void startTeleportCountdown(Player player, String fullCommand) {
         if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot teleport."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             this.logCombatBlocked(player, "countdown");
             return;
         }
@@ -9522,7 +15083,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ, Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius, Math.max(8, this.settings.getInt("rtp.search-attempts", 96)), player.getLocation().getYaw());
         this.searchRtpLocation(player.getUniqueId(), plan, 0);
     }
-
     private void openRtpMenu(Player player) {
         Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_RTP);
         this.fillBlue(inv);
@@ -9544,7 +15104,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou are in combat! Cannot use RTP."));
+            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
             return;
         }
         String id = this.uiActionId(current);
@@ -9612,7 +15172,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.scheduleCombatActionbar(player.getUniqueId());
         // Cancel pending teleports when entering combat (damage alone doesn't cancel; combat does)
         if (!wasInCombat) {
-            this.cancelRtpQueue(player.getUniqueId(), "§cDuel search cancelled — you entered combat");
+            this.cancelRtpQueue(player.getUniqueId(), "Search Cancelled", player);
             UUID uuid = player.getUniqueId();
             if (this.pendingTeleports.containsKey(uuid) || this.pendingRtpTeleports.containsKey(uuid) || this.pendingHomeTeleports.containsKey(uuid)) {
                 this.cancelPendingTeleport(player, true);
@@ -9742,6 +15302,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private boolean isCombatTagged(Player player) {
+        if (player != null && this.activeDuels.containsKey(player.getUniqueId())) return true;
+        if (player != null && player.hasPermission(PERM_COMBAT_BYPASS)) return false;   // staff bypass
         return this.getCombatRemainingMillis(player) > 0L;
     }
 
@@ -9935,7 +15497,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         int z = NumberConversions.floor((double)(plan.centerZ + Math.sin(angle) * radius));
         this.scheduleRtpCandidateCheck(uuid, plan, attempt, x, z);
     }
-
     private void scheduleRtpCandidateCheck(UUID uuid, RtpSearchPlan plan, int attempt, int x, int z) {
         World world = Bukkit.getWorld((String)plan.worldName);
         if (world == null) {
@@ -10020,6 +15581,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (material.isAir()) {
             return false;
         }
+        if (block.isLiquid()) {
+            return true;
+        }
         BlockData blockData = block.getBlockData();
         if (blockData instanceof Waterlogged && (waterlogged = (Waterlogged)blockData).isWaterlogged()) {
             return true;
@@ -10050,11 +15614,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void runRegionTask(World world, int blockX, int blockZ, Runnable task) {
-        if (this.foliaRuntime) {
-            Bukkit.getRegionScheduler().execute((Plugin)this, world, blockX, blockZ, task);
-            return;
-        }
-        Bukkit.getScheduler().runTask((Plugin)this, task);
+        if (world == null) return;
+        PlatformScheduler.regionNow(this, new Location(world, blockX, 0, blockZ), task);
     }
 
     private void logCombatBlocked(Player player, String path) {
@@ -10084,12 +15645,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private long getRtpCooldownMillis(Player player) {
-        // Cooldown is configurable (rtp.cooldown-seconds, default 0 = none) so other server owners can
-        // add one; a 250ms anti-spam throttle floor always applies.
-        long cfg = this.settings.getLong("rtp.cooldown-seconds", 0L) * 1000L;
-        return Math.max(250L, cfg);
+        // Tiered cooldown — RTP is the biggest single chunk burst, so default players wait longest,
+        // ranked members less, staff not at all. All values config-tunable. Staff = mod and up / op.
+        if (player == null) return 15_000L;
+        if (player.isOp() || player.hasPermission("pizzasmp.staff") || this.getQueuePriority(player) <= 7) {
+            return 0L; // staff bypass
+        }
+        long secs;
+        if (this.isPizzaPlusPlus(player))      secs = this.settings.getLong("rtp.cooldown-seconds-plusplus", 5L);
+        else if (this.isPizzaPlus(player))     secs = this.settings.getLong("rtp.cooldown-seconds-plus", 10L);
+        else                                   secs = this.settings.getLong("rtp.cooldown-seconds", 15L);
+        return Math.max(250L, secs * 1000L); // 250ms anti-spam floor for non-staff
     }
-
     private boolean canUseRtpNow(Player player) {
         long last = this.rtpCooldowns.getOrDefault(player.getUniqueId(), 0L);
         return System.currentTimeMillis() - last >= this.getRtpCooldownMillis(player);
@@ -10111,6 +15678,172 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (pending != null && pending.task != null) {
             pending.task.cancel();
         }
+    }
+
+    private void cancelRtpAnimation(UUID uuid) {
+        RtpAnimation animation = this.rtpAnimations.remove(uuid);
+        if (animation != null && animation.task != null) animation.task.cancel();
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onRtpAnimationTeleport(org.bukkit.event.player.PlayerTeleportEvent event) {
+        UUID uuid = event.getPlayer().getUniqueId();
+        RtpAnimation animation = this.rtpAnimations.get(uuid);
+        if (animation == null) return;
+        Location to = event.getTo();
+        if (animation.transferring && to != null && animation.arrival != null
+                && to.getWorld() == animation.arrival.getWorld()
+                && to.distanceSquared(animation.arrival) < 0.01) return;
+        this.cancelRtpAnimation(uuid);
+        this.rtpCooldowns.remove(uuid);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onRtpAnimationDeath(PlayerDeathEvent event) {
+        UUID uuid = event.getEntity().getUniqueId();
+        if (!this.rtpAnimations.containsKey(uuid)) return;
+        this.cancelRtpAnimation(uuid);
+        this.rtpCooldowns.remove(uuid);
+    }
+
+    private boolean canAnimateRtp(Player player, Location destination) {
+        if (player.getGameMode() != GameMode.SURVIVAL || !player.isOnGround() || player.isInsideVehicle()
+                || player.isGliding() || player.isSwimming() || destination == null
+                || player.getWorld() != destination.getWorld()
+                || player.getWorld().getEnvironment() != World.Environment.NORMAL) return false;
+        for (Location base : new Location[]{player.getLocation(), destination}) {
+            for (int y = 1; y <= 5; y++) {
+                Block block = base.getBlock().getRelative(0, y, 0);
+                if (!block.isPassable() || block.isLiquid()) return false;
+            }
+        }
+        return true;
+    }
+
+    private void beginRtpAnimation(Player player, Location destination) {
+        UUID uuid = player.getUniqueId();
+        if (!this.isSettingEnabledCached(uuid, "rtp_animation") || !this.canAnimateRtp(player, destination)) {
+            this.teleportRtpDirectly(player, destination);
+            return;
+        }
+        RtpAnimation animation = new RtpAnimation(player.getLocation().clone(), destination.clone());
+        this.cancelRtpAnimation(uuid);
+        this.rtpAnimations.put(uuid, animation);
+        World world = destination.getWorld();
+        List<java.util.concurrent.CompletableFuture<org.bukkit.Chunk>> loads = new ArrayList<>();
+        int cx = destination.getBlockX() >> 4, cz = destination.getBlockZ() >> 4;
+        try {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) loads.add(world.getChunkAtAsync(cx + dx, cz + dz, true));
+            }
+        } catch (RuntimeException error) {
+            this.cancelRtpAnimation(uuid);
+            this.teleportRtpDirectly(player, destination);
+            return;
+        }
+        java.util.concurrent.CompletableFuture.allOf(loads.toArray(new java.util.concurrent.CompletableFuture[0]))
+            .orTimeout(4L, java.util.concurrent.TimeUnit.SECONDS)
+            .whenComplete((unused, error) -> {
+                if (this.shuttingDown) return;
+                this.runOnPlayerThread(player, () -> {
+                if (this.rtpAnimations.get(uuid) != animation || this.shuttingDown || !player.isOnline()) return;
+                if (error != null || !this.isSettingEnabledCached(uuid, "rtp_animation")
+                        || !this.canAnimateRtp(player, destination)
+                        || player.getLocation().distanceSquared(animation.origin) > 64.0) {
+                    this.cancelRtpAnimation(uuid);
+                    this.teleportRtpDirectly(player, destination);
+                    return;
+                }
+                if (this.isSettingEnabledCached(uuid, "music_sound_notifications"))
+                    player.playSound(player, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, 0.7f, 1.3f);
+                world.spawnParticle(org.bukkit.Particle.CLOUD, player.getLocation().add(0.0, 0.3, 0.0),
+                    18, 0.35, 0.2, 0.35, 0.04);
+                org.bukkit.util.Vector velocity = player.getVelocity().clone();
+                velocity.setY(0.62);
+                player.setVelocity(velocity);
+                animation.task = this.runPlayerTaskLater(player, () -> this.finishRtpAnimation(player, animation), 7L);
+                });
+            });
+    }
+
+    private void finishRtpAnimation(Player player, RtpAnimation animation) {
+        UUID uuid = player.getUniqueId();
+        if (this.rtpAnimations.get(uuid) != animation || !player.isOnline() || this.shuttingDown) return;
+        if (player.isDead() || player.getGameMode() != GameMode.SURVIVAL || this.isCombatTagged(player)
+                || player.getWorld() != animation.origin.getWorld()
+                || player.getLocation().distanceSquared(animation.origin) > 256.0) {
+            this.cancelRtpAnimation(uuid);
+            this.rtpCooldowns.remove(uuid);
+            return;
+        }
+        World world = animation.destination.getWorld();
+        Location safe = this.findSafeRtpLocation(world, animation.destination.getBlockX(),
+            animation.destination.getBlockZ(), player.getLocation().getYaw());
+        if (safe == null) {
+            this.cancelRtpAnimation(uuid);
+            this.rtpCooldowns.remove(uuid);
+            player.sendActionBar(Component.text("§cNo safe RTP location. Try again."));
+            return;
+        }
+        if (!this.isSettingEnabledCached(uuid, "rtp_animation") || !this.canAnimateRtpArrival(safe)
+                || !world.isChunkLoaded(safe.getBlockX() >> 4, safe.getBlockZ() >> 4)) {
+            this.cancelRtpAnimation(uuid);
+            this.teleportRtpDirectly(player, safe);
+            return;
+        }
+        Location arrival = safe.clone().add(0.0, 2.5, 0.0);
+        arrival.setYaw(player.getLocation().getYaw());
+        arrival.setPitch(player.getLocation().getPitch());
+        animation.arrival = arrival;
+        animation.transferring = true;
+        boolean moved = false;
+        try {
+            moved = player.teleport(arrival);
+        } catch (RuntimeException error) {
+            this.getLogger().warning("[rtp] animated transfer failed: " + error.getMessage());
+        } finally {
+            this.cancelRtpAnimation(uuid);
+        }
+        if (!moved || player.getWorld() != world || player.getLocation().distanceSquared(arrival) > 0.01) {
+            this.rtpCooldowns.remove(uuid);
+            player.sendActionBar(Component.text("§cRTP failed. Try again."));
+            return;
+        }
+        player.setVelocity(new org.bukkit.util.Vector(0.0, -0.12, 0.0));
+        this.resetFallAfterTeleport(player);
+        world.spawnParticle(org.bukkit.Particle.CLOUD, arrival, 24, 0.4, 0.4, 0.4, 0.05);
+        this.finishRtpArrival(player);
+    }
+
+    private boolean canAnimateRtpArrival(Location destination) {
+        for (int y = 1; y <= 5; y++) {
+            Block block = destination.getBlock().getRelative(0, y, 0);
+            if (!block.isPassable() || block.isLiquid()) return false;
+        }
+        return true;
+    }
+
+    private void teleportRtpDirectly(Player player, Location destination) {
+        UUID uuid = player.getUniqueId();
+        player.teleportAsync(destination).whenComplete((ok, error) -> {
+            if (this.shuttingDown) return;
+            this.runOnPlayerThread(player, () -> {
+            if (!player.isOnline()) return;
+            if (error != null || !Boolean.TRUE.equals(ok)) {
+                this.rtpCooldowns.remove(uuid);
+                player.sendActionBar(Component.text("§cRTP failed. Try again."));
+                return;
+            }
+            this.resetFallAfterTeleport(player);
+            this.finishRtpArrival(player);
+            });
+        });
+    }
+
+    private void finishRtpArrival(Player player) {
+        player.sendActionBar(Component.text("§7Arrived at a random location."));
+        if (this.isSettingEnabledCached(player.getUniqueId(), "music_sound_notifications"))
+            player.playSound(player, Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 1.2f);
     }
 
     private void tickTeleportCountdown(UUID uuid) {
@@ -10149,41 +15882,23 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (pending.task != null) {
             pending.task.cancel();
         }
-        // Teleport to the pre-found destination, mark cooldown, play the ender-pearl sound.
+        // The destination is resolved before the visual transition begins.
         Location dest = pending.destination;
         if (dest != null) {
             this.markRtpUsed(player);
-            player.teleportAsync(dest).thenAccept(ok -> this.runOnPlayerThread(player, () -> {
-                if (ok) {
-                    this.resetFallAfterTeleport(player);
-                    this.grantRtpGrace(player, 60L);
-                    player.sendActionBar(Component.text("\u00a77You teleported to a random location."));
-                    if (this.isSettingEnabledCached(uuid, "music_sound_notifications")) {
-                        player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 1.2f);
-                    }
-                }
-            }));
+            this.beginRtpAnimation(player, dest);
         }
     }
-
     private TaskHandle runPlayerTaskLater(Player player, Runnable task, long delayTicks) {
-        if (this.foliaRuntime) {
-            ScheduledTask scheduled = player.getScheduler().runDelayed((Plugin)this, st -> task.run(), null, delayTicks);
-            return () -> ((ScheduledTask)scheduled).cancel();
-        }
-        int taskId = Bukkit.getScheduler().scheduleSyncDelayedTask((Plugin)this, task, delayTicks);
-        return () -> Bukkit.getScheduler().cancelTask(taskId);
+        if (player == null) return () -> { };
+        PlatformScheduler.TaskHandle scheduled = PlatformScheduler.entityLater(this, player,
+            () -> { if (player.isOnline()) task.run(); }, null, delayTicks);
+        return scheduled::cancel;
     }
 
     private void runOnPlayerThread(Player player, Runnable task) {
-        if (player == null || !player.isOnline()) {
-            return;
-        }
-        if (this.foliaRuntime) {
-            player.getScheduler().run((Plugin)this, st -> task.run(), null);
-            return;
-        }
-        Bukkit.getScheduler().runTask((Plugin)this, task);
+        if (player == null) return;
+        PlatformScheduler.entityNow(this, player, () -> { if (player.isOnline()) task.run(); }, null);
     }
 
     /**
@@ -10194,101 +15909,175 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * with an empty server. Under Folia that means the global region scheduler.
      */
     private void runOnMainThread(Runnable task) {
-        if (this.foliaRuntime) {
-            Bukkit.getGlobalRegionScheduler().run((Plugin)this, st -> task.run());
-            return;
-        }
         if (Bukkit.isPrimaryThread()) { task.run(); return; }
-        Bukkit.getScheduler().runTask((Plugin)this, task);
+        PlatformScheduler.globalNow(this, task);
     }
 
     private void runAsyncTask(Runnable task) {
-        if (this.foliaRuntime) {
-            Bukkit.getAsyncScheduler().runNow((Plugin)this, st -> task.run());
-            return;
-        }
-        Bukkit.getScheduler().runTaskAsynchronously((Plugin)this, task);
+        PlatformScheduler.asyncNow(this, task);
     }
 
     private TaskHandle runAsyncRepeatingTask(Runnable task, long initialDelayTicks, long periodTicks) {
-        if (this.foliaRuntime) {
-            long initialDelayMs = Math.max(1L, initialDelayTicks * 50L);
-            long periodMs = Math.max(1L, periodTicks * 50L);
-            ScheduledTask scheduled = Bukkit.getAsyncScheduler().runAtFixedRate((Plugin)this, st -> task.run(), initialDelayMs, periodMs, TimeUnit.MILLISECONDS);
-            return () -> ((ScheduledTask)scheduled).cancel();
-        }
-        int taskId = Bukkit.getScheduler().runTaskTimerAsynchronously((Plugin)this, task, initialDelayTicks, periodTicks).getTaskId();
-        return () -> Bukkit.getScheduler().cancelTask(taskId);
+        PlatformScheduler.TaskHandle scheduled = PlatformScheduler.asyncRepeating(this, task,
+            initialDelayTicks, periodTicks);
+        return scheduled::cancel;
     }
 
     private void pollPendingPlayerNotifications() {
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            List<PlayerNotificationEntry> notifications;
-            if (player == null || !player.isOnline() || (notifications = this.consumePendingPlayerNotifications(player.getUniqueId())).isEmpty()) continue;
-            this.runOnPlayerThread(player, () -> {
-                if (!player.isOnline()) {
-                    return;
-                }
-                for (PlayerNotificationEntry notification : notifications) {
-                    String target;
-                    if (notification.message() != null && !notification.message().isBlank()) {
-                        // ACTIONBAR routes to the hotbar instead of chat. Some notices are meant to be
-                        // seen once and not clutter the log — "X ignored you" is one of them.
-                        if ("ACTIONBAR".equals(notification.action())) {
-                            player.sendActionBar((Component)Component.text((String)notification.message()));
-                        } else {
-                            player.sendMessage(notification.message());
-                        }
+        long lifecycleGeneration = this.notificationLifecycleGeneration;
+        if (!this.isNotificationLifecycleCurrent(lifecycleGeneration)) return;
+        PlatformScheduler.globalNow(this, () -> {
+            if (!this.isNotificationLifecycleCurrent(lifecycleGeneration)) return;
+            for (Player candidate : Bukkit.getOnlinePlayers()) {
+                PlatformScheduler.entityNow(this, candidate, () -> {
+                    if (!this.isNotificationLifecycleCurrent(lifecycleGeneration) || !candidate.isOnline()) return;
+                    UUID recipientUuid = candidate.getUniqueId();
+                    long sessionGeneration = this.notificationSessionGenerations.computeIfAbsent(
+                        recipientUuid, ignored -> this.notificationGenerationSequence.incrementAndGet());
+                    NotificationRecipient recipient = new NotificationRecipient(
+                        recipientUuid, sessionGeneration, lifecycleGeneration);
+                    if (this.notificationRecipientsInFlight.putIfAbsent(recipientUuid, recipient) != null) return;
+                    try {
+                        this.runAsyncTask(() -> {
+                            boolean deliveryScheduled = false;
+                            try {
+                                if (!this.isNotificationLifecycleCurrent(lifecycleGeneration)
+                                        || !this.isNotificationSessionCurrent(recipient)) return;
+                                List<PlayerNotificationEntry> notifications = List.copyOf(
+                                    this.loadPendingPlayerNotifications(recipient.uuid()));
+                                if (notifications.isEmpty()) return;
+                                PlatformScheduler.globalNow(this,
+                                    () -> this.deliverPendingPlayerNotifications(recipient, notifications));
+                                deliveryScheduled = true;
+                            } finally {
+                                if (!deliveryScheduled) this.releaseNotificationPoll(recipient);
+                            }
+                        });
+                    } catch (RuntimeException ex) {
+                        this.releaseNotificationPoll(recipient);
+                        this.getLogger().warning("Unable to schedule pending notification lookup (cause="
+                            + ex.getClass().getSimpleName() + ").");
                     }
-                    if (notification.action() == null || notification.action().isBlank() || !notification.action().startsWith("CONNECT:") || (target = this.normalizeServerTarget(notification.action().substring("CONNECT:".length()))).isBlank() || target.equalsIgnoreCase(this.detectServerName())) continue;
-                    this.connectToServer(player, target);
+                }, null);
+            }
+        });
+    }
+    private boolean isNotificationLifecycleCurrent(long lifecycleGeneration) {
+        return this.notificationPollingActive && this.notificationLifecycleGeneration == lifecycleGeneration;
+    }
+
+    private boolean isNotificationSessionCurrent(NotificationRecipient recipient) {
+        Long currentGeneration = this.notificationSessionGenerations.get(recipient.uuid());
+        return currentGeneration != null && currentGeneration.longValue() == recipient.sessionGeneration();
+    }
+
+    private void releaseNotificationPoll(NotificationRecipient recipient) {
+        this.notificationRecipientsInFlight.remove(recipient.uuid(), recipient);
+    }
+
+    private void deliverPendingPlayerNotifications(NotificationRecipient recipient,
+            List<PlayerNotificationEntry> notifications) {
+        if (!this.isNotificationLifecycleCurrent(recipient.lifecycleGeneration())
+                || !this.isNotificationSessionCurrent(recipient)) {
+            this.releaseNotificationPoll(recipient);
+            return;
+        }
+        Player player = Bukkit.getPlayer(recipient.uuid());
+        if (player == null) {
+            this.releaseNotificationPoll(recipient);
+            return;
+        }
+        String localServer = this.detectServerName();
+        List<RoutedPlayerNotification> routed = new ArrayList<>(notifications.size());
+        for (PlayerNotificationEntry notification : notifications) {
+            String target = "";
+            String action = notification.action();
+            if (action != null && action.startsWith("CONNECT:")) {
+                target = this.normalizeServerTarget(action.substring("CONNECT:".length()));
+                if (target.equalsIgnoreCase(localServer)) target = "";
+            }
+            routed.add(new RoutedPlayerNotification(notification.message(), target));
+        }
+        PlatformScheduler.entityNow(this, player, () -> {
+            boolean processed = false;
+            try {
+                if (!this.isNotificationLifecycleCurrent(recipient.lifecycleGeneration())
+                        || !this.isNotificationSessionCurrent(recipient)
+                        || !player.isOnline() || !recipient.uuid().equals(player.getUniqueId())) return;
+                for (RoutedPlayerNotification notification : routed) {
+                    if (notification.message() != null && !notification.message().isBlank()) {
+                        player.sendMessage(notification.message());
+                    }
+                    if (!notification.targetServer().isBlank()) {
+                        this.connectToServer(player, notification.targetServer(), localServer);
+                    }
+                }
+                processed = true;
+            } finally {
+                if (processed) this.acknowledgeDeliveredPlayerNotifications(recipient, notifications);
+                else this.releaseNotificationPoll(recipient);
+            }
+        }, () -> this.releaseNotificationPoll(recipient));
+    }
+
+    private void acknowledgeDeliveredPlayerNotifications(NotificationRecipient recipient,
+            List<PlayerNotificationEntry> notifications) {
+        if (!this.isNotificationLifecycleCurrent(recipient.lifecycleGeneration())
+                || !this.isNotificationSessionCurrent(recipient)) {
+            this.releaseNotificationPoll(recipient);
+            return;
+        }
+        List<Long> notificationIds = notifications.stream().map(PlayerNotificationEntry::id).toList();
+        try {
+            this.runAsyncTask(() -> {
+                try {
+                    if (!this.isNotificationLifecycleCurrent(recipient.lifecycleGeneration())
+                            || !this.isNotificationSessionCurrent(recipient)) return;
+                    this.acknowledgePendingPlayerNotifications(recipient.uuid(), notificationIds);
+                } finally {
+                    this.releaseNotificationPoll(recipient);
                 }
             });
+        } catch (RuntimeException ex) {
+            this.releaseNotificationPoll(recipient);
+            this.getLogger().warning("Unable to schedule pending notification acknowledgment (rows="
+                + notificationIds.size() + ", cause=" + ex.getClass().getSimpleName() + ").");
         }
     }
 
-    private List<PlayerNotificationEntry> consumePendingPlayerNotifications(UUID recipientUuid) {
-        ArrayList<PlayerNotificationEntry> out;
-        block32: {
-            if (recipientUuid == null) {
-                return List.of();
-            }
-            out = new ArrayList<PlayerNotificationEntry>();
-            ArrayList<Long> ids = new ArrayList<Long>();
-            String selectSql = "SELECT id,message,action FROM network_player_notifications WHERE recipient_uuid=? AND expires_at > CURRENT_TIMESTAMP ORDER BY id ASC LIMIT 10";
-            try (Connection conn = this.openSyncConnection();
-                 PreparedStatement ps = conn.prepareStatement(selectSql);){
-                ps.setString(1, recipientUuid.toString());
-                try (ResultSet rs = ps.executeQuery();){
-                    while (rs.next()) {
-                        long id = rs.getLong(1);
-                        ids.add(id);
-                        out.add(new PlayerNotificationEntry(id, rs.getString(2), rs.getString(3)));
-                    }
-                }
-                if (ids.isEmpty()) break block32;
-                StringBuilder deleteSql = new StringBuilder("DELETE FROM network_player_notifications WHERE recipient_uuid=? AND id IN (");
-                for (int i = 0; i < ids.size(); ++i) {
-                    if (i > 0) {
-                        deleteSql.append(',');
-                    }
-                    deleteSql.append('?');
-                }
-                deleteSql.append(')');
-                try (PreparedStatement delete = conn.prepareStatement(deleteSql.toString());){
-                    delete.setString(1, recipientUuid.toString());
-                    for (int i = 0; i < ids.size(); ++i) {
-                        delete.setLong(i + 2, (Long)ids.get(i));
-                    }
-                    delete.executeUpdate();
+    private List<PlayerNotificationEntry> loadPendingPlayerNotifications(UUID recipientUuid) {
+        if (recipientUuid == null) return List.of();
+        ArrayList<PlayerNotificationEntry> out = new ArrayList<>();
+        String selectSql = "SELECT id,message,action FROM network_player_notifications WHERE recipient_uuid=? AND expires_at > CURRENT_TIMESTAMP ORDER BY id ASC LIMIT 10";
+        try (Connection conn = this.openSyncConnection(); PreparedStatement ps = conn.prepareStatement(selectSql)) {
+            ps.setString(1, recipientUuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long id = rs.getLong(1);
+                    out.add(new PlayerNotificationEntry(id, rs.getString(2), rs.getString(3)));
                 }
             }
-            catch (Exception ex) {
-                if (!this.routerDebug) break block32;
-                this.getLogger().warning("Failed polling player notifications for " + String.valueOf(recipientUuid) + ": " + ex.getMessage());
-            }
+        } catch (Exception ex) {
+            if (this.routerDebug) this.getLogger().warning("Pending notification lookup failed (cause="
+                + ex.getClass().getSimpleName() + ").");
         }
         return out;
+    }
+
+    private boolean acknowledgePendingPlayerNotifications(UUID recipientUuid, List<Long> notificationIds) {
+        if (recipientUuid == null || notificationIds == null || notificationIds.isEmpty()) return true;
+        String placeholders = String.join(",", java.util.Collections.nCopies(notificationIds.size(), "?"));
+        String sql = "DELETE FROM network_player_notifications WHERE recipient_uuid=? AND id IN (" + placeholders + ")";
+        try (Connection conn = this.openSyncConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, recipientUuid.toString());
+            for (int i = 0; i < notificationIds.size(); i++) ps.setLong(i + 2, notificationIds.get(i));
+            ps.executeUpdate();
+            return true;
+        } catch (Exception ex) {
+            this.getLogger().warning("Pending notification acknowledgment failed (rows=" + notificationIds.size()
+                + ", cause=" + ex.getClass().getSimpleName() + ").");
+            return false;
+        }
     }
 
     private void queuePlayerNotification(UUID recipientUuid, String message, String action, int ttlSeconds) {
@@ -10313,7 +16102,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (logicalName == null) return false;
         return this.detectServerName().equalsIgnoreCase(this.normalizeServerTarget(logicalName));
     }
-
     private String normalizeServerTarget(String target) {
         if (target == null) {
             return "";
@@ -10327,7 +16115,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return normalized;
     }
-
     /**
      * This backend's logical name, as the proxy and the sync tables know it.
      *
@@ -10358,10 +16145,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return "unknown-" + port;
     }
-
     private void connectToServer(Player player, String serverName) {
+        this.connectToServer(player, serverName, this.detectServerName());
+    }
+
+    private void connectToServer(Player player, String serverName, String localServer) {
         if (this.routerDebug) {
-            this.getLogger().info("[router-debug] uuid=" + String.valueOf(player.getUniqueId()) + " server=" + this.detectServerName() + " target=" + serverName + " result=proxy_connect_send");
+            this.getLogger().info("[router-debug] uuid=" + String.valueOf(player.getUniqueId()) + " server=" + localServer + " target=" + serverName + " result=proxy_connect_send");
         }
         try (ByteArrayOutputStream bytes = new ByteArrayOutputStream();
              DataOutputStream out = new DataOutputStream(bytes);){
@@ -10441,6 +16231,26 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 return out;
             }
             return List.of();
+        }
+        if ("duel".equalsIgnoreCase(command.getName()) || "1v1".equalsIgnoreCase(command.getName())) {
+            String prefix = args.length == 0 ? "" : args[args.length - 1].toLowerCase(Locale.ROOT);
+            if (args.length == 1) {
+                ArrayList<String> out = new ArrayList<>(this.completeKnownPlayerNames(args[0], sender instanceof Player p ? p.getUniqueId() : null));
+                for (String option : List.of("accept", "deny", "cancel", "again")) if (option.startsWith(prefix)) out.add(option);
+                if (sender.hasPermission("pizzasmp.admin.dueltest")) {
+                    for (String option : List.of("test", "exit")) if (option.startsWith(prefix)) out.add(option);
+                }
+                return out;
+            }
+            List<String> options = switch (args.length) {
+                case 2 -> List.of("0", "10k", "100k", "bo3", "bo5", "restored");
+                case 3 -> List.of("1", "3", "5", "10", "25", "50", "100", "restored", "standard");
+                case 4 -> List.of("restored", "standard", "open", "plains", "desert", "savanna", "badlands", "snowy_plains", "meadow", "beach", "any");
+                default -> List.of("open", "plains", "desert", "savanna", "badlands", "snowy_plains", "meadow", "beach", "any");
+            };
+            ArrayList<String> out = new ArrayList<>();
+            for (String option : options) if (option.startsWith(prefix)) out.add(option);
+            return out;
         }
         if ("ecobot".equalsIgnoreCase(command.getName())) {
             if (args.length == 1) {
@@ -10628,7 +16438,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return List.of();
     }
-
     private ParsedTabRequest parseTabRequest(String buffer) {
         if (buffer == null || !buffer.startsWith("/")) {
             return null;
@@ -10660,7 +16469,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             default -> false;
         };
     }
-
     private List<String> completeNetworkPlayerNames(String prefix, UUID viewerUuid) {
         this.refreshNetworkPlayerNameCacheIfNeeded();
         String normalizedPrefix = prefix == null ? "" : prefix.toLowerCase(Locale.ROOT);
@@ -10850,6 +16658,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             new SettingsEntry("explosion_sounds", "Explosion Sounds", false))),
         new SettingsCategory("visuals", "🔭 Visuals", List.of(
             new SettingsEntry("worth_display", "Item Worth Lore", false),
+            new SettingsEntry("rtp_animation", "RTP Animation", false),
             new SettingsEntry("tpa_confirm_menus", "Teleport Confirm Menus", false),
             new SettingsEntry("player_visibility", "Player Visibility", false),
             new SettingsEntry("chainmail_on_respawn", "Chainmail on Respawn", false))),
@@ -10871,8 +16680,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             new SettingsEntry("quick_auction_sell", "Auction Quick Sell", false),
             new SettingsEntry("auction_overflow", "Auction Overflow", false),
             new SettingsEntry("search_spell_check", "Search Spell Check", false),
-            new SettingsEntry("disable_mob_spawns", "Disable Mob Spawns", false),
-            new SettingsEntry("phantom_spawns", "Phantom Spawns", false),
+            new SettingsEntry("mob_spawns", "Mob Spawns", false),
             new SettingsEntry("pearls_destroy_on_death", "Pearls Destroy on Death", false),
             new SettingsEntry("staff_mode_bypass", "Staff Mode Bypass", false),
             new SettingsEntry("night_vision", "Night Vision", false))));
@@ -10928,20 +16736,21 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             List.of(), List.of(),
             DialogType.multiAction(buttons)
                 .columns(1)
-                .exitAction(this.dialogButton(Component.text("Close"), null, 250, null))
+                .exitAction(this.dialogButton(Component.text("Close"), null, 250, pl -> DialogCloseCompat.close(pl)))
                 .build());
-        player.showDialog(dialog);
+        DialogCompat.show(player, dialog);
     }
 
     private void openSettingsInventory(Player player, Map<String, Boolean> values, int page) {
-        // 9x4 (36 slots), single page using each setting's designed slot (spread across all rows).
-        // No page 2 — every setting fits and renders on one screen.
-        Inventory inv = Bukkit.createInventory(null, 36, TITLE_SETTINGS);
+        // 9x5 keeps the compatibility settings screen on one page with the RTP visual toggle.
+        Inventory inv = Bukkit.createInventory(null, 45, TITLE_SETTINGS);
         for (SettingDefinition def : SETTINGS_DEFINITIONS) {
-            if (def.slot < 0 || def.slot >= 36) continue;
+            if (def.slot < 0 || def.slot >= 45) continue;
             boolean enabled = values.getOrDefault(def.key, def.defaultValue);
             inv.setItem(def.slot, this.buildSettingsItem(player, def, enabled));
         }
+        inv.setItem(RTP_ANIMATION_SETTING.slot, this.buildSettingsItem(player, RTP_ANIMATION_SETTING,
+            values.getOrDefault(RTP_ANIMATION_SETTING.key, true)));
         this.settingsPageByPlayer.put(player.getUniqueId(), 1);
         player.openInventory(inv);
     }
@@ -10970,6 +16779,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private SettingDefinition findSettingByKey(String key) {
+        if (RTP_ANIMATION_SETTING.key.equalsIgnoreCase(key)) return RTP_ANIMATION_SETTING;
         for (SettingDefinition def : SETTINGS_DEFINITIONS) {
             if (!def.key.equalsIgnoreCase(key)) continue;
             return def;
@@ -11049,7 +16859,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return true; // fail open
         }
     }
-
     /** Cycle a tri-state privacy setting: Anyone -> Friends & Followers -> Off -> Anyone. */
     private void cyclePrivacySetting(Player player, String key, Runnable reopen) {
         if (player == null || !player.isOnline() || key == null) return;
@@ -11210,7 +17019,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.applyScoreboardPreference(player);
                 break;
             }
-            case "disable_mob_spawns": {
+            case "mob_spawns": {
                 this.applyMobSpawnPreference(player);
                 break;
             }
@@ -11227,7 +17036,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 // Drives the LuckPerms node PizzaAdminTools reads: ON = dev exempt from /sfmode hider,
                 // OFF = dev is subject to opt-in staff mode like everyone (fair-play self-test).
                 final String cmd = "lp user " + player.getName() + " permission set pizzasmp.sfmode.bypass " + enabled;
-                Bukkit.getScheduler().runTask((Plugin)this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd));
+                PlatformScheduler.globalNow(this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd));
                 player.sendActionBar(this.legacyColorize(enabled
                     ? "&7Staff mode bypass &#00BFFFON&7 — your staff functions are always available."
                     : "&7Staff mode bypass &fOFF&7 — you're now subject to /sfmode. Relog to apply fully."));
@@ -11345,7 +17154,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         player.setScoreboard(board);
     }
-
     private String hudGlyph(String preferred, String fallback) {
         if (this.isAsciiHudIconsEnabled()) {
             return fallback;
@@ -11429,12 +17237,164 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             inv.setItem(13, this.buildMainShopCategoryItem(Material.TOTEM_OF_UNDYING,"Gear",   "shop_main_open:gear"));
             inv.setItem(14, this.buildMainShopCategoryItem(Material.COOKED_BEEF,     "Food",   "shop_main_open:food"));
             inv.setItem(15, this.buildMainShopCategoryItem(Material.AMETHYST_SHARD,  "Shards", "shop_main_open:shards"));
+            // PvP Gear shop: sits directly BELOW the Gear/totem slot (13 -> 22), netherite sword icon.
+            inv.setItem(22, this.namedWithLore(Material.NETHERITE_SWORD, "§c§lPvP Gear", "pvp_shop_open",
+                List.of("§7Armor sets, kits & combat items")));
             player.openInventory(inv);
         });
     }
 
     private ItemStack buildMainShopCategoryItem(Material icon, String label, String id) {
         return this.namedWithLore(icon, "\u00a7a" + label, id, List.of("\u00a77Click to browse"));
+    }
+
+    // ============================================================================
+    // PvP Gear shop (code-driven, not shop.yml — needs enchants/trims). 9x6 grid:
+    // armor sets (trim variants) + a PvP sword up top, combat consumables in the
+    // middle, a Custom Kits entry, and a back button. Prices come from settings
+    // (pvpshop.*) so they're tunable without a code change.
+    // ============================================================================
+
+    // material, key, default stack amount, default unit price
+    private static final Object[][] PVP_CONSUMABLES = new Object[][] {
+        { Material.END_CRYSTAL,            "crystal",   16,  600.0 },
+        { Material.RESPAWN_ANCHOR,         "anchor",     8, 3000.0 },
+        { Material.TOTEM_OF_UNDYING,       "totem",      1,12000.0 },
+        { Material.OBSIDIAN,               "obsidian",  64,  250.0 },
+        { Material.ENDER_PEARL,            "pearl",     16,  200.0 },
+        { Material.GLOWSTONE,              "glowstone", 64,  150.0 },
+        { Material.ENCHANTED_GOLDEN_APPLE, "gapple",     4,60000.0 },
+    };
+
+    private double pvpPrice(String key, double def) {
+        return Math.max(0.0, this.settings.getDouble("pvpshop." + key, def));
+    }
+
+    private void openPvpShop(Player player) {
+        if (player == null || !player.isOnline()) return;
+        this.runOnPlayerThread(player, () -> {
+            if (!player.isOnline()) return;
+            Inventory inv = Bukkit.createInventory(null, 54, TITLE_PVP_SHOP);
+            double setPrice = this.pvpPrice("armor-set", 1000000.0);
+            double swordPrice = this.pvpPrice("sword", 300000.0);
+            // Armor set trim variants (representative chestplate icon; buying gives the full 4-piece set).
+            inv.setItem(10, this.pvpSetIcon("§bSentry Set §7(Redstone)", "pvp_set:sentry", setPrice, TrimMaterial.REDSTONE, TrimPattern.SENTRY));
+            inv.setItem(11, this.pvpSetIcon("§bSpire Set §7(Diamond)",   "pvp_set:spire",  setPrice, TrimMaterial.DIAMOND,  TrimPattern.SPIRE));
+            inv.setItem(12, this.pvpSetIcon("§bSentry Set §7(Gold)",     "pvp_set:gold",   setPrice, TrimMaterial.GOLD,     TrimPattern.SENTRY));
+            // PvP sword.
+            ItemStack swordIcon = this.pvpSword();
+            ItemMeta sm = swordIcon.getItemMeta();
+            sm.setDisplayName("§cPvP Sword");
+            sm.setLore(List.of("§a$" + this.fmtMoney(swordPrice), "", "§7Sharpness V · Fire Aspect II", "§7Unbreaking III · Mending"));
+            if (this.uiActionKey != null) sm.getPersistentDataContainer().set(this.uiActionKey, PersistentDataType.STRING, "pvp_sword");
+            swordIcon.setItemMeta(sm);
+            inv.setItem(14, swordIcon);
+            // Combat consumables.
+            int[] slots = { 28, 29, 30, 31, 32, 33, 34 };
+            for (int i = 0; i < PVP_CONSUMABLES.length && i < slots.length; ++i) {
+                Object[] row = PVP_CONSUMABLES[i];
+                Material mat = (Material) row[0];
+                String key = (String) row[1];
+                int amount = (Integer) row[2];
+                double unit = this.pvpPrice(key, (Double) row[3]);
+                double total = unit * amount;
+                inv.setItem(slots[i], this.namedWithLore(mat, "§f" + this.humanName(mat) + " §7x" + amount, "pvp_buy:" + key,
+                    List.of("§a$" + this.fmtMoney(total), "§8$" + this.fmtMoney(unit) + " each")));
+            }
+            // Custom kits (editor is a future phase) + back.
+            inv.setItem(49, this.namedWithLore(Material.CHEST, "§e§lCustom Kits", "pvp_kits",
+                List.of("§7Build a loadout you can rebuy", "§8Coming soon")));
+            inv.setItem(45, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "§c§l« Back", "pvp_back", List.of()));
+            player.openInventory(inv);
+        });
+    }
+
+    // Full 4-piece netherite set with a given trim. mending=true adds Mending to each.
+    private java.util.List<ItemStack> pvpArmorSet(TrimMaterial mat, TrimPattern pattern) {
+        java.util.List<ItemStack> out = new java.util.ArrayList<>();
+        out.add(this.applyTrim(this.createEnchanted(Material.NETHERITE_HELMET, true,
+            Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3, Enchantment.RESPIRATION, 3)), mat, pattern));
+        out.add(this.applyTrim(this.createEnchanted(Material.NETHERITE_CHESTPLATE, true,
+            Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3)), mat, pattern));
+        out.add(this.applyTrim(this.createEnchanted(Material.NETHERITE_LEGGINGS, true,
+            Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3)), mat, pattern));
+        out.add(this.applyTrim(this.createEnchanted(Material.NETHERITE_BOOTS, true,
+            Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3, Enchantment.FEATHER_FALLING, 4, Enchantment.DEPTH_STRIDER, 3)), mat, pattern));
+        return out;
+    }
+
+    private ItemStack pvpSword() {
+        return this.createEnchanted(Material.NETHERITE_SWORD, true,
+            Map.of(Enchantment.SHARPNESS, 5, Enchantment.UNBREAKING, 3, Enchantment.FIRE_ASPECT, 2));
+    }
+
+    // Representative chestplate icon for a set variant, with the trim shown and a buy action id.
+    private ItemStack pvpSetIcon(String name, String actionId, double price, TrimMaterial mat, TrimPattern pattern) {
+        ItemStack icon = this.applyTrim(this.createEnchanted(Material.NETHERITE_CHESTPLATE, true,
+            Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3)), mat, pattern);
+        ItemMeta meta = icon.getItemMeta();
+        meta.setDisplayName(name);
+        meta.setLore(List.of("§a$" + this.fmtMoney(price), "", "§7Full set: helmet, chestplate,", "§7leggings, boots", "§7Protection IV · Unbreaking III · Mending"));
+        if (this.uiActionKey != null) meta.getPersistentDataContainer().set(this.uiActionKey, PersistentDataType.STRING, actionId);
+        icon.setItemMeta(meta);
+        return icon;
+    }
+
+    private void handlePvpShopClick(Player p, ItemStack current, ClickType clickType) {
+        if (current == null || current.getType() == Material.AIR) return;
+        String id = this.uiActionId(current);
+        if (id == null || id.isBlank()) return;
+        if ("pvp_back".equals(id)) { this.openShopMain(p); return; }
+        if ("pvp_kits".equals(id)) { p.sendActionBar(Component.text("§7Custom kits are coming soon.")); return; }
+        if ("pvp_sword".equals(id)) {
+            double price = this.pvpPrice("sword", 300000.0);
+            this.pvpConfirmThenBuy(p, "PvP Sword", price, () -> this.giveItemStack(p, this.pvpSword()));
+            return;
+        }
+        if (id.startsWith("pvp_set:")) {
+            String variant = id.substring("pvp_set:".length());
+            TrimMaterial mat; TrimPattern pat; String label;
+            switch (variant) {
+                case "spire" -> { mat = TrimMaterial.DIAMOND; pat = TrimPattern.SPIRE;  label = "Spire Set (Diamond)"; }
+                case "gold"  -> { mat = TrimMaterial.GOLD;    pat = TrimPattern.SENTRY; label = "Sentry Set (Gold)"; }
+                default      -> { mat = TrimMaterial.REDSTONE;pat = TrimPattern.SENTRY; label = "Sentry Set (Redstone)"; }
+            }
+            double price = this.pvpPrice("armor-set", 1000000.0);
+            final TrimMaterial fmat = mat; final TrimPattern fpat = pat;
+            this.pvpConfirmThenBuy(p, label, price, () -> { for (ItemStack piece : this.pvpArmorSet(fmat, fpat)) this.giveItemStack(p, piece); });
+            return;
+        }
+        if (id.startsWith("pvp_buy:")) {
+            String key = id.substring("pvp_buy:".length());
+            for (Object[] row : PVP_CONSUMABLES) {
+                if (!key.equals(row[1])) continue;
+                Material mat = (Material) row[0];
+                int amount = (Integer) row[2];
+                double total = this.pvpPrice(key, (Double) row[3]) * amount;
+                this.pvpBuy(p, this.humanName(mat) + " x" + amount, total, () -> this.giveItemStack(p, new ItemStack(mat, amount)));
+                return;
+            }
+        }
+    }
+
+    // Expensive items (sets/sword) confirm first on dialog clients; legacy clients buy directly.
+    private void pvpConfirmThenBuy(Player p, String label, double price, Runnable grant) {
+        if (!this.useDialogUi(p)) { this.pvpBuy(p, label, price, grant); return; }
+        ActionButton yes = this.dialogButton(Component.text("Buy", NamedTextColor.GREEN), null, 140,
+            pl -> { DialogCloseCompat.close(pl); this.runOnPlayerThread(pl, () -> this.pvpBuy(pl, label, price, grant)); });
+        ActionButton no = this.dialogButton(Component.text("Cancel", NamedTextColor.RED), null, 140, pl -> DialogCloseCompat.close(pl));
+        Dialog dialog = this.buildDialog(Component.text("Buy " + label, DIALOG_BRAND),
+            List.of(DialogBody.plainMessage(this.legacyColorize("§7" + label + " §7for §a$" + this.fmtMoney(price) + "§7?"))),
+            List.of(), DialogType.confirmation(yes, no));
+        DialogCompat.show(p, dialog);
+    }
+
+    private void pvpBuy(Player p, String label, double price, Runnable grant) {
+        if (this.getMoneyBalance(p) < price) { p.sendActionBar(this.legacyColorize("§cYou can't afford " + label + " §7(§a$" + this.fmtMoney(price) + "§7)")); return; }
+        if (!this.withdrawMoney(p, price)) { p.sendActionBar(Component.text("§cNot enough money.")); return; }
+        grant.run();
+        p.sendActionBar(this.legacyColorize("§aBought " + label + " §7for §a$" + this.fmtMoney(price)));
+        p.playSound(p.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.7f, 1.2f);
     }
 
     // Category menu: Row0=glass, Row1=9 items (click→confirm), Row2=back+glass
@@ -11534,19 +17494,116 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return lore;
     }
 
+    // ---- Optimization toggles / profiles ----
+    // A profile sets sensible defaults; an explicit optimizations.<feature> in config overrides it.
+    // Profiles: off (vanilla), conservative (safe UX-only wins), balanced (default, all on),
+    // aggressive (all on, and the bandwidth throttle triggers ~10 points earlier).
+    private boolean optEnabled(String feature) {
+        String key = "optimizations." + feature;
+        if (this.settings != null && this.settings.isSet(key)) return this.settings.getBoolean(key);
+        String profile = this.settings != null ? this.settings.getString("optimizations.profile", "balanced") : "balanced";
+        switch (profile == null ? "balanced" : profile.toLowerCase(java.util.Locale.ROOT)) {
+            case "off": return false;
+            case "conservative": return feature.equals("join-send-ramp") || feature.equals("deferred-join-work");
+            default: return true; // balanced / aggressive / unknown
+        }
+    }
+    private boolean optAggressive() {
+        String p = this.settings != null ? this.settings.getString("optimizations.profile", "balanced") : "balanced";
+        return "aggressive".equalsIgnoreCase(p);
+    }
+
+    // Progressive send-distance ramp on join: start at a small radius so the immediate surroundings load
+    // in one small burst (keep-alive isn't starved -> no login ping spike), then widen to the player's
+    // target VD over a few seconds. The per-tick VD sweep skips ramping players until this completes.
+    private void beginJoinSendRamp(Player p) {
+        if (p == null || !this.optEnabled("join-send-ramp")) return;
+        UUID id = p.getUniqueId();
+        PlatformScheduler.globalNow(this, () -> {
+            double[] tps = Bukkit.getTPS();
+            double tps1m = tps.length > 0 ? tps[0] : 20.0;
+            int online = Bukkit.getOnlinePlayers().size();
+            PlatformScheduler.entityNow(this, p, () -> {
+                if (!p.isOnline()) return;
+                int target = this.calcPerPlayerVd(p, tps1m, online);
+                int start = Math.min(3, target);
+                if (start >= target) return;
+                this.joinRamping.add(id);
+                try { p.setViewDistance(start); } catch (Throwable ignored) {}
+                this.stepJoinSendRamp(p, start, target);
+            }, () -> this.joinRamping.remove(id));
+        });
+    }
+    private void stepJoinSendRamp(Player p, int current, int target) {
+        UUID id = p.getUniqueId();
+        PlatformScheduler.entityLater(this, p, () -> {
+            if (!p.isOnline()) { this.joinRamping.remove(id); return; }
+            int next = Math.min(target, current + 2);
+            try { p.setViewDistance(next); } catch (Throwable ignored) {}
+            if (next >= target) { this.joinRamping.remove(id); return; }
+            this.stepJoinSendRamp(p, next, target);
+        }, () -> this.joinRamping.remove(id), 10L); // +2 chunks every ~0.5s
+    }
+
+    // Runs non-critical join work now, or shortly after join (so it doesn't pile onto the initial chunk
+    // burst) when the deferred-join-work optimization is enabled.
+    private void runDeferredJoinWork(Player p, Runnable work) {
+        if (this.optEnabled("deferred-join-work")) this.runPlayerTaskLater(p, () -> { if (p.isOnline()) work.run(); }, 15L);
+        else work.run();
+    }
+
+    // Samples the NIC tx counter and updates egressVdPenalty (0-2) with hysteresis. Cap<=0 disables it.
+    // The counter is total NIC egress (a good proxy now that non-server workloads are gone); we only
+    // act near the cap, where realistically only chunk streaming pushes that much.
+    private void sampleEgressPressure() {
+        if (!this.optEnabled("bandwidth-aware-vd")) { this.egressVdPenalty = 0; return; }
+        double capMbps = this.settings != null ? this.settings.getDouble("network.egress-cap-mbps", 50.0) : 50.0;
+        if (capMbps <= 0.0) { this.egressVdPenalty = 0; return; }
+        String iface = this.settings != null ? this.settings.getString("network.egress-iface", "eth0") : "eth0";
+        long now = System.currentTimeMillis();
+        long tx;
+        try {
+            tx = Long.parseLong(new String(java.nio.file.Files.readAllBytes(
+                java.nio.file.Paths.get("/sys/class/net/" + iface + "/statistics/tx_bytes"))).trim());
+        } catch (Throwable t) {
+            return; // iface unreadable (wrong name / non-Linux): leave the penalty untouched, fail safe
+        }
+        if (this.egressLastTxBytes >= 0L && now > this.egressLastSampleMs) {
+            double secs = (now - this.egressLastSampleMs) / 1000.0;
+            double mbps = ((tx - this.egressLastTxBytes) * 8.0 / 1_000_000.0) / secs;
+            if (mbps >= 0.0) this.currentEgressMbps = mbps;
+            double hiPct = this.settings != null ? this.settings.getInt("network.egress-throttle-percent", 80) : 80;
+            double loPct = this.settings != null ? this.settings.getInt("network.egress-recover-percent", 55) : 55;
+            if (this.optAggressive()) { hiPct -= 10; loPct -= 10; } // aggressive profile: throttle sooner
+            double hi = capMbps * hiPct / 100.0;
+            double lo = capMbps * loPct / 100.0;
+            int old = this.egressVdPenalty;
+            if (this.currentEgressMbps >= hi && this.egressVdPenalty < 2) this.egressVdPenalty++;
+            else if (this.currentEgressMbps <= lo && this.egressVdPenalty > 0) this.egressVdPenalty--;
+            if (this.egressVdPenalty != old) {
+                this.getLogger().info(String.format("[VDThrottle] uplink %.1f Mbps (cap %.0f) -> bandwidth VD penalty %d",
+                    this.currentEgressMbps, capMbps, this.egressVdPenalty));
+            }
+        }
+        this.egressLastTxBytes = tx;
+        this.egressLastSampleMs = now;
+    }
+
     // ---- TPS-reactive view distance throttle ----
     private void tickVdThrottle() {
         double[] tps = Bukkit.getTPS();
         double tps1m = tps.length > 0 ? tps[0] : 20.0;
         long now = System.currentTimeMillis();
         int oldVd = this.currentThrottledVd;
+        this.sampleEgressPressure();
 
         if (tps1m < TPS_DROP_THRESHOLD && this.currentThrottledVd > VD_MIN) {
             this.currentThrottledVd--;
             this.lastVdRecoveryCheck = 0L;
             this.applyServerVd(this.currentThrottledVd);
             for (Player p : Bukkit.getOnlinePlayers()) {
-                p.sendActionBar(Component.text("§7View distance temporarily throttled to §f" + this.currentThrottledVd + " §7chunks"));
+                int currentVd = this.currentThrottledVd;
+                this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§7View distance temporarily throttled to §f" + currentVd + " §7chunks")));
             }
             this.getLogger().info("[VDThrottle] TPS=" + String.format("%.1f", tps1m) + " → VD reduced to " + this.currentThrottledVd);
         } else if (tps1m >= TPS_RECOVER_THRESHOLD && this.currentThrottledVd < VD_MAX) {
@@ -11558,7 +17615,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.applyServerVd(this.currentThrottledVd);
                 if (this.currentThrottledVd < VD_MAX) {
                     for (Player p : Bukkit.getOnlinePlayers()) {
-                        p.sendActionBar(Component.text("§7View distance recovering — §f" + this.currentThrottledVd + " §7chunks"));
+                        int currentVd = this.currentThrottledVd;
+                        this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§7View distance recovering — §f" + currentVd + " §7chunks")));
                     }
                 }
                 this.getLogger().info("[VDThrottle] TPS=" + String.format("%.1f", tps1m) + " → VD increased to " + this.currentThrottledVd);
@@ -11637,9 +17695,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void applyServerVd(int vd) {
-        for (org.bukkit.World w : Bukkit.getWorlds()) {
-            w.setViewDistance(vd);
-        }
+        PlatformScheduler.globalNow(this, () -> {
+            for (org.bukkit.World w : Bukkit.getWorlds()) w.setViewDistance(vd);
+        });
     }
 
     // ---- Queue system ----
@@ -11649,6 +17707,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // queue.admit_interval_ticks (default 60 = 3s)
 
     private final java.util.concurrent.ConcurrentLinkedDeque<QueuedPlayer> joinQueue = new java.util.concurrent.ConcurrentLinkedDeque<>();
+    private final Object joinQueueLock = new Object();
     private final Set<UUID> queuedPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Location> queueReturnLocations = new ConcurrentHashMap<>();
     private final Map<UUID, GameMode> queueReturnGamemodes = new ConcurrentHashMap<>();
@@ -11695,22 +17754,37 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     void enqueuePlayer(Player p) {
         UUID uuid = p.getUniqueId();
-        this.queueReturnLocations.put(uuid, p.getLocation().clone());
-        this.queueReturnGamemodes.put(uuid, p.getGameMode());
-        this.queuedPlayers.add(uuid);
         QueuedPlayer qp = new QueuedPlayer(uuid, this.getQueuePriority(p));
-        this.joinQueue.add(qp);
-        this.resortQueue();
+        synchronized (this.joinQueueLock) {
+            this.queueReturnLocations.put(uuid, p.getLocation().clone());
+            this.queueReturnGamemodes.put(uuid, p.getGameMode());
+            this.queuedPlayers.add(uuid);
+            this.joinQueue.add(qp);
+            this.resortQueueLocked();
+        }
         p.setGameMode(GameMode.SPECTATOR);
-        org.bukkit.World endWorld = Bukkit.getWorld("world_the_end");
-        if (endWorld == null) endWorld = Bukkit.getWorlds().getFirst();
-        p.teleport(new Location(endWorld, 0, 320, 0));
         p.setAllowFlight(true);
         p.setFlying(true);
-        this.tickQueueDisplay(uuid);
+        PlatformScheduler.globalNow(this, () -> {
+            World endWorld = Bukkit.getWorld("world_the_end");
+            if (endWorld == null && !Bukkit.getWorlds().isEmpty()) endWorld = Bukkit.getWorlds().getFirst();
+            if (endWorld == null) return;
+            World queueWorld = endWorld;
+            Location queueLocation = new Location(queueWorld, 0, 320, 0);
+            PlatformScheduler.entityNow(this, p, () -> {
+                if (p.isOnline() && this.queuedPlayers.contains(uuid)) p.teleportAsync(queueLocation);
+            }, null);
+        });
+        this.tickQueueDisplay(p);
     }
 
     private void resortQueue() {
+        synchronized (this.joinQueueLock) {
+            this.resortQueueLocked();
+        }
+    }
+
+    private void resortQueueLocked() {
         java.util.List<QueuedPlayer> sorted = new java.util.ArrayList<>(this.joinQueue);
         java.util.Collections.sort(sorted);
         this.joinQueue.clear();
@@ -11718,57 +17792,83 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void admitNextPlayer() {
-        if (this.joinQueue.isEmpty()) return;
-        QueuedPlayer next = this.joinQueue.peek();
-        if (next == null) return;
-        // Test-hold: /queuetest keeps the player in the queue for a fixed window.
-        Long holdUntil = this.queueTestHoldUntil.get(next.uuid);
-        if (holdUntil != null && System.currentTimeMillis() < holdUntil) return;
         double[] tps = Bukkit.getTPS();
         double tps1m = tps.length > 0 ? tps[0] : 20.0;
         // Hold if TPS is struggling — wait for a better moment
         if (tps1m < 17.0) return;
-        // Slower admission under moderate load
-        int activeCount = (int) Bukkit.getOnlinePlayers().stream().filter(pl -> !this.queuedPlayers.contains(pl.getUniqueId())).count();
-        if (tps1m < 19.0 && activeCount >= this.getQueueCapacityThreshold()) return;
-        this.joinQueue.poll();
+        QueuedPlayer next;
+        Location returnLoc;
+        GameMode returnGm;
+        synchronized (this.joinQueueLock) {
+            next = this.joinQueue.peek();
+            if (next == null) return;
+            // Test-hold: /queuetest keeps the player in the queue for a fixed window.
+            Long holdUntil = this.queueTestHoldUntil.get(next.uuid);
+            if (holdUntil != null && System.currentTimeMillis() < holdUntil) return;
+            // Slower admission under moderate load
+            int activeCount = Math.max(0, Bukkit.getOnlinePlayers().size() - this.queuedPlayers.size());
+            if (tps1m < 19.0 && activeCount >= this.getQueueCapacityThreshold()) return;
+            this.joinQueue.poll();
+            this.queuedPlayers.remove(next.uuid);
+            this.queueTestHoldUntil.remove(next.uuid);
+            returnLoc = this.queueReturnLocations.remove(next.uuid);
+            returnGm = this.queueReturnGamemodes.remove(next.uuid);
+        }
         Player p = Bukkit.getPlayer(next.uuid);
-        this.queuedPlayers.remove(next.uuid);
-        this.queueTestHoldUntil.remove(next.uuid);
-        if (p == null || !p.isOnline()) return;
-        Location returnLoc = this.queueReturnLocations.remove(next.uuid);
-        GameMode returnGm = this.queueReturnGamemodes.remove(next.uuid);
-        if (returnLoc != null) p.teleport(returnLoc);
-        p.setGameMode(returnGm != null ? returnGm : GameMode.SURVIVAL);
-        // No "admitted" hotbar message — clear any lingering title and just let them in.
-        p.resetTitle();
-        this.resortQueue();
+        if (p == null) return;
+        PlatformScheduler.entityNow(this, p, () -> {
+            if (!p.isOnline()) return;
+            Runnable release = () -> {
+                if (!p.isOnline()) return;
+                p.setGameMode(returnGm != null ? returnGm : GameMode.SURVIVAL);
+                p.resetTitle();
+            };
+            if (returnLoc == null) {
+                release.run();
+            } else {
+                p.teleportAsync(returnLoc).whenComplete((teleported, failure) -> this.runOnPlayerThread(p, () -> {
+                    if (failure == null && Boolean.TRUE.equals(teleported)) p.setFallDistance(0.0f);
+                    release.run();
+                }));
+            }
+        }, null);
     }
 
-    private void tickQueueDisplay(UUID uuid) {
+    private void tickQueueDisplay(Player p) {
+        UUID uuid = p.getUniqueId();
         if (!this.queuedPlayers.contains(uuid)) return;
-        Player p = Bukkit.getPlayer(uuid);
-        if (p == null || !p.isOnline()) {
-            this.queuedPlayers.remove(uuid);
-            this.joinQueue.removeIf(q -> q.uuid.equals(uuid));
-            this.queueReturnLocations.remove(uuid);
-            this.queueReturnGamemodes.remove(uuid);
+        if (!p.isOnline()) {
+            synchronized (this.joinQueueLock) {
+                this.queuedPlayers.remove(uuid);
+                this.joinQueue.removeIf(q -> q.uuid.equals(uuid));
+                this.queueReturnLocations.remove(uuid);
+                this.queueReturnGamemodes.remove(uuid);
+            }
             return;
         }
         int pos = 1;
-        for (QueuedPlayer qp : this.joinQueue) {
-            if (qp.uuid.equals(uuid)) break;
-            pos++;
+        synchronized (this.joinQueueLock) {
+            for (QueuedPlayer qp : this.joinQueue) {
+                if (qp.uuid.equals(uuid)) break;
+                pos++;
+            }
         }
         int admitInterval = Math.max(1, this.getQueueAdmitIntervalTicks()) * 50;
         int etaSeconds = (pos * admitInterval) / 1000;
         String etaStr = etaSeconds >= 60 ? (etaSeconds / 60) + "m " + (etaSeconds % 60) + "s" : etaSeconds + "s";
         p.sendTitle("§7Position in queue §f#" + pos, "§7ETA: §f" + etaStr, 0, 40, 10);
-        // Keep player frozen in end void
-        org.bukkit.World endWorld = Bukkit.getWorld("world_the_end");
-        if (endWorld == null) endWorld = Bukkit.getWorlds().getFirst();
-        if (p.getLocation().getY() < 310 || !p.getWorld().equals(endWorld)) p.teleport(new Location(endWorld, 0, 320, 0));
-        this.runPlayerTaskLater(p, () -> this.tickQueueDisplay(uuid), 20L);
+        PlatformScheduler.globalNow(this, () -> {
+            World endWorld = Bukkit.getWorld("world_the_end");
+            if (endWorld == null && !Bukkit.getWorlds().isEmpty()) endWorld = Bukkit.getWorlds().getFirst();
+            if (endWorld == null) return;
+            World queueWorld = endWorld;
+            Location queueLocation = new Location(queueWorld, 0, 320, 0);
+            PlatformScheduler.entityNow(this, p, () -> {
+                if (!p.isOnline() || !this.queuedPlayers.contains(uuid)) return;
+                if (p.getLocation().getY() < 310 || !p.getWorld().equals(queueWorld)) p.teleportAsync(queueLocation);
+            }, null);
+        });
+        this.runPlayerTaskLater(p, () -> this.tickQueueDisplay(p), 20L);
     }
 
     @EventHandler(priority=EventPriority.LOWEST)
@@ -11795,13 +17895,20 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     int calcPerPlayerVd(Player p, double tps, int onlineCount) {
         int baseVd;
-        if (onlineCount <= 10) baseVd = 12; // low pop: full server view distance (no fog wall)
-        else if (onlineCount <= 15) baseVd = 10;
-        else if (onlineCount <= 25) baseVd = 9;
+        if (onlineCount <= 10) baseVd = 10; // low pop: spacious but bandwidth-friendly (chunk cost ~VD^2)
+        else if (onlineCount <= 15) baseVd = 9;
+        else if (onlineCount <= 25) baseVd = 8;
         else if (onlineCount <= 35) baseVd = 8;
         else if (onlineCount <= 45) baseVd = 7;
         else baseVd = 6;
         if (tps < 18.0) baseVd = Math.max(VD_MIN, baseVd - 1);
+        if (this.egressVdPenalty > 0) {
+            baseVd = Math.max(VD_MIN, baseVd - this.egressVdPenalty); // uplink near cap: shrink everyone
+            // Fairness: while the uplink is congested, a player who just RTP'd/teleported is streaming a
+            // fresh full view — trim them one extra so their burst doesn't starve the stationary players.
+            long lastRtp = this.rtpCooldowns.getOrDefault(p.getUniqueId(), 0L);
+            if (lastRtp > 0L && System.currentTimeMillis() - lastRtp < 20_000L) baseVd = Math.max(VD_MIN, baseVd - 1);
+        }
         int priority = this.getQueuePriority(p);
         int bonus = priority <= 3 ? 2 : priority <= 7 ? 1 : 0;
         return Math.min(VD_MAX, Math.max(VD_MIN, baseVd + bonus));
@@ -11842,10 +17949,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         double tps1m = tps.length > 0 ? tps[0] : 20.0;
         int online = Bukkit.getOnlinePlayers().size();
         for (Player p : Bukkit.getOnlinePlayers()) {
-            if (this.queuedPlayers.contains(p.getUniqueId())) continue;
-            if (this.vdThrottleOverrides.containsKey(p.getUniqueId())) continue; // admin override
-            int vd = this.calcPerPlayerVd(p, tps1m, online);
-            p.setViewDistance(vd);
+            PlatformScheduler.entityNow(this, p, () -> {
+                UUID id = p.getUniqueId();
+                if (!p.isOnline() || this.queuedPlayers.contains(id) || this.joinRamping.contains(id)
+                        || this.vdThrottleOverrides.containsKey(id)) return;
+                p.setViewDistance(this.calcPerPlayerVd(p, tps1m, online));
+            }, null);
         }
     }
 
@@ -11921,21 +18030,22 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void runAmethystExpirySweep() {
         long now = System.currentTimeMillis();
         for (Player p : Bukkit.getOnlinePlayers()) {
-            org.bukkit.inventory.PlayerInventory inv = p.getInventory();
-            for (int i = 0; i < inv.getSize(); ++i) {
-                ItemStack stack = inv.getItem(i);
-                if (!isAmethystToolStack(stack)) continue;
-                ItemMeta meta = stack.getItemMeta();
-                org.bukkit.persistence.PersistentDataContainer pdc = meta.getPersistentDataContainer();
-                Long expire = pdc.get(this.amethystExpireKey, PersistentDataType.LONG);
-                if (expire == null || expire <= 0L) continue;
-                if (now >= expire) {
+            PlatformScheduler.entityNow(this, p, () -> {
+                if (!p.isOnline()) return;
+                org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+                for (int i = 0; i < inv.getSize(); ++i) {
+                    ItemStack stack = inv.getItem(i);
+                    if (!isAmethystToolStack(stack)) continue;
+                    ItemMeta meta = stack.getItemMeta();
+                    org.bukkit.persistence.PersistentDataContainer pdc = meta.getPersistentDataContainer();
+                    Long expire = pdc.get(this.amethystExpireKey, PersistentDataType.LONG);
+                    if (expire == null || expire <= 0L || now < expire) continue;
                     String kind = pdc.get(this.amethystKindKey, PersistentDataType.STRING);
                     inv.setItem(i, null);
-                    p.sendActionBar((Component)Component.text("§cYour " + amethystDisplayName(kind != null ? kind : "tool") + " has expired"));
+                    p.sendActionBar(Component.text("§cYour " + amethystDisplayName(kind != null ? kind : "tool") + " has expired"));
                     p.playSound(p.getLocation(), Sound.ENTITY_ITEM_BREAK, 0.8f, 0.7f);
                 }
-            }
+            }, null);
         }
     }
 
@@ -12136,7 +18246,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 // not at purchase. Also push aAmethyst's self_destruct_time far into the future so it
                 // doesn't expire the tool ahead of our system.
                 final String kind = ft;
-                this.scheduleTask(() -> {
+                this.runPlayerTaskLater(player, () -> {
                     org.bukkit.NamespacedKey aamethystKey = new org.bukkit.NamespacedKey("aamethyst", "self_destruct_time");
                     long farFuture = System.currentTimeMillis() + 365L * 24L * 60L * 60L * 1000L;
                     for (org.bukkit.inventory.ItemStack stack : player.getInventory().getContents()) {
@@ -12158,7 +18268,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         stack.setItemMeta(meta);
                         applyAmethystLore(stack, kind, armAt);
                     }
-                }, 1, TimeUnit.SECONDS);
+                }, 20L);
                 player.sendActionBar(Component.text("§aYou purchased an Amethyst " + entryLabel + " for §f$" + this.fmtMoney(fCost) + "§a."));
                 player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.55f, 1.2f);
             });
@@ -12752,43 +18862,28 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void startPlaytimeAndAfkTask() {
-        Runnable tick = () -> {
+        PlatformScheduler.globalRepeating(this, () -> {
             long now = System.currentTimeMillis();
             for (Player player : Bukkit.getOnlinePlayers()) {
-                long elapsed;
-                UUID uuid = player.getUniqueId();
-                Long flushAt = this.lastPlaytimeFlush.put(uuid, now);
-                if (flushAt != null && (elapsed = (now - flushAt) / 1000L) > 0L) {
-                    long secs = elapsed;
-                    this.updatePlaytimeSeconds(uuid, secs);
-                }
+                PlatformScheduler.entityNow(this, player, () -> {
+                    if (!player.isOnline()) return;
+                    UUID uuid = player.getUniqueId();
+                    Long flushAt = this.lastPlaytimeFlush.put(uuid, now);
+                    long elapsed = flushAt == null ? 0L : (now - flushAt) / 1000L;
+                    long passiveShards = this.isPizzaPlusPlus(player) ? 2L : 1L;
+                    int minutes = this.shardBonusMinutes.merge(uuid, 1, Integer::sum);
+                    boolean bonus = minutes >= 10;
+                    if (bonus) this.shardBonusMinutes.put(uuid, 0);
+                    this.runAsyncTask(() -> {
+                        if (elapsed > 0L) this.updatePlaytimeSeconds(uuid, elapsed);
+                        this.depositShards(uuid, passiveShards + (bonus ? PLAYTIME_SHARD_BONUS : 0L));
+                    });
+                    if (bonus) player.sendMessage(this.legacyColorize(
+                        "&7You earned &d&l" + PLAYTIME_SHARD_BONUS + " shards&r&7 for playing the server"));
+                }, null);
             }
-            // Passive shards: a single global grant of +1 to everyone online, aligned to real-clock
-            // 10-minute slots (:00, :10, :20, ...), not per-minute accrual. The slot is epoch/600000,
-            // which lands on those wall-clock minutes for the host's zone; granting once per new slot
-            // means a player gets exactly one no matter which backend they are on. lastShardSlot is
-            // seeded to the current slot on boot (see field) so a restart never double-grants a slot.
-            long slot = now / 600000L;
-            if (this.lastShardSlot < 0L) {
-                // First tick after boot: adopt the current slot without granting, so the first grant
-                // lands on the next :X0 boundary rather than at a random moment after startup.
-                this.lastShardSlot = slot;
-            } else if (slot != this.lastShardSlot) {
-                this.lastShardSlot = slot;
-                for (Player player : Bukkit.getOnlinePlayers()) {
-                    this.depositShards(player.getUniqueId(), 1L);
-                    this.runOnPlayerThread(player, () -> player.sendMessage(this.legacyColorize(
-                        "&7You earned &d&l1 shard&r&7 for playing the server")));
-                }
-            }
-        };
-        if (this.foliaRuntime) {
-            Bukkit.getAsyncScheduler().runAtFixedRate((Plugin)this, st -> tick.run(), 60L, 60L, TimeUnit.SECONDS);
-        } else {
-            Bukkit.getScheduler().runTaskTimerAsynchronously((Plugin)this, tick, 1200L, 1200L);
-        }
+        }, 1200L, 1200L);
     }
-
     // Best-effort, idempotent schema statement. MySQL rejects some MariaDB-only syntax (e.g.
     // ADD COLUMN IF NOT EXISTS), so run each independently — one failure must not abort the rest.
     private void execSchema(Statement st, String sql) {
@@ -12904,7 +18999,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.ensureIgnoresSchema();
         this.ensureAdvancementSchema();
     }
-
     /**
      * Advancement sync store. One blob per player: the raw contents of that player's
      * advancements/&lt;uuid&gt;.json, which Paper rewrites to disk every time they earn something, so
@@ -13051,7 +19145,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.getLogger().warning("Failed creating follows schema: " + ex.getMessage());
         }
     }
-
     /*
      * Enabled aggressive block sorting
      * Enabled unnecessary exception pruning
@@ -13111,6 +19204,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 sb.append(key).append("_friends=1\n");
             }
         }
+        sb.append("rtp_animation=").append(values.getOrDefault("rtp_animation", true) ? '1' : '0').append('\n');
         return sb.toString();
     }
 
@@ -13135,6 +19229,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         for (SettingDefinition def : SETTINGS_DEFINITIONS) {
             values.put(def.key, def.defaultValue);
         }
+        values.put("rtp_animation", true);
         return values;
     }
 
@@ -13144,10 +19239,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return def.defaultValue;
         }
         // Dialog-only settings not in the 36-slot inventory grid; default OFF (opt-in).
-        if (key.equals("phantom_spawns") || key.equals("pearls_destroy_on_death")) return false;
+        if (key.equals("pearls_destroy_on_death")) return false;
         return true;
     }
-
     private boolean isSettingEnabledCached(UUID uuid, String key) {
         if (uuid == null || key == null) {
             return true;
@@ -13644,7 +19738,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             DialogType.multiAction(buttons).columns(end - start > 0 && (end - start) > 10 ? 2 : 1)
                 .exitAction(this.dialogButton(Component.text("Cancel", NamedTextColor.RED), null, 150,
                     pl -> this.openOrdersMyMenu(pl))).build());
-        player.showDialog(dialog);
+        DialogCompat.show(player, dialog);
     }
 
     private void pickOrderItem(Player player, Material m) {
@@ -13674,12 +19768,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         buttons.add(this.dialogButton(Component.text("Change Price", NamedTextColor.WHITE), null, 150,
             pl -> this.requestTextInput(pl, TextInputMode.ORDER_PRICE, "Type unit price in chat (supports 1k/1m/1b).")));
         buttons.add(this.dialogButton(Component.text("Create Order", NamedTextColor.GREEN), null, 150,
-            pl -> { pl.closeDialog(); this.createOrderFromBuilder(pl); }));
+            pl -> { DialogCloseCompat.close(pl); this.createOrderFromBuilder(pl); }));
         Dialog dialog = this.buildDialog(Component.text("Review Order", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Cancel", NamedTextColor.RED), null, 150,
                     pl -> this.openOrdersMyMenu(pl))).build());
-        player.showDialog(dialog);
+        DialogCompat.show(player, dialog);
     }
 
     private void handleOrdersMainClick(Player player, int slot, ItemStack item, ClickType clickType) {
@@ -14826,7 +20920,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             pl -> this.reopenAfterTextCancel(pl, mode));
         Dialog dialog = this.buildDialog(Component.text(mode.title, DIALOG_BRAND), body, inputs,
             DialogType.confirmation(confirm, cancel));
-        player.showDialog(dialog);
+        DialogCompat.show(player, dialog);
     }
 
     /** Cancel/blank from a text-input dialog: return to the menu that opened it. */
@@ -15077,7 +21171,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         });
     }
-
     private void openOrderDeliveriesMenu(Player player) {
         OrdersViewState state = this.ordersViewState.computeIfAbsent(player.getUniqueId(), id -> new OrdersViewState());
         boolean allDeliveries = state.selectedOrderId <= 0L;
@@ -15242,12 +21335,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         buttons.add(this.dialogButton(Component.text("Change Price", NamedTextColor.WHITE), null, 150,
             pl -> this.requestTextInput(pl, TextInputMode.AH_SELL_PRICE, "Type listing price in chat (supports 1k/1m/1b).")));
         buttons.add(this.dialogButton(Component.text("Create Listing", NamedTextColor.GREEN), null, 150,
-            pl -> { pl.closeDialog(); this.finalizeAhListing(pl); }));
+            pl -> { DialogCloseCompat.close(pl); this.finalizeAhListing(pl); }));
         Dialog dialog = this.buildDialog(Component.text("Review Listing", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Cancel", NamedTextColor.RED), null, 150,
                     pl -> this.openAhSellInsert(pl))).build());
-        player.showDialog(dialog);
+        DialogCompat.show(player, dialog);
     }
 
     private void finalizeAhListing(Player player) {
@@ -15646,7 +21739,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     insertDelivery.setString(2, fulfiller.toString());
                     insertDelivery.setInt(3, deliverable);
                     insertDelivery.setDouble(4, payout);
-                    insertDelivery.setBytes(5, this.serializeItem(storedItem));
+                    // EcoBot (SERVER) orders are a pure money sink — the buyer never claims the items,
+                    // so don't store the item blob (mass /sell would otherwise bloat the DB).
+                    if (SERVER_UUID.equals(creatorUuid)) insertDelivery.setNull(5, java.sql.Types.BLOB);
+                    else insertDelivery.setBytes(5, this.serializeItem(storedItem));
                     insertDelivery.executeUpdate();
                 }
                 conn.commit();
@@ -16010,7 +22106,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         });
     }
-
     // After a listing sells (or is cancelled), drop it from every other browsing player's cached
     // list and re-render their AH so the item disappears instantly for everyone, not just the buyer.
     private void broadcastAhListingSold(long listingId, UUID excludeUuid) {
@@ -16450,10 +22545,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         body.add(DialogBody.plainMessage(Component.text("Mob Kills: " + this.formatCompactNumber(s.mobsKilled), NamedTextColor.GRAY)));
         body.add(DialogBody.plainMessage(Component.text("Shop Spent: $" + this.formatMillions(s.shopSpent), NamedTextColor.GRAY)));
         body.add(DialogBody.plainMessage(Component.text("/Sell Earned: ", NamedTextColor.GRAY).append(Component.text("$" + this.formatMillions(s.sellEarned), NamedTextColor.GREEN))));
-        List<ActionButton> buttons = List.of(this.dialogButton(Component.text("Close", DIALOG_BRAND), null, 200, p -> p.closeDialog()));
+        List<ActionButton> buttons = List.of(this.dialogButton(Component.text("Close", DIALOG_BRAND), null, 200, p -> DialogCloseCompat.close(p)));
         Dialog dialog = this.buildDialog(Component.text(targetName + "'s Stats", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(1).exitAction(this.dialogButton(Component.text("Close"), null, 200, null)).build());
-        viewer.showDialog(dialog);
+        DialogCompat.show(viewer, dialog);
     }
 
     private ItemStack buildStatItem(Material material, String label, String value, String description) {
@@ -16517,7 +22612,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return new StatsSnapshot(stats.money, stats.shards, stats.kills, stats.deaths, livePlaytime, stats.blocksPlaced, stats.blocksBroken, stats.mobsKilled, stats.shopSpent, stats.sellEarned);
     }
-
     private long safeStatistic(Player player, Statistic statistic) {
         if (player == null || statistic == null) {
             return 0L;
@@ -16723,28 +22817,42 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     }
                     return;
                 }
-                if (event.getPacketType() == PacketType.Play.Server.EXPLOSION && PizzaNetworkCore.this.shouldSuppressExplosionPacket(viewerId)) {
-                    event.setCancelled(true);
-                    // EXPLOSION packet contains the sound — restore it manually when sound is enabled
-                    if (PizzaNetworkCore.this.isSettingEnabledCached(viewerId, "explosion_sounds")) {
-                        double ex, ey, ez;
-                        try {
-                            ex = (double) packet.getDoubles().readSafely(0);
-                            ey = (double) packet.getDoubles().readSafely(1);
-                            ez = (double) packet.getDoubles().readSafely(2);
-                        } catch (Exception ignored) {
-                            ex = viewer.getLocation().getX();
-                            ey = viewer.getLocation().getY();
-                            ez = viewer.getLocation().getZ();
-                        }
-                        final double fx = ex, fy = ey, fz = ez;
-                        Bukkit.getScheduler().runTask(PizzaNetworkCore.this, () -> {
-                            if (viewer.isOnline()) {
-                                viewer.playSound(new org.bukkit.Location(viewer.getWorld(), fx, fy, fz),
-                                    Sound.ENTITY_GENERIC_EXPLODE, org.bukkit.SoundCategory.BLOCKS, 4.0f, 1.0f);
-                            }
-                        });
+                if (event.getPacketType() == PacketType.Play.Server.EXPLOSION) {
+                    // The EXPLOSION packet bundles BOTH the explosion particle and its sound. To make the
+                    // "Explosion Particles" and "Explosion Sounds" toggles independent, cancel the packet
+                    // whenever EITHER needs changing, then manually re-emit only the component that should
+                    // remain. When neither is suppressed (the default) we pass the vanilla packet through
+                    // untouched so normal crystal/anchor fights look exactly like vanilla.
+                    boolean suppressParticle = PizzaNetworkCore.this.shouldSuppressExplosionParticle(viewerId);
+                    boolean suppressSound = !PizzaNetworkCore.this.isSettingEnabledCached(viewerId, "explosion_sounds");
+                    if (!suppressParticle && !suppressSound) {
+                        return;
                     }
+                    event.setCancelled(true);
+                    double ex, ey, ez;
+                    try {
+                        ex = (double) packet.getDoubles().readSafely(0);
+                        ey = (double) packet.getDoubles().readSafely(1);
+                        ez = (double) packet.getDoubles().readSafely(2);
+                    } catch (Exception ignored) {
+                        ex = viewer.getLocation().getX();
+                        ey = viewer.getLocation().getY();
+                        ez = viewer.getLocation().getZ();
+                    }
+                    final double fx = ex, fy = ey, fz = ez;
+                    final boolean keepParticle = !suppressParticle;
+                    final boolean keepSound = !suppressSound;
+                    PlatformScheduler.entityNow(PizzaNetworkCore.this, viewer, () -> {
+                        if (!viewer.isOnline()) return;
+                        org.bukkit.Location loc = new org.bukkit.Location(viewer.getWorld(), fx, fy, fz);
+                        if (keepParticle) {
+                            try { viewer.spawnParticle(org.bukkit.Particle.EXPLOSION_EMITTER, loc, 1); } catch (Throwable ignored) {}
+                        }
+                        if (keepSound) {
+                            viewer.playSound(loc, Sound.ENTITY_GENERIC_EXPLODE, org.bukkit.SoundCategory.BLOCKS, 4.0f, 1.0f);
+                        }
+                    }, null);
+                    return;
                 }
             }
         });
@@ -16797,7 +22905,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return this.shouldSuppressParticleName(viewerId, String.valueOf(legacyParticle));
     }
 
-    private boolean shouldSuppressExplosionPacket(UUID viewerId) {
+    /** The explosion PARTICLE should be hidden if the master toggle is off, or either optimizer is on. */
+    private boolean shouldSuppressExplosionParticle(UUID viewerId) {
         return !this.isSettingEnabledCached(viewerId, "explosion_particles") || this.isSettingEnabledCached(viewerId, "fast_crystals") || this.isSettingEnabledCached(viewerId, "fast_anchor");
     }
 
@@ -16897,23 +23006,34 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 return original;
             }
         }
-        // Show UNIT worth ("each"). The lore must be identical regardless of stack count:
-        // since MC 1.20.5 the client predicts stack merging by comparing item components,
-        // so any amount-dependent lore (the old TOTAL worth) made equal items look
-        // different and broke client-side stacking. Unit worth is amount-independent,
-        // so no inventory resync hack is needed.
-        double worth = this.computeUnitWorth(original);
-        if (worth <= 0.0) {
+        // TOTAL pooled worth for the stack. This lore is PACKET-ONLY (applied to a clone sent to the
+        // client; the real item is never touched), so the actual items always stack server-side no
+        // matter what the lore says \u2014 the old "items won't stack" bug came from writing lore onto the
+        // REAL items, which no longer happens. Shulkers show the summed worth of their contents (+box),
+        // recomputed on every packet so it updates as the contents change.
+        Material type = original.getType();
+        boolean isShulker = type.name().contains("SHULKER") && original.hasItemMeta()
+            && original.getItemMeta() instanceof BlockStateMeta;
+        double unit = isShulker ? this.getItemWorth(original) : this.computeUnitWorth(original);
+        if (unit <= 0.0) {
             return original;
         }
+        int amount = Math.max(1, original.getAmount());
+        double total = unit * amount;
         ItemStack clone = original.clone();
         ItemMeta meta = clone.getItemMeta();
         if (meta == null) {
             return clone;
         }
         ArrayList<String> lore = meta.hasLore() ? new ArrayList<String>(meta.getLore()) : new ArrayList<String>();
-        lore.removeIf(l -> l != null && (l.startsWith("\u00a7a$") || l.startsWith("\u00a77Worth: ")));
-        lore.add("\u00a77Worth: \u00a7a$" + this.fmtMoney(worth) + " \u00a77each");
+        lore.removeIf(l -> l != null && (l.startsWith("\u00a7a$") || l.startsWith("\u00a77Worth: ") || l.startsWith("\u00a77Contents worth: ")));
+        if (isShulker) {
+            lore.add("\u00a77Contents worth: \u00a7a$" + this.fmtMoney(total));
+        } else if (amount > 1) {
+            lore.add("\u00a77Worth: \u00a7a$" + this.fmtMoney(total) + " \u00a77(\u00a7a$" + this.fmtMoney(unit) + " \u00a77each)");
+        } else {
+            lore.add("\u00a77Worth: \u00a7a$" + this.fmtMoney(total));
+        }
         meta.setLore(lore);
         clone.setItemMeta(meta);
         return clone;
@@ -16984,14 +23104,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             // buttons carry a real click action. A null/exitAction button does not reliably
             // close or fire under afterAction NONE — that was why the buttons "did nothing".
             ActionButton confirm = this.dialogButton(Component.text("Confirm", NamedTextColor.RED), null, 150,
-                p -> { p.closeDialog(); p.setHealth(0.0); });
+                p -> { DialogCloseCompat.close(p); p.setHealth(0.0); });
             ActionButton cancel = this.dialogButton(Component.text("Cancel", NamedTextColor.GRAY), null, 150,
-                p -> p.closeDialog());
+                p -> DialogCloseCompat.close(p));
             Dialog dialog = this.buildDialog(Component.text("Kill Yourself?", DIALOG_BRAND),
                 List.of(DialogBody.plainMessage(Component.text("Are you sure you want to kill yourself?", NamedTextColor.GRAY))),
                 List.of(),
                 DialogType.confirmation(confirm, cancel));
-            player.showDialog(dialog);
+            DialogCompat.show(player, dialog);
             return;
         }
         Inventory inv = Bukkit.createInventory(null, 27, "§cKill Confirmation");
@@ -17022,6 +23142,21 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // ---- Leaderboards (Money / Deaths / Playtime / Blocks Placed / Blocks Broken / Mobs Killed / Sell) ----
     // fmt: 'm' = money ($), 'n' = compact count, 't' = playtime days/hours.
     private record LbCategory(String id, String title, Material icon, String sql, char fmt) {}
+
+    private record LeaderboardViewerRank(int rank, double value) {}
+
+    // The cache carries all data needed to render a board without querying from a player/world task.
+    // Future hub categories can reuse this shape with their own batched rank query.
+    private record MoneyLeaderboardSnapshot(List<BalanceLookupResult> top, Map<UUID, LeaderboardViewerRank> ranks) {
+        private MoneyLeaderboardSnapshot {
+            top = List.copyOf(top == null ? List.of() : top);
+            ranks = Map.copyOf(ranks == null ? Map.of() : ranks);
+        }
+
+        private static MoneyLeaderboardSnapshot empty() {
+            return new MoneyLeaderboardSnapshot(List.of(), Map.of());
+        }
+    }
 
     private static final List<LbCategory> LB_CATEGORIES = List.of(
         new LbCategory("money", "Money", Material.GOLD_INGOT,
@@ -17092,7 +23227,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 .columns(3)
                 .exitAction(this.dialogButton(Component.text("Close"), null, 150, null))
                 .build());
-        player.showDialog(dialog);
+        DialogCompat.show(player, dialog);
     }
 
     /** Top-10 dialog for one category: ranked entries (click = view profile), Back, View Full Leaderboard. */
@@ -17126,7 +23261,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         .columns(1)
                         .exitAction(this.dialogButton(Component.text("Back"), null, 300, this::openLeaderboardPicker))
                         .build());
-                player.showDialog(dialog);
+                DialogCompat.show(player, dialog);
             });
         });
     }
@@ -17617,18 +23752,135 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
+    private static final class RtpAnimation {
+        private final Location origin;
+        private final Location destination;
+        private TaskHandle task;
+        private boolean transferring;
+        private Location arrival;
+
+        private RtpAnimation(Location origin, Location destination) {
+            this.origin = origin;
+            this.destination = destination;
+        }
+    }
+
     // One player waiting in the RTP duel queue.
     private static final class RtpQueueEntry {
         private final int gearScore;
+        private final long requestGeneration;
+        private final long sessionGeneration;
         private final long enqueuedAt;
         private final Sound disc;
+        private final Player sessionPlayer;
+        private volatile boolean active = true;
 
-        private RtpQueueEntry(int gearScore, long enqueuedAt, Sound disc) {
+        private RtpQueueEntry(int gearScore, long requestGeneration, long sessionGeneration,
+                long enqueuedAt, Sound disc, Player sessionPlayer) {
             this.gearScore = gearScore;
+            this.requestGeneration = requestGeneration;
+            this.sessionGeneration = sessionGeneration;
             this.enqueuedAt = enqueuedAt;
             this.disc = disc;
+            this.sessionPlayer = sessionPlayer;
         }
     }
+    private static final class RtpDuelQueueSession {
+        private final Player player;
+        private final long generation;
+
+        private RtpDuelQueueSession(Player player, long generation) {
+            this.player = player;
+            this.generation = generation;
+        }
+    }
+
+    private static final class RtpDuelEnqueueRequest {
+        private final UUID uuid;
+        private final long requestGeneration;
+        private final long sessionGeneration;
+        private final long requestedAt;
+        private final Player player;
+
+        private RtpDuelEnqueueRequest(UUID uuid, long requestGeneration, long sessionGeneration,
+                long requestedAt, Player player) {
+            this.uuid = uuid;
+            this.requestGeneration = requestGeneration;
+            this.sessionGeneration = sessionGeneration;
+            this.requestedAt = requestedAt;
+            this.player = player;
+        }
+    }
+
+    private static final class RtpDuelQueueCandidate {
+        private final UUID uuid;
+        private final Player player;
+        private final RtpQueueEntry entry;
+
+        private RtpDuelQueueCandidate(UUID uuid, Player player, RtpQueueEntry entry) {
+            this.uuid = uuid;
+            this.player = player;
+            this.entry = entry;
+        }
+    }
+
+    private static final class RtpDuelQueueScan {
+        private final long generation;
+        private final long startedAt;
+        private final long timeoutMs;
+        private final List<RtpDuelQueueCandidate> candidates;
+        private final Map<UUID, RtpDuelEligibility> results = new HashMap<>();
+        private boolean finished;
+
+        private RtpDuelQueueScan(long generation, long startedAt, long timeoutMs,
+                List<RtpDuelQueueCandidate> candidates) {
+            this.generation = generation;
+            this.startedAt = startedAt;
+            this.timeoutMs = timeoutMs;
+            this.candidates = List.copyOf(candidates);
+        }
+    }
+
+    private record RtpDuelEligibility(long requestGeneration, long sessionGeneration, boolean enabled,
+                                      boolean online, boolean combatTagged, boolean participating, int gearScore) { }
+
+    private static final class RtpDuelMatch {
+        private enum State {
+            SEARCHING, ANIMATING, VERIFYING, SUCCEEDED, FAILED, CANCELLED;
+
+            private boolean terminal() {
+                return this == SUCCEEDED || this == FAILED || this == CANCELLED;
+            }
+        }
+
+        private final UUID a;
+        private final UUID b;
+        private final long startedAt;
+        private final long deadline;
+        private final RtpQueueEntry entryA;
+        private final RtpQueueEntry entryB;
+        // The global scheduler is the sole writer of these fields/sets; state is volatile only so
+        // entity and region callbacks can cheaply reject work after a terminal transition.
+        private volatile State state = State.SEARCHING;
+        private final java.util.Set<UUID> preparedParticipants = new java.util.HashSet<>();
+        private final java.util.Set<UUID> animationParticipants = new java.util.HashSet<>();
+        private final java.util.Set<UUID> verifiedParticipants = new java.util.HashSet<>();
+        private float startYaw;
+        private World searchWorld;
+        private RtpDuelSafeSpot safeSpot;
+
+        private RtpDuelMatch(UUID a, UUID b, RtpQueueEntry entryA, RtpQueueEntry entryB) {
+            this.a = a; this.b = b;
+            this.startedAt = System.currentTimeMillis();
+            this.deadline = this.startedAt + 30000L;
+            this.entryA = entryA;
+            this.entryB = entryB;
+        }
+        private UUID other(UUID id) { return id.equals(this.a) ? this.b : this.a; }
+        private RtpQueueEntry entry(UUID id) { return id.equals(this.a) ? this.entryA : this.entryB; }
+    }
+
+    private record RtpDuelSafeSpot(double x, double y, double z, float yaw, float pitch) { }
 
     // A thrown ender pearl captured at logout, re-spawned at the owner's next login.
     private static final class StoredPearl {
@@ -17814,6 +24066,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private record PlayerNotificationEntry(long id, String message, String action) {
+    }
+
+    private record NotificationRecipient(UUID uuid, long sessionGeneration, long lifecycleGeneration) {
+    }
+
+    private record RoutedPlayerNotification(String message, String targetServer) {
     }
 
     private static final class HudSnapshot {
@@ -18403,7 +24661,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (prices == null) return;
         try (Connection conn = this.openSyncConnection()) {
             java.util.Map<String, Integer> currentCounts = new java.util.HashMap<>();
-            try (PreparedStatement ps = conn.prepareStatement("SELECT item_key, COUNT(*) FROM order_listings WHERE creator_uuid=? AND status='ACTIVE' GROUP BY item_key")) {
+            try (PreparedStatement ps = conn.prepareStatement("SELECT item_key, COUNT(*) FROM order_listings WHERE creator_uuid=? AND status='ACTIVE' AND (expires_at IS NULL OR expires_at > NOW()) GROUP BY item_key")) {
                 ps.setString(1, SERVER_UUID);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) currentCounts.put(rs.getString(1), rs.getInt(2));
@@ -18477,6 +24735,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void runAutoDeliverPass(int limit) {
         if (this.autoEcoPaused) return;
+        // EcoBot auto-selling INTO player buy orders makes them fill up and vanish from "Your Orders"
+        // on their own. Off by default so player orders are persistent standing orders, filled only by
+        // real players selling into them (or cancelled by the owner). EcoBot still POSTS buy orders and
+        // players still /sell into those — that side of the economy is unaffected.
+        if (!this.settings.getBoolean("ecobot.fill_player_orders", false)) return;
         // Only deliver to orders at least 5 minutes old so players can see their own orders first
         String deliverSql = "SELECT ol.id, ol.item_key, ol.amount_total - ol.amount_filled AS remaining, ol.unit_price, ol.amount_total " +
             "FROM order_listings ol " +
@@ -18591,8 +24854,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void postServerOrder(Connection conn, Material mat, int totalAmount, double unitPrice) {
+        // No expiry (NULL): EcoBot buy orders are a persistent sink that stays until filled. A finite
+        // expiry previously lapsed and left ACTIVE-but-expired rows that were invisible to /orders and
+        // /sell yet still blocked re-posting (they counted as "already have one").
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO order_listings (creator_uuid,item_key,amount_total,amount_filled,unit_price,status,expires_at) VALUES (?,?,?,0,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 80 DAY))")) {
+                "INSERT INTO order_listings (creator_uuid,item_key,amount_total,amount_filled,unit_price,status,expires_at) VALUES (?,?,?,0,?,'ACTIVE',NULL)")) {
             ps.setString(1, SERVER_UUID);
             ps.setString(2, mat.name());
             ps.setInt(3, totalAmount);
@@ -18886,6 +25152,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void handleTpaCommand(Player requester, String targetName, String tpaType) {
+        if (this.activeDuels.containsKey(requester.getUniqueId())) {
+            requester.sendActionBar(Component.text("§cTeleport requests are unavailable during a duel."));
+            return;
+        }
         Player target = this.fuzzyOnlinePlayer(requester, targetName);   // typo-tolerant name match
         if (target == null) {
             // Reached only when the cross-server path above already declined, so the target is
@@ -18915,10 +25185,24 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.tpaRequestExpiry.put(target.getUniqueId(), now + 60000);
         this.tpaCooldowns.put(requester.getUniqueId(), now);
 
-        // TPA auto-accept (/tpauto or the /settings toggle): accept immediately through the normal
-        // /tpaccept path so combat checks, countdown and sounds all still apply. The per-follow
-        // toggle is the second way in — see shouldAutoAcceptTpa.
-        if (this.shouldAutoAcceptTpa(target.getUniqueId(), requester.getUniqueId())) {
+        // Persistent, clickable CHAT notification — ALWAYS sent (even when auto-accepted below), so the
+        // request always shows in chat. The action bar is fleeting.
+        String tpaVerb = "tpa".equals(tpaType) ? " wants to teleport to you." : " wants you to teleport to them.";
+        Component tpaChat = this.legacyColorize("&#00BFFF" + requester.getName() + "§7" + tpaVerb + " ")
+            .append(Component.text("[Accept]", NamedTextColor.GREEN)
+                .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand("/tpaccept " + requester.getName()))
+                .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text("Click to accept"))))
+            .append(Component.text(" "))
+            .append(Component.text("[Deny]", NamedTextColor.RED)
+                .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand("/tpadeny " + requester.getName()))
+                .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text("Click to deny"))));
+        target.sendMessage(tpaChat);
+
+        // TPA auto-accept: ONLY for /tpa (never /tpahere — you shouldn't be yanked to someone else
+        // automatically). Per-friend toggle (target auto-accepts THIS requester) or the global /tpauto.
+        if ("tpa".equals(tpaType)
+                && (this.isSettingEnabledCached(target.getUniqueId(), "tpa_auto_accept")
+                    || this.targetAutoAcceptsTpaFrom(target.getUniqueId(), requester.getUniqueId()))) {
             this.hotbarWithSound(requester, "&#00BFFF" + target.getName() + " §7auto-accepts teleport requests",
                 Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.9f);
             this.runOnPlayerThread(target, () -> Bukkit.dispatchCommand(target, "tpaccept " + requester.getName()));
@@ -18939,7 +25223,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.hotbarWithSound(requester, "&#00BFFFYou sent a teleport request to §7" + target.getName(),
             Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.9f);
 
-        this.scheduleTask(() -> {
+        PlatformScheduler.globalLater(this, () -> {
             if (this.pendingTpaRequests.get(target.getUniqueId()) == request) {
                 this.pendingTpaRequests.remove(target.getUniqueId());
                 this.tpaRequestExpiry.remove(target.getUniqueId());
@@ -18951,9 +25235,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     }
                 });
             }
-        }, 60, TimeUnit.SECONDS);
+        }, 60L * 20L);
     }
-
     private void handleTpaCancelCommand(Player requester) {
         boolean found = false;
         for (java.util.Iterator<Map.Entry<UUID, TPARequest>> it = this.pendingTpaRequests.entrySet().iterator(); it.hasNext(); ) {
@@ -19436,15 +25719,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
-    private void scheduleTask(Runnable task, long delay, TimeUnit unit) {
-        if (this.foliaRuntime) {
-            Bukkit.getAsyncScheduler().runDelayed(this, scheduledTask -> task.run(), delay, unit);
-        } else {
-            long delayTicks = unit.toMillis(delay) / 50;
-            Bukkit.getScheduler().scheduleSyncDelayedTask(this, task, delayTicks);
-        }
-    }
-
     private void openSuspiciousPlayersGui(Player viewer) {
         SuspiciousPlayersGuiState state = this.suspiciousPlayersGuiState.computeIfAbsent(viewer.getUniqueId(), k -> new SuspiciousPlayersGuiState());
         this.openSuspiciousPlayersGui(viewer, state.page);
@@ -19651,8 +25925,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (fp < totalPages) buttons.add(this.dialogButton(Component.text("Next →"), null, 100, p -> this.openSuspiciousPlayersDialog(p, fp + 1)));
                 Dialog dialog = this.buildDialog(Component.text("Suspicious Players", DIALOG_BRAND), body, List.of(),
                     DialogType.multiAction(buttons).columns(2)
-                        .exitAction(this.dialogButton(Component.text("Close"), null, 150, p -> p.closeDialog())).build());
-                viewer.showDialog(dialog);
+                        .exitAction(this.dialogButton(Component.text("Close"), null, 150, p -> DialogCloseCompat.close(p))).build());
+                DialogCompat.show(viewer, dialog);
             });
         });
     }
@@ -19664,7 +25938,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 try {
                     Player t = Bukkit.getPlayer(UUID.fromString(targetUuid));
                     if (t != null && t.isOnline()) {
-                        p.closeDialog();
+                        DialogCloseCompat.close(p);
                         p.teleport(t);
                         p.sendActionBar(Component.text("§aTeleported to " + t.getName()));
                     } else {
@@ -19675,7 +25949,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
             }),
             this.dialogButton(Component.text("Punish", NamedTextColor.RED), "Open the punish menu", 150, p -> {
-                p.closeDialog();
+                DialogCloseCompat.close(p);
                 p.performCommand("punish " + name);
             }),
             this.dialogButton(Component.text("Clear All Flags", NamedTextColor.YELLOW), "Remove from the suspicious list", 150,
@@ -19685,12 +25959,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150,
                     p -> this.openSuspiciousPlayersDialog(p,
                         this.suspiciousPlayersGuiState.computeIfAbsent(p.getUniqueId(), k -> new SuspiciousPlayersGuiState()).page))).build());
-        viewer.showDialog(dialog);
+        DialogCompat.show(viewer, dialog);
     }
 
     private void openSuspiciousClearConfirmDialog(Player viewer, String targetUuid, String name) {
         ActionButton confirm = this.dialogButton(Component.text("Confirm Clear", NamedTextColor.RED), null, 150, p -> {
-            p.closeDialog();
+            DialogCloseCompat.close(p);
             this.runAsyncTask(() -> {
                 int deleted = this.clearSuspiciousFlags(targetUuid);
                 this.runOnPlayerThread(p, () -> {
@@ -19705,7 +25979,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Clear flags?", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text("Delete ALL anticheat flags for " + name + "? This cannot be undone.", NamedTextColor.GRAY))),
             List.of(), DialogType.confirmation(confirm, cancel));
-        viewer.showDialog(dialog);
+        DialogCompat.show(viewer, dialog);
     }
 
     // ======================================================================
@@ -19821,11 +26095,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return w != null ? w.getName() : null;
     }
 
-    // /region start: give the closed world's players the FULL limbo treatment (snapshot + region
-    // copy + transfer) instead of dumping them at the evac spawn. Mirrors the /limbomaint prep flow
-    // but scoped to one world and WITHOUT any SMP shutdown. The limbo holds them (closed_worlds
-    // signal) until /region end, then returns them to their exact spot. Falls back to spawn-evac
-    // if the limbo is unreachable.
+    // /region start: save the affected players, snapshot their return state, and move them into the
+    // static limbo hub. The limbo holds them until /region end, then the normal sync path restores
+    // their exact SMP state. Falls back to spawn evacuation if limbo is unreachable.
     private int sendWorldToLimbo(String worldName) {
         org.bukkit.World from = Bukkit.getWorld(worldName);
         if (from == null) return 0;
@@ -19849,62 +26121,24 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (affected.isEmpty()) return 0;
         try { from.save(); } catch (Exception ignored) {}
-        int vd = Bukkit.getViewDistance() + 1;
-        final java.io.File limboRegionDir = new java.io.File(this.settings.getString("limbo.region-dir",
-            "../limbo/limbo/region"));
-        final java.io.File limboAdvDir = new java.io.File(this.settings.getString("limbo.advancements-dir",
-            "../limbo/limbo/advancements"));
-        final java.io.File mainWorldFolder = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getWorldFolder();
-        final java.io.File regionDir = this.regionFolder(from);
-        final java.util.List<int[]> copyJobs = new java.util.ArrayList<>();
-        final java.util.List<java.io.File> advSrc = new java.util.ArrayList<>();
         final java.util.List<UUID> moveIds = new java.util.ArrayList<>();
         for (Player pl : affected) {
             try {
                 pl.saveData();                     // authoritative data to disk FIRST
-                this.captureLimboSnapshot(pl);     // visual copy for the limbo
-                int cx = pl.getLocation().getBlockX() >> 4, cz = pl.getLocation().getBlockZ() >> 4;
-                copyJobs.add(new int[]{(cx - vd) >> 5, (cx + vd) >> 5, (cz - vd) >> 5, (cz + vd) >> 5});
-                if (mainWorldFolder != null) {
-                    java.io.File af = new java.io.File(mainWorldFolder, "advancements/" + pl.getUniqueId() + ".json");
-                    if (af.isFile()) advSrc.add(af);
-                }
+                this.captureLimboSnapshot(pl);     // return state; limbo always places them at its hub
                 moveIds.add(pl.getUniqueId());
             } catch (Exception ex) {
                 this.getLogger().warning("[Region] prep failed for " + pl.getName() + ": " + ex.getMessage());
             }
         }
-        this.runAsyncTask(() -> {
-            try {
-                if (!limboRegionDir.isDirectory()) limboRegionDir.mkdirs();
-                if (!limboAdvDir.isDirectory()) limboAdvDir.mkdirs();
-                for (java.io.File af : advSrc) {
-                    try { java.nio.file.Files.copy(af.toPath(), new java.io.File(limboAdvDir, af.getName()).toPath(),
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING); } catch (Exception ignored) {}
-                }
-                if (regionDir != null && regionDir.isDirectory()) {
-                    for (int[] j : copyJobs) {
-                        for (int rx = j[0]; rx <= j[1]; rx++) for (int rz = j[2]; rz <= j[3]; rz++) {
-                            java.io.File src = new java.io.File(regionDir, "r." + rx + "." + rz + ".mca");
-                            if (!src.isFile()) continue;
-                            try { java.nio.file.Files.copy(src.toPath(), new java.io.File(limboRegionDir, src.getName()).toPath(),
-                                java.nio.file.StandardCopyOption.REPLACE_EXISTING); } catch (Exception ignored) {}
-                        }
-                    }
-                }
-            } catch (Exception ex) { this.getLogger().warning("[Region] limbo copy failed: " + ex.getMessage()); }
-            Bukkit.getScheduler().runTask((Plugin)this, () -> {
-                for (UUID id : moveIds) {
-                    Player pl = Bukkit.getPlayer(id);
-                    if (pl != null && pl.isOnline() && pl.getWorld().getName().equals(worldName)) {
-                        try { this.connectToServer(pl, limbo); } catch (Exception ignored) {}
-                    }
-                }
-            });
-        });
-        return affected.size();
+        for (UUID id : moveIds) {
+            Player pl = Bukkit.getPlayer(id);
+            if (pl != null && pl.isOnline() && pl.getWorld().getName().equals(worldName)) {
+                try { this.connectToServer(pl, limbo); } catch (Exception ignored) {}
+            }
+        }
+        return moveIds.size();
     }
-
     // Publish the closed-world set to the limbo's control channel so it HOLDS players whose snapshot
     // world is closed (SMP being up would otherwise return them) and releases them on reopen.
     private void publishClosedWorlds() {
@@ -20009,8 +26243,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         Dialog dialog = this.buildDialog(Component.text("Staff Admin", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
-                .exitAction(this.dialogButton(Component.text("Close"), null, 150, q -> q.closeDialog())).build());
-        p.showDialog(dialog);
+                .exitAction(this.dialogButton(Component.text("Close"), null, 150, q -> DialogCloseCompat.close(q))).build());
+        DialogCompat.show(p, dialog);
     }
 
     // Dev-only: grant/revoke pizzasmp.manage for online staff (the "dev grants access via UI" flow).
@@ -20037,7 +26271,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             ? Component.text("No other staff online to grant.", NamedTextColor.GRAY)
             : Component.text("Grant or revoke backend (/manage) access for online staff.", NamedTextColor.GRAY)));
         buttons.add(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole));
-        p.showDialog(this.buildDialog(Component.text("Manage Access", NamedTextColor.LIGHT_PURPLE), body, List.of(),
+        DialogCompat.show(p, this.buildDialog(Component.text("Manage Access", NamedTextColor.LIGHT_PURPLE), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build()));
     }
@@ -20047,6 +26281,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void openManageConsole(Player p) {
         if (!p.hasPermission("pizzasmp.manage")) {
             p.sendActionBar(this.legacyColorize("&cYou do not have backend management access."));
+            return;
+        }
+        if (!this.useDialogUi(p)) {
+            this.openManageLegacy(p);
             return;
         }
         double tps = Bukkit.getTPS()[0];
@@ -20069,8 +26307,27 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.dialogButton(Component.text("Data & Logs", DIALOG_BRAND), null, 150, this::openAdminData));
         Dialog dialog = this.buildDialog(Component.text("Server Management", NamedTextColor.LIGHT_PURPLE), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
-                .exitAction(this.dialogButton(Component.text("Close"), null, 150, q -> q.closeDialog())).build());
-        p.showDialog(dialog);
+                .exitAction(this.dialogButton(Component.text("Close"), null, 150, q -> DialogCloseCompat.close(q))).build());
+        if (!DialogCompat.show(p, dialog)) this.openManageLegacy(p);
+    }
+    private void openManageLegacy(Player p) {
+        Inventory inventory = Bukkit.createInventory(null, 54, TITLE_ADMIN);
+        ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, "§8", null, List.of());
+        for (int slot = 0; slot < inventory.getSize(); slot++) inventory.setItem(slot, filler);
+        inventory.setItem(10, this.namedWithLore(Material.REDSTONE_BLOCK, "§cMaintenance ON", "adm_maint_on", List.of()));
+        inventory.setItem(11, this.namedWithLore(Material.EMERALD_BLOCK, "§aMaintenance OFF", "adm_maint_off", List.of()));
+        inventory.setItem(12, this.namedWithLore(Material.HOPPER, "§fJoin Queue", "adm_queue", List.of("§7Toggle queue admission")));
+        inventory.setItem(13, this.namedWithLore(Material.END_PORTAL_FRAME, "§fEnd RTP", "adm_end", List.of("§7Toggle End access")));
+        inventory.setItem(14, this.namedWithLore(Material.EMERALD, "§fEcoBot", "adm_eco", List.of("§7Pause or resume")));
+        inventory.setItem(15, this.namedWithLore(Material.LIME_DYE, "§aView Distance +1", "adm_vd_up", List.of()));
+        inventory.setItem(16, this.namedWithLore(Material.RED_DYE, "§cView Distance −1", "adm_vd_down", List.of()));
+        inventory.setItem(19, this.namedWithLore(Material.GRASS_BLOCK, "§fWorld Access", "adm_worlds", List.of()));
+        inventory.setItem(20, this.namedWithLore(Material.GOLD_INGOT, "§fEconomy & Ranks", "adm_economy", List.of()));
+        inventory.setItem(21, this.namedWithLore(Material.COMPARATOR, "§fDiagnostics", "adm_diag", List.of()));
+        inventory.setItem(22, this.namedWithLore(Material.REDSTONE, "§fGameplay Tuning", "adm_tuning", List.of()));
+        inventory.setItem(23, this.namedWithLore(Material.KNOWLEDGE_BOOK, "§fData & Logs", "adm_data", List.of()));
+        inventory.setItem(49, this.namedWithLore(Material.BARRIER, "§7Close", "adm_close", List.of()));
+        p.openInventory(inventory);
     }
 
     // ===== Legacy (inventory) server console for Bedrock / pre-1.21.6 clients =====
@@ -20291,14 +26548,23 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             case "adm_restart" -> this.openAdminLegacyConfirm(p, true);
             case "adm_stop" -> this.openAdminLegacyConfirm(p, false);
             case "adm_do_restart" -> {
-                p.closeInventory(); Bukkit.broadcast(Component.text("§e§lServer restarting in 5 seconds..."));
-                this.spawnRelaunch(); Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
-                Bukkit.getScheduler().runTaskLater((Plugin) this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "stop"), 100L);
+                p.closeInventory();
+                PlatformScheduler.globalNow(this, () -> {
+                    Bukkit.broadcast(Component.text("§e§lServer restarting in 5 seconds..."));
+                    this.spawnRelaunch();
+                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
+                    PlatformScheduler.globalLater(this,
+                        () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "stop"), 100L);
+                });
             }
             case "adm_do_stop" -> {
-                p.closeInventory(); Bukkit.broadcast(Component.text("§e§lServer stopping in 5 seconds..."));
-                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
-                Bukkit.getScheduler().runTaskLater((Plugin) this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "stop"), 100L);
+                p.closeInventory();
+                PlatformScheduler.globalNow(this, () -> {
+                    Bukkit.broadcast(Component.text("§e§lServer stopping in 5 seconds..."));
+                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
+                    PlatformScheduler.globalLater(this,
+                        () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "stop"), 100L);
+                });
             }
             case "adm_back" -> this.openAdminLegacy(p);
             case "adm_maint_on" -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "maintenance on"); p.sendMessage("§7Maintenance ON."); }
@@ -20334,7 +26600,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             default -> this.handleAdminLegacyParam(p, id);
         }
     }
-
     // Parameterized legacy admin actions (world:<wn>, w_*:<wn>, p:<uuid>, pa_*:<uuid>).
     private void handleAdminLegacyParam(Player p, String id) {
         if (id.startsWith("adm_world:")) { this.openAdminLegacyWorld(p, id.substring("adm_world:".length())); return; }
@@ -20452,7 +26717,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 q.sendActionBar(Component.text("§7Frozen maintenance ended."));
             }),
             this.dialogButton(Component.text("Limbo Maint: Full Stop", NamedTextColor.RED), "Transfer players to limbo, then restart the SMP (behind the proxy)", 150, q -> {
-                q.closeDialog();
+                DialogCloseCompat.close(q);
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "limbomaint start");
                 q.sendActionBar(Component.text("§7Limbo full-stop maintenance starting…"));
             }),
@@ -20460,9 +26725,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Maintenance", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
-
     private void openAdminWorldAccess(Player p) {
         java.util.List<DialogBody> body = new java.util.ArrayList<>();
         body.add(DialogBody.plainMessage(Component.text("Pick a world to manage. Disabling evacuates players to the evac target.", NamedTextColor.GRAY)));
@@ -20498,7 +26762,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("World Access", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminWorldDetail(Player p, String wn) {
@@ -20572,7 +26836,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text(this.friendlyWorldName(wn) + " · World", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openAdminWorldAccess)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminBorderInput(Player p, String wn) {
@@ -20602,7 +26866,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         ActionButton back = this.dialogButton(Component.text("Cancel"), null, 140, q -> this.openAdminWorldDetail(q, wn));
         Dialog dialog = this.buildDialog(Component.text("World Border", DIALOG_BRAND), List.of(), inputs,
             DialogType.confirmation(apply, back));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private String friendlyWorldName(String wn) {
@@ -20644,7 +26908,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Performance", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminEcoShop(Player p) {
@@ -20662,15 +26926,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 q.sendActionBar(Component.text("§7Reloaded sell config."));
             }),
             this.dialogButton(Component.text("Open Shard Shop", DIALOG_BRAND), null, 150, q -> {
-                q.closeDialog();
+                DialogCloseCompat.close(q);
                 this.openShardShopMenu(q);
             }));
         Dialog dialog = this.buildDialog(Component.text("EcoBot & Shop", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(1)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
-
     // ----- Players panel -----
     private void openAdminPlayers(Player p) {
         java.util.List<Player> online = new java.util.ArrayList<>(Bukkit.getOnlinePlayers());
@@ -20686,7 +26949,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Players", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openAdminConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminPlayerActions(Player p, UUID id, String name) {
@@ -20697,7 +26960,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.kv("Health:", String.format("%.0f", t.getHealth()), NamedTextColor.WHITE),
             this.kv("Gamemode:", t.getGameMode().name(), NamedTextColor.WHITE));
         java.util.List<ActionButton> buttons = List.of(
-            this.dialogButton(Component.text("Teleport To", DIALOG_BRAND), null, 150, q -> { Player tt = Bukkit.getPlayer(id); if (tt != null) { q.closeDialog(); q.teleport(tt); } }),
+            this.dialogButton(Component.text("Teleport To", DIALOG_BRAND), null, 150, q -> { Player tt = Bukkit.getPlayer(id); if (tt != null) { DialogCloseCompat.close(q); q.teleport(tt); } }),
             this.dialogButton(Component.text("Bring Here", DIALOG_BRAND), null, 150, q -> { Player tt = Bukkit.getPlayer(id); if (tt != null) { tt.teleport(q); q.sendActionBar(Component.text("§7Brought " + name + ".")); } }),
             this.dialogButton(Component.text("Survival", DIALOG_BRAND), null, 150, q -> { Player tt = Bukkit.getPlayer(id); if (tt != null) tt.setGameMode(org.bukkit.GameMode.SURVIVAL); q.sendActionBar(Component.text("§7" + name + " -> Survival.")); }),
             this.dialogButton(Component.text("Spectator", DIALOG_BRAND), null, 150, q -> { Player tt = Bukkit.getPlayer(id); if (tt != null) tt.setGameMode(org.bukkit.GameMode.SPECTATOR); q.sendActionBar(Component.text("§7" + name + " -> Spectator.")); }),
@@ -20706,12 +26969,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.dialogButton(Component.text("Freeze", NamedTextColor.YELLOW), null, 150, q -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "freeze " + name); q.sendActionBar(Component.text("§7Toggled freeze on " + name + ".")); }),
             this.dialogButton(Component.text("Mute 30m", NamedTextColor.YELLOW), null, 150, q -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mute " + name + " 30m"); q.sendActionBar(Component.text("§7Muted " + name + " 30m.")); }),
             this.dialogButton(Component.text("Kick", NamedTextColor.RED), null, 150, q -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "kick " + name); q.sendActionBar(Component.text("§7Kicked " + name + ".")); this.openAdminPlayers(q); }),
-            this.dialogButton(Component.text("Punish", NamedTextColor.RED), "Open the punish menu", 150, q -> { q.closeDialog(); q.performCommand("punish " + name); }),
-            this.dialogButton(Component.text("History", DIALOG_BRAND), null, 150, q -> { q.closeDialog(); q.performCommand("history " + name); }));
+            this.dialogButton(Component.text("Punish", NamedTextColor.RED), "Open the punish menu", 150, q -> { DialogCloseCompat.close(q); q.performCommand("punish " + name); }),
+            this.dialogButton(Component.text("History", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("history " + name); }));
         Dialog dialog = this.buildDialog(Component.text(name + " · Actions", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openAdminPlayers)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ----- Economy & Ranks panel -----
@@ -20721,13 +26984,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.dialogButton(Component.text("Give Money", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "givemoney")),
             this.dialogButton(Component.text("Set Money", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "setmoney")),
             this.dialogButton(Component.text("Give Shards", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "giveshards")),
-            this.dialogButton(Component.text("Baltop", DIALOG_BRAND), null, 150, q -> { q.closeDialog(); q.performCommand("baltop"); }),
+            this.dialogButton(Component.text("Baltop", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("baltop"); }),
             this.dialogButton(Component.text((this.brandTierPlus + "/++ Manage"), DIALOG_BRAND), null, 150, q -> this.openAdminRankInput(q)),
-            this.dialogButton(Component.text((this.brandTierPlus + " List"), DIALOG_BRAND), null, 150, q -> { q.closeDialog(); q.performCommand("pizzaplus list"); }));
+            this.dialogButton(Component.text((this.brandTierPlus + " List"), DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("pizzaplus list"); }));
         Dialog dialog = this.buildDialog(Component.text("Economy & Ranks", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminEcoInput(Player p, String mode) {
@@ -20755,7 +27018,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }, ClickCallback.Options.builder().build())).build();
         ActionButton back = this.dialogButton(Component.text("Cancel"), null, 140, this::openAdminEconomy);
         Dialog dialog = this.buildDialog(Component.text(title, DIALOG_BRAND), List.of(), inputs, DialogType.confirmation(apply, back));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminRankInput(Player p) {
@@ -20770,7 +27033,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             List.of(DialogBody.plainMessage(Component.text("Enter a player, then choose an action.", NamedTextColor.GRAY))), inputs,
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openAdminEconomy)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // Rank button that reads the "player" input from the dialog view and runs the command (as the admin,
@@ -20804,12 +27067,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         body.add(this.kv("Plugins loaded:", String.valueOf(Bukkit.getPluginManager().getPlugins().length), NamedTextColor.WHITE));
         java.util.List<ActionButton> buttons = List.of(
             this.dialogButton(Component.text("Reload Sell Config", DIALOG_BRAND), null, 150, q -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "sell reload"); q.sendActionBar(Component.text("§7Reloaded sell config.")); }),
-            this.dialogButton(Component.text("Anticheat Suspects", DIALOG_BRAND), null, 150, q -> { q.closeDialog(); this.openSuspiciousPlayersGui(q); }),
+            this.dialogButton(Component.text("Anticheat Suspects", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); this.openSuspiciousPlayersGui(q); }),
             this.dialogButton(Component.text("Refresh", NamedTextColor.WHITE), null, 150, this::openAdminDiagnostics));
         Dialog dialog = this.buildDialog(Component.text("Diagnostics", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ----- Broadcast panel -----
@@ -20832,7 +27095,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Broadcast", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text("Send a server-wide announcement.", NamedTextColor.GRAY))), inputs,
             DialogType.confirmation(send, back));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ----- World lock-message editor -----
@@ -20858,7 +27121,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Lock Message", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text("Shown to players blocked from a disabled world. Preview saves on the hotbar.", NamedTextColor.GRAY))),
             inputs, DialogType.confirmation(apply, back));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ----- Maintenance MOTD (D6) -----
@@ -20958,7 +27221,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Maintenance MOTD", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text("Shown on the server list while maintenance is on. Supports & and &#RRGGBB colors.", NamedTextColor.GRAY))),
             inputs, DialogType.confirmation(apply, back));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ChatGuard exemptions: owner/dev full-exempt (toggle to guard them), staff post links, and a
@@ -20984,7 +27247,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("ChatGuard", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openAdminConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminChatGuardWlInput(Player p, boolean add) {
@@ -21007,7 +27270,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text(add ? "Whitelist Player" : "Un-whitelist Player", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text((add ? "Add" : "Remove") + " a player's ChatGuard link permission.", NamedTextColor.GRAY))),
             inputs, DialogType.confirmation(apply, back));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ----- Feature Flags panel -----
@@ -21035,7 +27298,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Feature Flags", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ----- Per-world gamerule editor -----
@@ -21062,7 +27325,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             List.of(DialogBody.plainMessage(Component.text("Toggle world gamerules.", NamedTextColor.GRAY))), List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, q -> this.openAdminWorldDetail(q, wn))).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ----- Server settings panel -----
@@ -21092,21 +27355,20 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Server Settings", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminServerControlConfirm(Player p, boolean restart) {
         ActionButton confirm = this.dialogButton(Component.text(restart ? "Confirm Restart" : "Confirm Stop", NamedTextColor.RED), null, 160, q -> {
-            q.closeDialog();
-            Bukkit.broadcast(Component.text("§e§lServer " + (restart ? "restarting" : "stopping") + " in 5 seconds..."));
-            if (restart) this.spawnRelaunch();
-            // Save, then stop after a short grace period so players see the message.
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
-            if (this.foliaRuntime) {
-                Bukkit.getAsyncScheduler().runDelayed((Plugin) this, t -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "stop"), 5L, TimeUnit.SECONDS);
-            } else {
-                Bukkit.getScheduler().runTaskLater((Plugin) this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "stop"), 100L);
-            }
+            DialogCloseCompat.close(q);
+            PlatformScheduler.globalNow(this, () -> {
+                Bukkit.broadcast(Component.text("§e§lServer " + (restart ? "restarting" : "stopping") + " in 5 seconds..."));
+                if (restart) this.spawnRelaunch();
+                // Save, then stop after a short grace period so players see the message.
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
+                PlatformScheduler.globalLater(this,
+                    () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "stop"), 100L);
+            });
         });
         ActionButton cancel = this.dialogButton(Component.text("Cancel", NamedTextColor.GRAY), null, 160, this::openAdminServerSettings);
         Dialog dialog = this.buildDialog(Component.text(restart ? "Restart Server?" : "Stop Server?", DIALOG_BRAND),
@@ -21114,17 +27376,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 ? "Saves worlds, stops the server, and auto-relaunches it. All players disconnect briefly."
                 : "Saves worlds and stops the server. It will NOT come back until started manually.", NamedTextColor.GRAY))),
             List.of(), DialogType.confirmation(confirm, cancel));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ===== Limbo maintenance (transfer-to-limbo full-stop) =====
-    // Snapshot the player so the limbo server can render them "frozen in place" (same position +
-    // inventory; nearby-block cuboid is captured in a later phase via blocks_blob).
+    // Preserve the player's authoritative SMP state. Limbo reads the inventory copy for display but
+    // always places the player in its static spawn hub; PlayerSyncManager owns restoration on return.
     private void captureLimboSnapshot(Player p) throws SQLException {
         Location loc = p.getLocation();
         byte[] inv = this.serializeItemStacks(p.getInventory().getContents());
         byte[] ender = this.serializeItemStacks(p.getEnderChest().getContents());
-        // Terrain is provided by region-file copy (full VD), not per-block capture — see copyPlayerRegionsToLimbo.
         try (Connection c = this.openSyncConnection();
              PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO limbo_snapshots (uuid,world,x,y,z,yaw,pitch,inv_blob,ender_blob) VALUES (?,?,?,?,?,?,?,?,?) "
@@ -21143,101 +27404,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    private java.io.File regionFolder(org.bukkit.World w) {
-        java.io.File base = w.getWorldFolder();
-        return switch (w.getEnvironment()) {
-            case NETHER -> new java.io.File(base, "DIM-1/region");
-            case THE_END -> new java.io.File(base, "DIM1/region");
-            default -> new java.io.File(base, "region");
-        };
-    }
-
-    // Highest-performance full-VD scene: copy the .mca region files covering the player's view distance
-    // straight into the limbo world's region folder (same coordinates). The limbo then loads the REAL
-    // chunks — full fidelity, full VD — instead of us serializing millions of blocks.
-    private void copyPlayerRegionsToLimbo(Player p, int vd, java.io.File limboRegionDir) {
-        org.bukkit.World w = p.getWorld();
-        java.io.File regionDir = this.regionFolder(w);
-        if (regionDir == null || !regionDir.isDirectory()) return;
-        if (!limboRegionDir.isDirectory() && !limboRegionDir.mkdirs()) {
-            this.getLogger().warning("[LimboMaint] cannot create limbo region dir: " + limboRegionDir);
-            return;
-        }
-        int cx = p.getLocation().getBlockX() >> 4, cz = p.getLocation().getBlockZ() >> 4;
-        int rxMin = (cx - vd) >> 5, rxMax = (cx + vd) >> 5;   // region = chunk >> 5 (32 chunks/region)
-        int rzMin = (cz - vd) >> 5, rzMax = (cz + vd) >> 5;
-        int copied = 0;
-        for (int rx = rxMin; rx <= rxMax; rx++) {
-            for (int rz = rzMin; rz <= rzMax; rz++) {
-                java.io.File src = new java.io.File(regionDir, "r." + rx + "." + rz + ".mca");
-                if (!src.isFile()) continue;
-                try {
-                    java.nio.file.Files.copy(src.toPath(),
-                        new java.io.File(limboRegionDir, src.getName()).toPath(),
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                    copied++;
-                } catch (Exception ex) {
-                    this.getLogger().warning("[LimboMaint] region copy " + src.getName() + " failed: " + ex.getMessage());
-                }
-            }
-        }
-        this.getLogger().info("[LimboMaint] copied " + copied + " region file(s) for " + p.getName() + " (vd=" + vd + ").");
-    }
-
-    // Capture the non-air blocks in a cuboid around the player as a palette + relative-position list,
-    // so the limbo can rebuild the exact scene around them. Runs on the main thread (block access).
-    // Format: int paletteSize, UTF[] blockDataStrings, int count, then count*(short dx, short dy, short dz, int paletteIdx).
-    private byte[] captureSceneBlocks(Location center, int hR, int vR) {
-        org.bukkit.World w = center.getWorld();
-        if (w == null) return null;
-        int cx = center.getBlockX(), cy = center.getBlockY(), cz = center.getBlockZ();
-        java.util.LinkedHashMap<String, Integer> palette = new java.util.LinkedHashMap<>();
-        try (ByteArrayOutputStream blockBytes = new ByteArrayOutputStream();
-             DataOutputStream bd = new DataOutputStream(blockBytes)) {
-            int minY = Math.max(w.getMinHeight(), cy - vR);
-            int maxY = Math.min(w.getMaxHeight() - 1, cy + vR);
-            int count = 0;
-            for (int x = cx - hR; x <= cx + hR; x++) {
-                for (int z = cz - hR; z <= cz + hR; z++) {
-                    for (int y = minY; y <= maxY; y++) {
-                        org.bukkit.block.Block b = w.getBlockAt(x, y, z);
-                        if (b.getType() == Material.AIR) continue;
-                        String bds = b.getBlockData().getAsString();
-                        Integer idx = palette.get(bds);
-                        if (idx == null) { idx = palette.size(); palette.put(bds, idx); }
-                        bd.writeShort(x - cx);
-                        bd.writeShort(y - cy);
-                        bd.writeShort(z - cz);
-                        bd.writeInt(idx);
-                        count++;
-                    }
-                }
-            }
-            bd.flush();
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            try (DataOutputStream dos = new DataOutputStream(out)) {
-                dos.writeInt(palette.size());
-                for (String s : palette.keySet()) dos.writeUTF(s);
-                dos.writeInt(count);
-                dos.write(blockBytes.toByteArray());
-                dos.flush();
-            }
-            return out.toByteArray();
-        } catch (Exception ex) {
-            this.getLogger().warning("[LimboMaint] scene capture failed: " + ex.getMessage());
-            return null;
-        }
-    }
-
     // /limbomaint start: snapshot every online player, send them to the limbo backend (proxy switch),
-    // then restart this SMP. The limbo holds + renders them and auto-returns them once the SMP is back.
+    // then restart this SMP. Limbo holds them in its spawn copy and returns them once the SMP is ready.
     private void startLimboMaintenance(CommandSender by) {
         String limbo = this.settings.getString("limbo.server-name", "limbo");
-        java.io.File limboRegionDir = new java.io.File(this.settings.getString("limbo.region-dir",
-            "../limbo/limbo/region"));
-        int vd = Bukkit.getViewDistance() + 1;   // full player view distance (+1 margin)
         java.util.List<Player> online = new java.util.ArrayList<>(Bukkit.getOnlinePlayers());
-        // Flush each occupied world to disk so the region files we copy are current.
+        // Flush occupied worlds before transferring players and shutting down.
         java.util.Set<org.bukkit.World> worlds = new java.util.HashSet<>();
         for (Player p : online) worlds.add(p.getWorld());
         for (org.bukkit.World w : worlds) { try { w.save(); } catch (Exception ignored) {} }
@@ -21247,94 +27419,54 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             if (by instanceof Player pl0) pl0.sendMessage(this.legacyColorize("&#00BFFFNo players online — restarting SMP."));
             Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
             this.spawnRelaunch();
-            Bukkit.getScheduler().runTaskLater((Plugin)this, () -> Bukkit.shutdown(), 40L);
+            PlatformScheduler.globalLater(this, Bukkit::shutdown, 40L);
             return;
         }
-        // 1. MAIN THREAD: persist each player's AUTHORITATIVE data to disk first (source of truth),
-        //    snapshot a visual copy for the limbo, and compute their region-copy bounds. The limbo
-        //    only ever receives COPIES (snapshot + region files); it never writes player state back,
-        //    so no transfer-timing issue can lose data.
-        final java.util.List<java.io.File> srcDirs = new java.util.ArrayList<>();
-        final java.util.List<int[]> copyJobs = new java.util.ArrayList<>();   // {rxMin,rxMax,rzMin,rzMax}
-        final java.util.List<java.io.File> advSrc = new java.util.ArrayList<>();   // per-player advancements .json
-        final java.io.File limboAdvDir = new java.io.File(this.settings.getString("limbo.advancements-dir",
-            "../limbo/limbo/advancements"));
-        final java.io.File mainWorldFolder = Bukkit.getWorlds().isEmpty() ? null : Bukkit.getWorlds().get(0).getWorldFolder();
+        // Persist authoritative player data first. Only successfully prepared players are transferred;
+        // a snapshot failure must not strand someone in limbo without a known return state.
+        final java.util.List<UUID> moveIds = new java.util.ArrayList<>();
         for (Player p : online) {
             try {
-                p.saveData();                      // flush real inventory/position to disk FIRST
-                this.captureLimboSnapshot(p);      // visual-only copy for the limbo
-                java.io.File rd = this.regionFolder(p.getWorld());
-                if (rd != null && rd.isDirectory()) {
-                    int cx = p.getLocation().getBlockX() >> 4, cz = p.getLocation().getBlockZ() >> 4;
-                    srcDirs.add(rd);
-                    copyJobs.add(new int[]{(cx - vd) >> 5, (cx + vd) >> 5, (cz - vd) >> 5, (cz + vd) >> 5});
-                }
-                // Copy the player's advancements so the limbo loads them as ALREADY-earned — then re-applying
-                // their visual inventory there earns nothing new (no achievement-toast spam) while still syncing it.
-                if (mainWorldFolder != null) {
-                    java.io.File af = new java.io.File(mainWorldFolder, "advancements/" + p.getUniqueId() + ".json");
-                    if (af.isFile()) advSrc.add(af);
-                }
+                p.saveData();
+                this.captureLimboSnapshot(p);
+                moveIds.add(p.getUniqueId());
             } catch (Exception ex) {
                 this.getLogger().warning("[LimboMaint] prep failed for " + p.getName() + ": " + ex.getMessage());
             }
         }
-        final int count = online.size();
-        if (by instanceof Player pl) {
-            pl.sendMessage(this.legacyColorize("&#00BFFFLimbo maintenance: saved &f" + count + "&#00BFFF player(s), copying regions…"));
+        final int count = moveIds.size();
+        if (count == 0) {
+            this.getLogger().warning("[LimboMaint] No online player could be prepared; restart aborted.");
+            if (by instanceof Player pl) pl.sendMessage(this.legacyColorize("&cMaintenance could not start safely. Check the server log."));
+            return;
         }
-        // 2. ASYNC: copy the region files (off the main thread so it can't lag the server or time out
-        //    the player connections — that was the "internal server connection error" cause).
-        this.runAsyncTask(() -> {
-            if (!limboRegionDir.isDirectory()) limboRegionDir.mkdirs();
-            // Copy advancement files so the limbo sees them as already-earned (inventory syncs, no toasts).
-            try {
-                if (!limboAdvDir.isDirectory()) limboAdvDir.mkdirs();
-                for (java.io.File af : advSrc) {
-                    try { java.nio.file.Files.copy(af.toPath(), new java.io.File(limboAdvDir, af.getName()).toPath(),
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING); } catch (Exception ignored) {}
-                }
-            } catch (Exception ex) { this.getLogger().warning("[LimboMaint] advancement copy failed: " + ex.getMessage()); }
-            int copied = 0;
-            for (int i = 0; i < srcDirs.size(); i++) {
-                java.io.File rd = srcDirs.get(i); int[] j = copyJobs.get(i);
-                for (int rx = j[0]; rx <= j[1]; rx++) for (int rz = j[2]; rz <= j[3]; rz++) {
-                    java.io.File src = new java.io.File(rd, "r." + rx + "." + rz + ".mca");
-                    if (!src.isFile()) continue;
-                    try {
-                        java.nio.file.Files.copy(src.toPath(), new java.io.File(limboRegionDir, src.getName()).toPath(),
-                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                        copied++;
-                    } catch (Exception ex) { this.getLogger().warning("[LimboMaint] copy " + src.getName() + " failed: " + ex.getMessage()); }
-                }
+        if (by instanceof Player pl) {
+            pl.sendMessage(this.legacyColorize("&#00BFFFLimbo maintenance: saved &f" + count + "&#00BFFF player(s)."));
+        }
+        this.getLogger().info("[LimboMaint] moving " + count + " prepared player(s) to '" + limbo + "'.");
+        for (UUID id : moveIds) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null && p.isOnline()) {
+                try { this.connectToServer(p, limbo); } catch (Exception ignored) {}
             }
-            this.getLogger().info("[LimboMaint] copied " + copied + " region file(s); moving players to '" + limbo + "'.");
-            // 3. BACK ON MAIN THREAD: move everyone, then wait until the SMP is empty before shutting down.
-            Bukkit.getScheduler().runTask((Plugin)this, () -> {
-                for (Player p : new java.util.ArrayList<>(Bukkit.getOnlinePlayers())) {
-                    try { this.connectToServer(p, limbo); } catch (Exception ignored) {}
-                }
-                this.awaitEmptyThenRestart();
-            });
-        });
+        }
+        this.awaitEmptyThenRestart();
     }
-
     // Poll until every player has actually left this backend (moved to the limbo) before saving +
     // restarting, so the SMP never shuts down mid-transfer (which kicked players with a connection
     // error). A 20s safety timeout restarts anyway; player data was already flushed in step 1.
     private void awaitEmptyThenRestart() {
-        final int[] elapsed = {0};
-        final org.bukkit.scheduler.BukkitTask[] holder = new org.bukkit.scheduler.BukkitTask[1];
-        holder[0] = Bukkit.getScheduler().runTaskTimer((Plugin)this, () -> {
-            elapsed[0] += 10;
+        final java.util.concurrent.atomic.AtomicInteger elapsed = new java.util.concurrent.atomic.AtomicInteger();
+        final PlatformScheduler.TaskHandle[] holder = new PlatformScheduler.TaskHandle[1];
+        holder[0] = PlatformScheduler.globalRepeating(this, () -> {
+            int current = elapsed.addAndGet(10);
             boolean empty = Bukkit.getOnlinePlayers().isEmpty();
-            if (empty || elapsed[0] >= 400) {   // 400 ticks = 20s timeout
+            if (empty || current >= 400) {   // 400 ticks = 20s timeout
                 if (holder[0] != null) holder[0].cancel();
                 this.getLogger().info("[LimboMaint] " + (empty ? "all players moved off" : "20s timeout") + " — saving + restarting SMP.");
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
                 this.spawnRelaunch();
-                Bukkit.getScheduler().runTaskLater((Plugin)this, () -> Bukkit.shutdown(), 40L);
+                PlatformScheduler.globalLater(this, Bukkit::shutdown, 40L);
             }
         }, 10L, 10L);
     }
@@ -21393,7 +27525,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         sender.sendMessage("§7Usage: §f/branding [status] §7| §f/branding set <pizzasmp|horizonsmp>");
     }
-
     private void handleLimboMaintCommand(CommandSender sender, String[] args) {
         String sub = args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "status";
         switch (sub) {
@@ -21429,7 +27560,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.getLogger().warning("Failed to spawn relaunch helper: " + ex.getMessage());
         }
     }
-
     // ----- Gameplay tuning editor (config values) -----
     private void openAdminTuning(Player p) {
         String[][] keys = {
@@ -21452,9 +27582,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Dialog dialog = this.buildDialog(Component.text("Gameplay Tuning", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(1)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
-
     private void openAdminTuningInput(Player p, String key, String label) {
         java.util.List<DialogInput> inputs = List.of(
             DialogInput.text("v", Component.text(label, NamedTextColor.GRAY)).initial(this.settings.getString(key, "")).width(160).maxLength(12).build());
@@ -21477,7 +27606,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }, ClickCallback.Options.builder().build())).build();
         ActionButton back = this.dialogButton(Component.text("Cancel"), null, 140, this::openAdminTuning);
         Dialog dialog = this.buildDialog(Component.text(label, DIALOG_BRAND), List.of(), inputs, DialogType.confirmation(apply, back));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // ----- Data & logs panel -----
@@ -21486,14 +27615,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         java.util.List<ActionButton> buttons = List.of(
             this.dialogButton(Component.text("Inventory Inspect", DIALOG_BRAND), "invsee a player", 150, q -> this.openAdminDataPlayerInput(q, "invsee %p%")),
             this.dialogButton(Component.text("Player History", DIALOG_BRAND), "punishment history", 150, q -> this.openAdminDataPlayerInput(q, "history %p%")),
-            this.dialogButton(Component.text("Transaction Log", DIALOG_BRAND), null, 150, q -> { q.closeDialog(); q.performCommand("txlog"); }),
-            this.dialogButton(Component.text("Ban List", DIALOG_BRAND), null, 150, q -> { q.closeDialog(); q.performCommand("listbans"); }),
-            this.dialogButton(Component.text("Anticheat Suspects", DIALOG_BRAND), null, 150, q -> { q.closeDialog(); this.openSuspiciousPlayersGui(q); }),
+            this.dialogButton(Component.text("Transaction Log", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("txlog"); }),
+            this.dialogButton(Component.text("Ban List", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("listbans"); }),
+            this.dialogButton(Component.text("Anticheat Suspects", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); this.openSuspiciousPlayersGui(q); }),
             this.dialogButton(Component.text("Money / Shards", DIALOG_BRAND), "Adjust balances", 150, this::openAdminEconomy));
         Dialog dialog = this.buildDialog(Component.text("Data & Logs", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     private void openAdminDataPlayerInput(Player p, String cmdTemplate) {
@@ -21505,14 +27634,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     String who = view.getText("player");
                     this.runOnPlayerThread(pl, () -> {
                         if (who == null || who.isBlank()) { pl.sendActionBar(Component.text("§cEnter a player.")); this.openAdminData(pl); return; }
-                        pl.closeDialog();
+                        DialogCloseCompat.close(pl);
                         pl.performCommand(cmdTemplate.replace("%p%", who.trim()));
                     });
                 }
             }, ClickCallback.Options.builder().build())).build();
         ActionButton back = this.dialogButton(Component.text("Cancel"), null, 140, this::openAdminData);
         Dialog dialog = this.buildDialog(Component.text("Player", DIALOG_BRAND), List.of(), inputs, DialogType.confirmation(go, back));
-        p.showDialog(dialog);
+        DialogCompat.show(p, dialog);
     }
 
     // Bulk-delete all anticheat violations for a player (false-positive cleanup).

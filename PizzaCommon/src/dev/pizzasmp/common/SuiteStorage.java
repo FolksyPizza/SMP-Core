@@ -13,12 +13,16 @@ import org.bukkit.plugin.Plugin;
 import java.io.File;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -43,6 +47,23 @@ import java.util.UUID;
  * suite_events(id,namespace,kind,data,created_at) for append-only logs.
  */
 public final class SuiteStorage {
+
+    public enum DocumentLoadStatus {
+        FOUND,
+        MISSING,
+        FAILED
+    }
+
+    /**
+     * Result of reading a named document. A failed read is distinct from a missing document;
+     * callers that maintain live state should retain that state when {@link #status()} is FAILED.
+     */
+    public record DocumentLoadResult(DocumentLoadStatus status, YamlConfiguration document) {
+        public DocumentLoadResult {
+            Objects.requireNonNull(status, "status");
+            Objects.requireNonNull(document, "document");
+        }
+    }
 
     private final Plugin plugin;
     private final String ns;
@@ -95,10 +116,11 @@ public final class SuiteStorage {
             HikariDataSource ds = new HikariDataSource(hc);
             SuiteStorage st = new SuiteStorage(plugin, namespace, true, ds);
             st.ensureSchema();
-            plugin.getLogger().info("[storage] namespace '" + namespace + "' -> MySQL (" + host + ":" + port + "/" + name + ")");
+            plugin.getLogger().info("[storage] namespace '" + namespace + "' -> MySQL");
             return st;
         } catch (Throwable t) {
-            plugin.getLogger().warning("[storage] MySQL init failed for '" + namespace + "', falling back to YAML: " + t.getMessage());
+            plugin.getLogger().warning("[storage] MySQL init failed for '" + namespace
+                + "' (cause=" + t.getClass().getSimpleName() + "); falling back to YAML.");
             return new SuiteStorage(plugin, namespace, false, null);
         }
     }
@@ -125,20 +147,102 @@ public final class SuiteStorage {
 
     /** Load a named document. In YAML mode this is `<dataFolder>/<name>.yml`. Always returns non-null. */
     public YamlConfiguration loadDoc(String name) {
+        return loadDocResult(name).document();
+    }
+
+    /**
+     * Load a named document while distinguishing a missing document from an I/O, database, or
+     * parse failure. The returned configuration is empty when the document is missing or failed.
+     */
+    public DocumentLoadResult loadDocResult(String name) {
         if (!this.mysql) {
-            return YamlConfiguration.loadConfiguration(new File(this.yamlDir, name + ".yml"));
+            File file = new File(this.yamlDir, name + ".yml");
+            try {
+                BasicFileAttributes attributes;
+                try {
+                    attributes = Files.readAttributes(file.toPath(), BasicFileAttributes.class);
+                } catch (NoSuchFileException ex) {
+                    return missingDocument();
+                }
+                if (!attributes.isRegularFile()) {
+                    logDocumentFailure("read", new java.io.IOException());
+                    return failedDocument();
+                }
+                YamlConfiguration config = new YamlConfiguration();
+                config.load(file);
+                return foundDocument(config);
+            } catch (Exception ex) {
+                logDocumentFailure("read", ex);
+                return failedDocument();
+            }
         }
-        String text = this.dbFetch("SELECT data FROM suite_docs WHERE namespace=? AND name=?", this.ns, name);
-        return parse(text);
+        try (Connection c = this.ds.getConnection();
+             PreparedStatement ps = c.prepareStatement("SELECT data FROM suite_docs WHERE namespace=? AND name=?")) {
+            ps.setString(1, this.ns);
+            ps.setString(2, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return missingDocument();
+                String text = rs.getString(1);
+                if (text == null || text.isEmpty()) return foundDocument(new YamlConfiguration());
+                try {
+                    YamlConfiguration config = new YamlConfiguration();
+                    config.loadFromString(text);
+                    return foundDocument(config);
+                } catch (Exception ex) {
+                    logDocumentFailure("read", ex);
+                    return failedDocument();
+                }
+            }
+        } catch (Exception ex) {
+            logDocumentFailure("read", ex);
+            return failedDocument();
+        }
     }
 
     public void saveDoc(String name, YamlConfiguration cfg) {
+        saveDocResult(name, cfg);
+    }
+
+    /** Save a named document and report whether the write completed successfully. */
+    public boolean saveDocResult(String name, YamlConfiguration cfg) {
         if (!this.mysql) {
-            try { cfg.save(new File(this.yamlDir, name + ".yml")); }
-            catch (Exception e) { this.plugin.getLogger().warning("[storage] save " + name + ".yml failed: " + e.getMessage()); }
-            return;
+            try {
+                cfg.save(new File(this.yamlDir, name + ".yml"));
+                return true;
+            } catch (Exception ex) {
+                logDocumentFailure("save", ex);
+                return false;
+            }
         }
-        this.dbUpsertDoc(name, cfg.saveToString());
+        try (Connection c = this.ds.getConnection();
+             PreparedStatement ps = c.prepareStatement("INSERT INTO suite_docs (namespace,name,data) VALUES (?,?,?) "
+                 + "ON DUPLICATE KEY UPDATE data=VALUES(data)")) {
+            ps.setString(1, this.ns);
+            ps.setString(2, name);
+            ps.setString(3, cfg.saveToString());
+            ps.executeUpdate();
+            return true;
+        } catch (Exception ex) {
+            logDocumentFailure("save", ex);
+            return false;
+        }
+    }
+
+    private DocumentLoadResult foundDocument(YamlConfiguration config) {
+        return new DocumentLoadResult(DocumentLoadStatus.FOUND, config);
+    }
+
+    private DocumentLoadResult missingDocument() {
+        return new DocumentLoadResult(DocumentLoadStatus.MISSING, new YamlConfiguration());
+    }
+
+    private DocumentLoadResult failedDocument() {
+        return new DocumentLoadResult(DocumentLoadStatus.FAILED, new YamlConfiguration());
+    }
+
+    private void logDocumentFailure(String operation, Exception cause) {
+        this.plugin.getLogger().warning("[storage] named document " + operation
+            + " failed (cause=" + cause.getClass().getSimpleName() + ").");
     }
 
     // ---- per-player documents (homes-style) ----
@@ -154,7 +258,10 @@ public final class SuiteStorage {
     public void savePlayer(UUID uuid, YamlConfiguration cfg) {
         if (!this.mysql) {
             try { cfg.save(new File(this.playerDir, uuid + ".yml")); }
-            catch (Exception e) { this.plugin.getLogger().warning("[storage] save player " + uuid + " failed: " + e.getMessage()); }
+            catch (Exception ex) {
+                this.plugin.getLogger().warning("[storage] save player document failed (cause="
+                    + ex.getClass().getSimpleName() + ").");
+            }
             return;
         }
         try (Connection c = this.ds.getConnection();
@@ -162,7 +269,10 @@ public final class SuiteStorage {
                  + "ON DUPLICATE KEY UPDATE data=VALUES(data)")) {
             ps.setString(1, this.ns); ps.setString(2, uuid.toString()); ps.setString(3, cfg.saveToString());
             ps.executeUpdate();
-        } catch (Exception e) { this.plugin.getLogger().warning("[storage] db save player " + uuid + " failed: " + e.getMessage()); }
+        } catch (Exception ex) {
+            this.plugin.getLogger().warning("[storage] db save player document failed (cause="
+                + ex.getClass().getSimpleName() + ").");
+        }
     }
 
     /** UUIDs that have a stored player document (mysql: query; yaml: list the data dir). */
@@ -244,7 +354,10 @@ public final class SuiteStorage {
         try (Connection c = this.ds.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, a); ps.setString(2, b);
             try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
-        } catch (Exception e) { this.plugin.getLogger().warning("[storage] fetch failed: " + e.getMessage()); return null; }
+        } catch (Exception ex) {
+            this.plugin.getLogger().warning("[storage] fetch failed (cause=" + ex.getClass().getSimpleName() + ").");
+            return null;
+        }
     }
 
     private void dbUpsertDoc(String name, String data) {
@@ -253,6 +366,9 @@ public final class SuiteStorage {
                  + "ON DUPLICATE KEY UPDATE data=VALUES(data)")) {
             ps.setString(1, this.ns); ps.setString(2, name); ps.setString(3, data);
             ps.executeUpdate();
-        } catch (Exception e) { this.plugin.getLogger().warning("[storage] db save doc " + name + " failed: " + e.getMessage()); }
+        } catch (Exception ex) {
+            this.plugin.getLogger().warning("[storage] db save named document failed (cause="
+                + ex.getClass().getSimpleName() + ").");
+        }
     }
 }

@@ -1,0 +1,11 @@
+# Written by scripts/sync-limbo-spawn.sh when the maintenance hub is refreshed.
+# Values here are deliberately generic so this source template carries no server-specific coordinates.
+spawn:
+  x: 0.5
+  y: 64.0
+  z: 0.5
+  yaw: 0.0
+  pitch: 0.0
+  # Set above zero only when a hub build needs a bounded walk area.
+  border-radius: 0.0
+void-rescue-y: -64.0

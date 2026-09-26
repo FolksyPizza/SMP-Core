@@ -3,7 +3,7 @@ main: dev.pizzasmp.chat.PizzaChatGuard
 version: 2.0.0
 authors:
   - PizzaSMP
-api-version: 1.21
+api-version: 1.21.6
 description: "False-positive-resistant chat filter: slurs, advertising, spam, caps."
 softdepend:
   - PunishDrop

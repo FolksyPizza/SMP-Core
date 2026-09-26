@@ -22,7 +22,6 @@
 package dev.pizzasmp.networkcore;
 
 import dev.pizzasmp.networkcore.PizzaNetworkCore;
-import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -42,7 +41,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -54,9 +52,9 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.io.BukkitObjectInputStream;
 import org.bukkit.util.io.BukkitObjectOutputStream;
+import dev.pizzasmp.common.scheduler.PlatformScheduler;
 
 final class PlayerSyncManager {
     private final JavaPlugin plugin;
@@ -82,13 +80,17 @@ final class PlayerSyncManager {
     private static final int LOBBY_SPAWN_MIN_Z = -60;
     private static final int LOBBY_SPAWN_MAX_Z = 60;
     private final Map<UUID, String> activeLeases = new ConcurrentHashMap<UUID, String>();
-    private final Set<UUID> applyingJoinState = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, JoinAttempt> joinAttempts = new ConcurrentHashMap<UUID, JoinAttempt>();
+    // Keep lease writes for one player ordered without making unrelated player writes wait together.
+    private final Object[] leaseWriteLocks = new Object[64];
     private volatile boolean driverLoaded;
-    private final boolean foliaRuntime;
     private TaskHandle heartbeatTask;
 
     PlayerSyncManager(JavaPlugin plugin) {
         this.plugin = plugin;
+        for (int i = 0; i < this.leaseWriteLocks.length; i++) {
+            this.leaseWriteLocks[i] = new Object();
+        }
         FileConfiguration cfg = plugin.getConfig();
         this.enabled = cfg.getBoolean("sync.enabled", true);
         String configuredServer = cfg.getString("sync.server-name", "auto");
@@ -98,8 +100,8 @@ final class PlayerSyncManager {
         String database = cfg.getString("sync.database.name", "pizzasmp");
         String params = cfg.getString("sync.database.parameters", "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true");
         this.dbUrl = "jdbc:mariadb://" + host + ":" + port + "/" + database + "?" + params;
-        this.dbUser = cfg.getString("sync.database.user", "pizzasmp");
-        this.dbPassword = cfg.getString("sync.database.password", "CHANGE_ME");
+        this.dbUser = cfg.getString("sync.database.user", "");
+        this.dbPassword = cfg.getString("sync.database.password", "");
         this.leaseSeconds = Math.max(10, cfg.getInt("sync.session.lease-seconds", 45));
         this.heartbeatTicks = Math.max(20, cfg.getInt("sync.session.heartbeat-ticks", 200));
         this.reconnectEnabled = cfg.getBoolean("sync.reconnect.enabled", true);
@@ -112,9 +114,7 @@ final class PlayerSyncManager {
         this.locationTeleportDelayTicks = Math.max(1, cfg.getInt("sync.location.teleport-delay-ticks", 5));
         this.debugStateLogging = cfg.getBoolean("sync.debug.log-join-state", false);
         this.debugPendingActions = cfg.getBoolean("sync.debug.log-pending-actions", false);
-        this.foliaRuntime = Bukkit.getName().toLowerCase().contains("folia");
     }
-
     void start() {
         if (!this.enabled) {
             this.plugin.getLogger().info("Cross-server sync disabled in config.");
@@ -149,20 +149,59 @@ final class PlayerSyncManager {
         UUID uuid = player.getUniqueId();
         String username = player.getName();
         String leaseToken = UUID.randomUUID().toString();
+        JoinAttempt attempt = new JoinAttempt(uuid, player, leaseToken);
+        JoinAttempt replacedAttempt = this.joinAttempts.put(uuid, attempt);
         this.activeLeases.put(uuid, leaseToken);
-        this.applyingJoinState.add(uuid);
+        if (replacedAttempt != null && replacedAttempt != attempt) {
+            this.finishJoinApply(replacedAttempt);
+            this.clearStaleLease(uuid, replacedAttempt.leaseToken);
+        }
         this.runAsync(() -> {
+            boolean callbackScheduled = false;
+            boolean leaseUpserted = false;
             try {
+                if (!this.isCurrentJoinAttempt(attempt)) {
+                    return;
+                }
                 LogoutMeta logoutMeta = this.loadLogoutMeta(uuid);
+                if (!this.isCurrentJoinAttempt(attempt)) {
+                    return;
+                }
                 this.upsertPlayerRow(uuid, username);
-                this.upsertLease(uuid, leaseToken);
+                if (!this.isCurrentJoinAttempt(attempt)) {
+                    return;
+                }
+                synchronized (this.leaseWriteLock(uuid)) {
+                    if (!this.isCurrentJoinAttempt(attempt)) {
+                        return;
+                    }
+                    this.upsertLease(uuid, leaseToken);
+                    leaseUpserted = true;
+                }
+                if (!this.isCurrentJoinAttempt(attempt)) {
+                    return;
+                }
                 SyncSnapshot snapshot = this.loadSnapshot(uuid);
-                String pendingAction = this.consumeOneTimeAction(uuid);
-                this.runOnPlayerNow(player, () -> this.applyJoinState(player, snapshot, pendingAction, logoutMeta));
+                if (!this.isCurrentJoinAttempt(attempt)) {
+                    return;
+                }
+                PendingAction pendingAction = this.loadOneTimeAction(uuid);
+                if (!this.isCurrentJoinAttempt(attempt)) {
+                    return;
+                }
+                this.runOnJoinPlayerNow(attempt, () -> this.applyJoinState(attempt, snapshot, pendingAction, logoutMeta));
+                callbackScheduled = true;
             }
             catch (Exception e) {
-                this.applyingJoinState.remove(uuid);
                 this.plugin.getLogger().warning("Failed preparing join sync state for " + username + ": " + e.getMessage());
+            }
+            finally {
+                if (!callbackScheduled) {
+                    if (leaseUpserted && !this.isCurrentJoinAttempt(attempt)) {
+                        this.clearStaleJoinLease(attempt);
+                    }
+                    this.finishJoinApply(attempt);
+                }
             }
         });
     }
@@ -172,7 +211,13 @@ final class PlayerSyncManager {
             return;
         }
         UUID uuid = player.getUniqueId();
-        String leaseToken = this.activeLeases.remove(uuid);
+        JoinAttempt attempt = this.joinAttempts.get(uuid);
+        if (attempt == null || attempt.player != player || !this.joinAttempts.remove(uuid, attempt)) {
+            return;
+        }
+        this.finishJoinApply(attempt);
+        String leaseToken = attempt.leaseToken;
+        this.activeLeases.remove(uuid, leaseToken);
         this.saveSnapshotAsync(player);
         this.saveLogoutMetaAsync(uuid, leaseToken);
         this.clearLeaseAsync(uuid, leaseToken);
@@ -191,60 +236,8 @@ final class PlayerSyncManager {
     }
 
     boolean isApplyingJoinState(UUID uuid) {
-        return uuid != null && this.applyingJoinState.contains(uuid);
-    }
-
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
-    private void applyJoinState(Player player, SyncSnapshot snapshot, String pendingAction, LogoutMeta logoutMeta) {
-        if (!player.isOnline()) {
-            this.applyingJoinState.remove(player.getUniqueId());
-            return;
-        }
-        this.clearStaleDeathScreen(player);
-        try {
-            World world;
-            if (snapshot != null) {
-                if (this.shouldReconnectFromLobby(player, snapshot.lastServer, logoutMeta)) {
-                    this.runOnPlayerLater(player, () -> this.connectToServer(player, snapshot.lastServer), this.reconnectDelayTicks);
-                    return;
-                }
-                this.applyInventoryAndState(player, snapshot);
-                this.debugAppliedState(player, "join_apply");
-                // A queued RTP means the player explicitly asked to be moved somewhere
-                // random. Restoring their old position first is wrong on its own terms,
-                // and it also raced the RTP: the restore teleport is scheduled at
-                // locationTeleportDelayTicks while the RTP runs later off an async safe
-                // -location search, so the player ended up back where they started.
-                // Covers both "RTP:" (search on arrival) and "RTPAT:" (pre-resolved).
-                boolean rtpQueued = pendingAction != null
-                    && pendingAction.toUpperCase(java.util.Locale.ROOT).startsWith("RTP");
-                if (!rtpQueued && this.restoreLocationOnJoin && this.serverName.equalsIgnoreCase(snapshot.lastServer) && (world = Bukkit.getWorld((String)snapshot.worldName)) != null) {
-                    Location location = new Location(world, snapshot.x, snapshot.y, snapshot.z, snapshot.yaw, snapshot.pitch);
-                    this.runOnPlayerLater(player, () -> {
-                        if (player.isOnline()) {
-                            player.teleport(location);
-                        }
-                    }, this.locationTeleportDelayTicks);
-                }
-            }
-            if ("maintenance".equalsIgnoreCase(this.serverName)) {
-                World world2 = world = Bukkit.getWorlds().isEmpty() ? null : (World)Bukkit.getWorlds().getFirst();
-                if (world != null) {
-                    Location center = this.lobbySpawnCenter(world);
-                    this.runOnPlayerLater(player, () -> {
-                        if (player.isOnline()) {
-                            player.teleport(center);
-                        }
-                    }, Math.max(2L, (long)this.locationTeleportDelayTicks));
-                }
-            }
-            this.applyPendingAction(player, pendingAction);
-        }
-        finally {
-            this.applyingJoinState.remove(player.getUniqueId());
-        }
+        JoinAttempt attempt = uuid == null ? null : this.joinAttempts.get(uuid);
+        return attempt != null && attempt.applyingState;
     }
 
     /**
@@ -279,93 +272,133 @@ final class PlayerSyncManager {
         }, 1L);
     }
 
-    private void applyPendingAction(Player player, String pendingAction) {
-        if (pendingAction == null || pendingAction.isBlank()) {
+    /*
+     * WARNING - Removed try catching itself - possible behaviour change.
+     */
+    private void applyJoinState(JoinAttempt attempt, SyncSnapshot snapshot, PendingAction pendingAction, LogoutMeta logoutMeta) {
+        Player player = attempt.player;
+        if (!this.isCurrentJoinAttempt(attempt) || !player.isOnline()) {
+            this.clearStaleJoinLease(attempt);
+            this.finishJoinApply(attempt);
             return;
         }
-        if (this.debugPendingActions) {
-            this.plugin.getLogger().info("[pending-action-debug] stage=apply uuid=" + String.valueOf(player.getUniqueId()) + " server=" + this.serverName + " action=" + pendingAction);
-        }
-        if (pendingAction.toUpperCase(java.util.Locale.ROOT).startsWith("RTP")
-                && this.plugin instanceof PizzaNetworkCore rtpCore) {
-            rtpCore.rtpLog("pending_apply", "player=" + player.getName()
-                + " syncServer=" + this.serverName + " action=" + pendingAction);
-        }
-        /*
-         * Arrive next to another player after a cross-server teleport.
-         *
-         * This used to be queued as "RUN_CMD:tp <name>", i.e. the arriving player was made to
-         * run /tp themselves — a command ordinary players have no permission for. The transfer
-         * happened, the command was silently refused, and the player was left standing at
-         * spawn wondering why an accepted /tpa did nothing. Teleporting through the API needs
-         * no permission and is what was meant all along.
-         *
-         * The target may not have been loaded yet when we arrive, so this retries briefly
-         * rather than giving up on the first miss.
-         */
-        if (pendingAction.startsWith("TPTO:")) {
-            String targetName = pendingAction.substring("TPTO:".length()).trim();
-            if (!targetName.isEmpty()) {
-                this.teleportToPlayerWhenReady(player, targetName, 0);
-            }
-            return;
-        }
-        // Cross-server RTP over the database: the destination was resolved while the player
-        // was in transit, so this just collects the answer. See requestCrossServerRtp.
-        if ("RTPDB".equals(pendingAction)) {
-            if (this.plugin instanceof PizzaNetworkCore core) {
-                core.applyResolvedRtp(player, 0);
-            }
-            return;
-        }
-        // ORDER MATTERS. "RTPAT:" also starts with "RTP", so the search-on-arrival branch
-        // below used to swallow it and run a fresh random search instead of placing the
-        // player at the coordinates the destination backend had already resolved — the
-        // pre-resolved path was dead code. Handle the exact prefix first.
-        if (pendingAction.startsWith("RTPAT:")) {
-            String[] parts = pendingAction.substring("RTPAT:".length()).split(",");
-            if (parts.length >= 4) {
-                World w = Bukkit.getWorld(parts[0]);
-                if (w != null) {
-                    try {
-                        Location dest = new Location(w, Double.parseDouble(parts[1]),
-                            Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
-                        this.runOnPlayerLater(player, () -> {
-                            if (player.isOnline()) player.teleport(dest);
-                        }, 5L);
-                    } catch (NumberFormatException ignored) { }
+        this.clearStaleDeathScreen(player);
+        try {
+            World world;
+            if (snapshot != null) {
+                if (this.shouldReconnectFromLobby(player, snapshot.lastServer, logoutMeta)) {
+                    this.runOnJoinPlayerLater(attempt, () -> this.connectToServer(player, snapshot.lastServer), this.reconnectDelayTicks);
+                    return;
+                }
+                this.applyInventoryAndState(player, snapshot);
+                this.debugAppliedState(player, "join_apply");
+                // A queued RTP means the player explicitly asked to be moved somewhere random.
+                // Restoring their old position first also raced the RTP (restore is scheduled at
+                // locationTeleportDelayTicks, the RTP later off an async search), so skip it.
+                // Covers "RTP:" (search on arrival), "RTPAT:" (pre-resolved) and "RTPDB".
+                boolean rtpQueued = pendingAction != null && pendingAction.action != null
+                    && pendingAction.action.toUpperCase(java.util.Locale.ROOT).startsWith("RTP");
+                if (!rtpQueued && this.restoreLocationOnJoin && this.serverName.equalsIgnoreCase(snapshot.lastServer) && (world = Bukkit.getWorld((String)snapshot.worldName)) != null) {
+                    Location location = new Location(world, snapshot.x, snapshot.y, snapshot.z, snapshot.yaw, snapshot.pitch);
+                    this.runOnJoinPlayerLater(attempt, () -> player.teleport(location), this.locationTeleportDelayTicks);
                 }
             }
+            if ("maintenance".equalsIgnoreCase(this.serverName)) {
+                World world2 = world = Bukkit.getWorlds().isEmpty() ? null : (World)Bukkit.getWorlds().getFirst();
+                if (world != null) {
+                    Location center = this.lobbySpawnCenter(world);
+                    this.runOnJoinPlayerLater(attempt, () -> player.teleport(center), Math.max(2L, (long)this.locationTeleportDelayTicks));
+                }
+            }
+            this.applyPendingAction(attempt, pendingAction);
+        }
+        finally {
+            this.finishJoinApply(attempt);
+        }
+    }
+
+    private void applyPendingAction(JoinAttempt attempt, PendingAction pendingAction) {
+        if (pendingAction == null || !this.isCurrentJoinAttempt(attempt)) {
             return;
         }
-        if (pendingAction.toUpperCase().startsWith("RTP") && "survival".equalsIgnoreCase(this.serverName)) {
+        Player player = attempt.player;
+        String action = pendingAction.action;
+        if (this.debugPendingActions) {
+            this.plugin.getLogger().info("[pending-action-debug] stage=apply uuid=" + String.valueOf(attempt.uuid) + " server=" + this.serverName + " action=" + action);
+        }
+        if (action.toUpperCase(java.util.Locale.ROOT).startsWith("RTP")
+                && this.plugin instanceof PizzaNetworkCore rtpCore) {
+            rtpCore.rtpLog("pending_apply", "player=" + player.getName()
+                + " syncServer=" + this.serverName + " action=" + action);
+        }
+        // Arrive next to another player after a cross-server teleport. Teleporting through the API
+        // needs no permission (the old "RUN_CMD:tp <name>" was silently refused for normal players).
+        // The target may not be loaded yet when we arrive, so this retries briefly.
+        if (action.startsWith("TPTO:")) {
+            String targetName = action.substring("TPTO:".length()).trim();
+            this.runOnJoinPlayerLater(attempt, () -> {
+                if (!targetName.isEmpty()) this.teleportToPlayerWhenReady(player, targetName, 0);
+                this.acknowledgeOneTimeActionAsync(attempt.uuid, pendingAction);
+            }, 1L);
+            return;
+        }
+        // Cross-server RTP over the database: the destination was resolved while the player was
+        // in transit, so this just collects the answer. See requestCrossServerRtp.
+        if ("RTPDB".equals(action)) {
+            this.runOnJoinPlayerLater(attempt, () -> {
+                if (this.plugin instanceof PizzaNetworkCore core) core.applyResolvedRtp(player, 0);
+                this.acknowledgeOneTimeActionAsync(attempt.uuid, pendingAction);
+            }, 1L);
+            return;
+        }
+        // ORDER MATTERS: "RTPAT:" also starts with "RTP", so handle the exact prefix before the
+        // search-on-arrival branch, or the pre-resolved coordinates are ignored.
+        if (action.startsWith("RTPAT:")) {
+            String[] parts = action.substring("RTPAT:".length()).split(",");
+            this.runOnJoinPlayerLater(attempt, () -> {
+                if (parts.length >= 4) {
+                    World w = Bukkit.getWorld(parts[0]);
+                    if (w != null) {
+                        try {
+                            player.teleport(new Location(w, Double.parseDouble(parts[1]),
+                                Double.parseDouble(parts[2]), Double.parseDouble(parts[3])));
+                        } catch (NumberFormatException ignored) { }
+                    }
+                }
+                this.acknowledgeOneTimeActionAsync(attempt.uuid, pendingAction);
+            }, 5L);
+            return;
+        }
+        if (action.toUpperCase().startsWith("RTP")) {
+            if (!"survival".equalsIgnoreCase(this.serverName) || !(this.plugin instanceof PizzaNetworkCore)) {
+                return;
+            }
             String raw;
             String dimensionArg = "overworld";
-            int idx = pendingAction.indexOf(58);
-            if (idx > 0 && idx < pendingAction.length() - 1 && ("nether".equals(raw = pendingAction.substring(idx + 1).trim().toLowerCase()) || "end".equals(raw) || "overworld".equals(raw))) {
+            int idx = action.indexOf(58);
+            if (idx > 0 && idx < action.length() - 1 && ("nether".equals(raw = action.substring(idx + 1).trim().toLowerCase()) || "end".equals(raw) || "overworld".equals(raw))) {
                 dimensionArg = raw;
             }
             String finalDimensionArg = dimensionArg;
-            this.runOnPlayerLater(player, () -> {
-                JavaPlugin patt0$temp;
-                if (player.isOnline() && (patt0$temp = this.plugin) instanceof PizzaNetworkCore) {
-                    PizzaNetworkCore core = (PizzaNetworkCore)patt0$temp;
-                    core.executeQueuedRtp(player, finalDimensionArg);
-                }
+            this.runOnJoinPlayerLater(attempt, () -> {
+                ((PizzaNetworkCore)this.plugin).executeQueuedRtp(player, finalDimensionArg);
+                this.acknowledgeOneTimeActionAsync(attempt.uuid, pendingAction);
             }, 10L);
             return;
         }
-        if (pendingAction.startsWith("RUN_CMD:")) {
-            String queued = pendingAction.substring("RUN_CMD:".length()).trim();
-            if (queued.isBlank()) {
-                return;
-            }
-            this.runOnPlayerLater(player, () -> {
-                if (player.isOnline()) {
+        if (action.startsWith("RUN_CMD:")) {
+            String queued = action.substring("RUN_CMD:".length()).trim();
+            this.runOnJoinPlayerLater(attempt, () -> {
+                if (!queued.isBlank()) {
                     player.performCommand(queued);
                 }
+                this.acknowledgeOneTimeActionAsync(attempt.uuid, pendingAction);
             }, 10L);
+            return;
         }
+        // Preserve the previous consume-on-read behavior for blank/unsupported payloads,
+        // but acknowledge only after this current entity session has observed them.
+        this.acknowledgeOneTimeActionAsync(attempt.uuid, pendingAction);
     }
 
     void queueOneTimeAction(UUID uuid, String action, int ttlSeconds) {
@@ -390,44 +423,47 @@ final class PlayerSyncManager {
             }
         });
     }
-
-    private String consumeOneTimeAction(UUID uuid) {
+    private PendingAction loadOneTimeAction(UUID uuid) {
         if (uuid == null) {
             return null;
         }
-        String selectSql = "SELECT action FROM player_transfer_actions WHERE uuid=? AND expires_at > CURRENT_TIMESTAMP LIMIT 1 FOR UPDATE";
-        String deleteSql = "DELETE FROM player_transfer_actions WHERE uuid=?";
+        String selectSql = "SELECT action, expires_at FROM player_transfer_actions WHERE uuid=? AND expires_at > CURRENT_TIMESTAMP LIMIT 1";
         try (Connection connection = this.getConnection();){
-            connection.setAutoCommit(false);
-            try {
-                String action = null;
-                try (PreparedStatement select = connection.prepareStatement(selectSql);){
-                    select.setString(1, uuid.toString());
-                    try (ResultSet rs = select.executeQuery();){
-                        if (rs.next()) {
-                            action = rs.getString("action");
-                        }
+            try (PreparedStatement select = connection.prepareStatement(selectSql);){
+                select.setString(1, uuid.toString());
+                try (ResultSet rs = select.executeQuery();){
+                    if (rs.next()) {
+                        String action = rs.getString("action");
+                        Timestamp expiresAt = rs.getTimestamp("expires_at");
+                        return new PendingAction(action, expiresAt);
                     }
                 }
-                try (PreparedStatement delete = connection.prepareStatement(deleteSql);){
-                    delete.setString(1, uuid.toString());
-                    delete.executeUpdate();
-                }
-                connection.commit();
-                return action == null || action.isBlank() ? null : action;
             }
-            catch (SQLException e) {
-                connection.rollback();
-                throw e;
-            }
-            finally {
-                connection.setAutoCommit(true);
-            }
-        }
-        catch (SQLException e) {
-            this.plugin.getLogger().warning("Failed consuming transfer action for " + String.valueOf(uuid) + ": " + e.getMessage());
             return null;
         }
+        catch (SQLException e) {
+            this.plugin.getLogger().warning("Failed reading transfer action for " + String.valueOf(uuid) + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    private void acknowledgeOneTimeActionAsync(UUID uuid, PendingAction pendingAction) {
+        if (uuid == null || pendingAction == null || pendingAction.expiresAt == null) {
+            return;
+        }
+        this.runAsync(() -> {
+            String sql = "DELETE FROM player_transfer_actions WHERE uuid=? AND action=? AND expires_at=?";
+            try (Connection connection = this.getConnection();
+                 PreparedStatement ps = connection.prepareStatement(sql);){
+                ps.setString(1, uuid.toString());
+                ps.setString(2, pendingAction.action);
+                ps.setTimestamp(3, pendingAction.expiresAt);
+                ps.executeUpdate();
+            }
+            catch (SQLException e) {
+                this.plugin.getLogger().warning("Failed acknowledging transfer action for " + String.valueOf(uuid) + ": " + e.getMessage());
+            }
+        });
     }
 
     private void saveLogoutMetaAsync(UUID uuid, String previousLeaseToken) {
@@ -657,14 +693,27 @@ final class PlayerSyncManager {
             this.plugin.getLogger().warning("Failed updating session lease for " + String.valueOf(uuid) + ": " + e.getMessage());
         }
     }
-
     private void heartbeatActiveLeases() {
         if (this.activeLeases.isEmpty()) {
             return;
         }
         for (Map.Entry<UUID, String> entry : this.activeLeases.entrySet()) {
-            this.upsertLease(entry.getKey(), entry.getValue());
+            UUID uuid = entry.getKey();
+            String leaseToken = entry.getValue();
+            synchronized (this.leaseWriteLock(uuid)) {
+                if (!leaseToken.equals(this.activeLeases.get(uuid))) {
+                    continue;
+                }
+                this.upsertLease(uuid, leaseToken);
+                if (!leaseToken.equals(this.activeLeases.get(uuid))) {
+                    this.clearStaleLease(uuid, leaseToken);
+                }
+            }
         }
+    }
+
+    private Object leaseWriteLock(UUID uuid) {
+        return this.leaseWriteLocks[Math.floorMod(uuid.hashCode(), this.leaseWriteLocks.length)];
     }
 
     private void clearLeaseAsync(UUID uuid, String leaseToken) {
@@ -694,37 +743,56 @@ final class PlayerSyncManager {
             task.run();
             return;
         }
-        if (this.foliaRuntime) {
-            Bukkit.getAsyncScheduler().runNow((Plugin)this.plugin, scheduledTask -> task.run());
-            return;
-        }
-        this.plugin.getServer().getScheduler().runTaskAsynchronously((Plugin)this.plugin, task);
+        PlatformScheduler.asyncNow(this.plugin, task);
     }
 
     private TaskHandle runAsyncRepeating(Runnable task, long initialDelayTicks, long periodTicks) {
-        if (this.foliaRuntime) {
-            long tickMs = 50L;
-            ScheduledTask scheduled = Bukkit.getAsyncScheduler().runAtFixedRate((Plugin)this.plugin, scheduledTask -> task.run(), initialDelayTicks * tickMs, periodTicks * tickMs, TimeUnit.MILLISECONDS);
-            return () -> ((ScheduledTask)scheduled).cancel();
-        }
-        BukkitTask bukkitTask = this.plugin.getServer().getScheduler().runTaskTimerAsynchronously((Plugin)this.plugin, task, initialDelayTicks, periodTicks);
-        return () -> ((BukkitTask)bukkitTask).cancel();
+        PlatformScheduler.TaskHandle scheduled = PlatformScheduler.asyncRepeating(this.plugin, task,
+            initialDelayTicks, periodTicks);
+        return scheduled::cancel;
     }
 
-    private void runOnPlayerNow(Player player, Runnable task) {
-        if (this.foliaRuntime) {
-            player.getScheduler().run((Plugin)this.plugin, scheduledTask -> task.run(), null);
-            return;
+    private boolean isCurrentJoinAttempt(JoinAttempt attempt) {
+        return attempt != null && this.joinAttempts.get(attempt.uuid) == attempt;
+    }
+
+    private void finishJoinApply(JoinAttempt attempt) {
+        if (attempt != null) {
+            attempt.applyingState = false;
         }
-        this.plugin.getServer().getScheduler().runTask((Plugin)this.plugin, task);
+    }
+
+    private void clearStaleJoinLease(JoinAttempt attempt) {
+        this.clearStaleLease(attempt.uuid, attempt.leaseToken);
+    }
+
+    private void clearStaleLease(UUID uuid, String leaseToken) {
+        // The lease write may have completed after a newer session's write. Compare by token
+        // both in memory and in SQL so cleanup cannot remove the replacement lease.
+        this.activeLeases.remove(uuid, leaseToken);
+        this.clearLeaseAsync(uuid, leaseToken);
+    }
+
+    private void runOnJoinPlayerNow(JoinAttempt attempt, Runnable task) {
+        PlatformScheduler.entityNow(this.plugin, attempt.player, task,
+            () -> {
+                this.clearStaleJoinLease(attempt);
+                this.finishJoinApply(attempt);
+            });
+    }
+
+    private void runOnJoinPlayerLater(JoinAttempt attempt, Runnable task, long delayTicks) {
+        PlatformScheduler.entityLater(this.plugin, attempt.player, () -> {
+            if (this.isCurrentJoinAttempt(attempt) && attempt.player.isOnline()) {
+                task.run();
+            } else {
+                this.clearStaleJoinLease(attempt);
+            }
+        }, () -> this.clearStaleJoinLease(attempt), delayTicks);
     }
 
     private void runOnPlayerLater(Player player, Runnable task, long delayTicks) {
-        if (this.foliaRuntime) {
-            player.getScheduler().runDelayed((Plugin)this.plugin, scheduledTask -> task.run(), null, delayTicks);
-            return;
-        }
-        this.plugin.getServer().getScheduler().runTaskLater((Plugin)this.plugin, task, delayTicks);
+        PlatformScheduler.entityLater(this.plugin, player, task, null, delayTicks);
     }
 
     private void saveSnapshot(UUID uuid, SyncSnapshot snapshot) {
@@ -920,7 +988,6 @@ final class PlayerSyncManager {
         }
         player.updateInventory();
     }
-
     private void debugAppliedState(Player player, String stage) {
         if (!this.debugStateLogging || player == null) {
             return;
@@ -935,6 +1002,9 @@ final class PlayerSyncManager {
         }
         if (!this.ensureDriverLoaded()) {
             throw new SQLException("MariaDB JDBC driver is not loaded");
+        }
+        if (this.dbUser == null || this.dbUser.isBlank() || this.dbPassword == null || this.dbPassword.isBlank()) {
+            throw new SQLException("Database credentials are not configured");
         }
         return DriverManager.getConnection(this.dbUrl, this.dbUser, this.dbPassword);
     }
@@ -1097,6 +1167,29 @@ final class PlayerSyncManager {
         public void cancel();
     }
 
+    private static final class JoinAttempt {
+        private final UUID uuid;
+        private final Player player;
+        private final String leaseToken;
+        private volatile boolean applyingState = true;
+
+        private JoinAttempt(UUID uuid, Player player, String leaseToken) {
+            this.uuid = uuid;
+            this.player = player;
+            this.leaseToken = leaseToken;
+        }
+    }
+
+    private static final class PendingAction {
+        private final String action;
+        private final Timestamp expiresAt;
+
+        private PendingAction(String action, Timestamp expiresAt) {
+            this.action = action;
+            this.expiresAt = expiresAt;
+        }
+    }
+
     private static final class SyncSnapshot {
         private final String lastServer;
         private final String worldName;
@@ -1162,7 +1255,6 @@ final class PlayerSyncManager {
             return new SyncSnapshot(rs.getString("last_server"), rs.getString("world_name"), rs.getDouble("x"), rs.getDouble("y"), rs.getDouble("z"), rs.getFloat("yaw"), rs.getFloat("pitch"), rs.getString("game_mode"), rs.getBytes("inventory_blob"), rs.getBytes("enderchest_blob"), rs.getBytes("stats_blob"), rs.getDouble("health"), rs.getInt("food_level"), rs.getFloat("saturation"), rs.getFloat("exhaustion"), rs.getFloat("exp"), rs.getInt("level"), rs.getInt("total_experience"), rs.getBoolean("allow_flight"), rs.getBoolean("is_flying"), rs.getFloat("fly_speed"), rs.getFloat("walk_speed"), rs.getInt("fire_ticks"), rs.getInt("remaining_air"));
         }
     }
-
     private static final class LogoutMeta {
         private final String lastLogoutServer;
         private final Timestamp lastLogoutAt;

@@ -37,6 +37,10 @@ commands:
     description: Transfer yourself or another player to another server endpoint.
     usage: /transfer <destination|host:port|host port>
     permission: pizzasmp.transfer
+  servermaint:
+    description: Frozen-in-place maintenance (players stay connected but can't move).
+    usage: /servermaint <start [reason]|end|status>
+    permission: pizzasmp.maintenance.admin
   transfermaintenance:
     description: Internal helper command for maintenance transfer workflow.
     usage: /transfermaintenance <on|off|status>
