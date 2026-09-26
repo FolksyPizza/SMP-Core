@@ -14,15 +14,15 @@ commands:
     usage: /gtp <player> [home-name|home-index]
     permission: pizzasmp.gtp
   homes:
-    description: Open the PizzaSMP homes GUI.
+    description: Open the homes GUI.
     usage: /homes
     permission: pizzasmp.homes
   menu:
-    description: Open the PizzaSMP main menu.
+    description: Open the main menu.
     usage: /menu
     permission: pizzasmp.menu
   guide:
-    description: Open the PizzaSMP guide menu.
+    description: Open the guide menu.
     usage: /guide
     permission: pizzasmp.guide
   freeze:
@@ -63,15 +63,16 @@ commands:
     description: PizzaBans command hub.
     usage: /pizzabans [help]
   pizzaplugins:
-    description: Show PizzaSMP plugin stack.
+    description: Show the plugin stack.
     usage: /pizzaplugins
     permission: pizzasmp.pluginadmin
   # /sus and /suspicious are handled by PizzaNetworkCore — keeping it registered here would cause a conflict
-  nv:
-    description: Toggle infinite night vision.
-    usage: /nv [player]
-    aliases: [nightvision]
-    permission: pizzasmp.nv
+  # /nv and /nightvision are handled by PizzaNetworkCore (same state as the /settings Night Vision toggle);
+  # registering them here too would conflict.
+  nuke:
+    description: Staff-only demolition item.
+    usage: /nuke [radius]
+    permission: pizzasmp.admin.nuke
   stash:
     description: Spawn a small randomized survival camp where you are looking.
     usage: /stash

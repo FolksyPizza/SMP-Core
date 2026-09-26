@@ -1,0 +1,30 @@
+{
+  "type": "minecraft:notice",
+  "title": { "text": "Maintenance", "color": "#00BFFF", "bold": true },
+  "external_title": "Maintenance",
+  "pause": false,
+  "can_close_with_escape": true,
+  "body": [
+    {
+      "type": "minecraft:plain_message",
+      "width": 320,
+      "contents": { "text": "Your region is under maintenance.", "color": "#FF5555", "bold": true }
+    },
+    {
+      "type": "minecraft:plain_message",
+      "width": 320,
+      "contents": { "text": "You will be returned automatically when the region restarts.", "color": "gray" }
+    },
+    {
+      "type": "minecraft:plain_message",
+      "width": 320,
+      "contents": { "text": "Please do not disconnect or teleport while you wait.", "color": "gray" }
+    },
+    {
+      "type": "minecraft:plain_message",
+      "width": 320,
+      "contents": { "text": "Thanks for your patience.", "color": "#00BFFF" }
+    }
+  ],
+  "action": { "label": { "text": "Back", "color": "#00BFFF" }, "width": 200 }
+}

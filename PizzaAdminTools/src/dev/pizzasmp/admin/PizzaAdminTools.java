@@ -1,5 +1,41 @@
 package dev.pizzasmp.admin;
 
+import io.papermc.paper.registry.data.dialog.ActionButton.Builder;
+import io.papermc.paper.registry.data.dialog.DialogBase.DialogAfterAction;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Consumer;
+import net.kyori.adventure.text.TextComponent;
+import net.kyori.adventure.text.event.ClickCallback.Options;
+import net.kyori.adventure.text.format.TextDecoration;
+import org.bukkit.Sound;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
+import org.bukkit.block.Chest;
+import org.bukkit.block.data.type.Bed;
+import org.bukkit.block.data.type.Bed.Part;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityResurrectEvent;
+import org.bukkit.event.entity.EntityDamageEvent.DamageCause;
+import org.bukkit.event.player.PlayerGameModeChangeEvent;
+import org.bukkit.event.player.PlayerItemConsumeEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.event.player.AsyncPlayerPreLoginEvent.Result;
+import org.bukkit.event.player.PlayerTeleportEvent.TeleportCause;
+import org.bukkit.projectiles.ProjectileSource;
+import dev.pizzasmp.common.scheduler.PlatformScheduler;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.bukkit.FluidCollisionMode;
+import org.bukkit.event.player.PlayerToggleFlightEvent;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -102,6 +138,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private static final String PERM_NV_CMD = "pizzasmp.nv";
     private static final String PERM_NV_OTHERS_CMD = "pizzasmp.nv.others";
     private static final String PERM_STASH_CMD = "pizzasmp.admin.stash";
+    private static final String PERM_NUKE_CMD = "pizzasmp.admin.nuke";
+    private static final int DEFAULT_NUKE_RADIUS = 15;
+    private static final int MAX_NUKE_RADIUS = 500;
+    private org.bukkit.NamespacedKey nukeKey;
+    private final java.util.Map<String, Integer> nukeBlocks = new java.util.concurrent.ConcurrentHashMap<>();
     private static final String PERM_ATRACK_CMD = "pizzasmp.admin.track";
     private static final String PERM_PIZZAPLUS_ADMIN = "pizzasmp.admin.pizzaplus";
     private static final String PERM_PERKS_CMD = "pizzasmp.perks";
@@ -117,8 +158,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private static final String RTP_LISTENER_CLASS = "com.jolly.rtp.RTPListener";
 
     private static final String BRAND_NAME = "PizzaPaper";
-    private static final String DISCORD_INVITE = "discord.gg/example";
-    private static final String SUS_MENU_TITLE = "&8Server Sus";
+    // Brand identity comes from PizzaNetworkCore's branding.yml (see loadBranding); these are neutral defaults.
+    private static String BRAND_DISPLAY = "ExampleSMP";
+    private static String BRAND_DISCORD = "";
+    private static String BRAND_SECTION = "&x&0&0&B&F&F&F";
+    private static net.kyori.adventure.text.format.TextColor BRAND_COLOR = net.kyori.adventure.text.format.TextColor.color(0x00BFFF);
+    private static String SUS_MENU_TITLE = "&8ExampleSMP Sus";
 
     private static final long COMBAT_TAG_MILLIS = 15_000L;
     private static final long SUS_LOOKBACK_MILLIS = 30L * 60L * 1000L;
@@ -131,59 +176,292 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private static final Set<String> FROZEN_ALLOWED_COMMANDS = Set.of(
         "freeze", "unfreeze", "msg", "tell", "w", "whisper", "r", "reply"
     );
+    // NOTE: /duel is intentionally NOT here. Its first arg is often a SUBCOMMAND (accept/deny/cancel),
+    // not a player name, so gating it as an online-target command wrongly blocked "/duel accept <name>"
+    // with "The user is not online". /duel is fully handled by PizzaNetworkCore.
     private static final Set<String> ONLINE_TARGET_FIRST_ARG_COMMANDS = Set.of(
-        "tpa", "tpahere", "tpaccept", "tpdeny", "msg", "tell", "w", "whisper", "pay", "trade", "duel"
+        "tpa", "tpahere", "tpaccept", "tpdeny", "msg", "tell", "w", "whisper", "pay", "trade"
     );
-    // Commands non-staff (anyone lacking pizzasmp.pluginadmin — i.e. default + pizza+)
-    // must NEITHER see in tab NOR be able to run. The preprocess interceptor below
-    // fires the existing "this command does not exist" hotbar message for these,
-    // matching the UX of typing a truly unknown command. LuckPerms negations on the
-    // permission nodes hide them from tab automatically.
     private static final Set<String> RESTRICTED_FOR_NON_STAFF = Set.of(
-        // Vanilla minecraft / server admin
-        "attribute","ban","ban-ip","banip","banlist","bossbar","clone","damage","data","datapack",
-        "debug","defaultgamemode","deop","dialog","difficulty","effect","execute",
-        "experience","fill","fillbiome","forceload","function","gamemode","gamerule",
-        "give","gm","gma","gmc","gmt","gms","gmsp","jfr",
-        "kick","kill","locate","locatebiome","loot","op","pardon","pardon-ip","particle",
-        "perf","place","playsound",
-        "reload","reset","restart","ride","rl","rotate","save-all","save-off","save-on","say",
-        "schedule","scoreboard","seed","setblock","setidletimeout","setworldspawn",
-        "spawnpoint","spectate","spreadplayers","stop","stopsound","summon","tab",
-        "tag","tell","tellraw","teleport","tempban","tempbanip","test","tick","title",
-        "tp","tpall","tphere","tpo","tpohere","tppos","transfer","unban","unbanip",
-        "viewdistance","waypoint","whitelist","worldborder","xp",
-        // Essentials / staff tools (non-prefixed variants)
-        "broadcast","bcast","butcher","ci","clear","clearinventory","clearwarnings",
-        "eco","economy","ess","essentials","feed","fix","fly","flyspeed","freeze",
-        "getpos","god","heal","i","invsee","item","jail","jails","kit","kits","killall",
-        "maintenance","more","near","nick","nickname","offend","pizzaplus","powertool",
-        "ptime","pweather","remove","repair","seen","setspawn","setwarp","delwarp",
-        "socialspy","spawnmob","spawnstash","speed","stash","sudo","time","togglejail",
-        "top","unfreeze","unjail","unmute","unoffend","vanish","walkspeed","weather",
-        // Plugin platform / diagnostics
-        "geyser","grim","grimac","mspt","paper","plan","spigot","timings","viabackwards",
+        "nuke",
+        "attribute",
+        "ban",
+        "ban-ip",
+        "banip",
+        "banlist",
+        "bossbar",
+        "clone",
+        "damage",
+        "data",
+        "datapack",
+        "debug",
+        "defaultgamemode",
+        "deop",
+        "dialog",
+        "difficulty",
+        "effect",
+        "execute",
+        "experience",
+        "fill",
+        "fillbiome",
+        "forceload",
+        "function",
+        "gamemode",
+        "gamerule",
+        "give",
+        "gm",
+        "gma",
+        "gmc",
+        "gmt",
+        "gms",
+        "gmsp",
+        "jfr",
+        "kick",
+        "kill",
+        "locate",
+        "locatebiome",
+        "loot",
+        "op",
+        "pardon",
+        "pardon-ip",
+        "particle",
+        "perf",
+        "place",
+        "playsound",
+        "reload",
+        "reset",
+        "restart",
+        "ride",
+        "rl",
+        "rotate",
+        "save-all",
+        "save-off",
+        "save-on",
+        "say",
+        "schedule",
+        "scoreboard",
+        "seed",
+        "setblock",
+        "setidletimeout",
+        "setworldspawn",
+        "spawnpoint",
+        "spreadplayers",
+        "stop",
+        "stopsound",
+        "summon",
+        "tab",
+        "tag",
+        "tell",
+        "tellraw",
+        "teleport",
+        "tempban",
+        "tempbanip",
+        "test",
+        "tick",
+        "title",
+        "tp",
+        "tpall",
+        "tphere",
+        "tpo",
+        "tpohere",
+        "tppos",
+        "transfer",
+        "unban",
+        "unbanip",
+        "viewdistance",
+        "waypoint",
+        "whitelist",
+        "worldborder",
+        "xp",
+        "broadcast",
+        "bcast",
+        "butcher",
+        "ci",
+        "clear",
+        "clearinventory",
+        "clearwarnings",
+        "eco",
+        "economy",
+        "ess",
+        "essentials",
+        "feed",
+        "fix",
+        "fly",
+        "flyspeed",
+        "freeze",
+        "getpos",
+        "god",
+        "heal",
+        "i",
+        "invsee",
+        "item",
+        "jail",
+        "jails",
+        "kit",
+        "kits",
+        "killall",
+        "maintenance",
+        "more",
+        "near",
+        "nick",
+        "nickname",
+        "offend",
+        "pizzaplus",
+        "powertool",
+        "ptime",
+        "pweather",
+        "remove",
+        "repair",
+        "seen",
+        "setspawn",
+        "setwarp",
+        "delwarp",
+        "socialspy",
+        "spawnmob",
+        "spawnstash",
+        "speed",
+        "stash",
+        "sudo",
+        "time",
+        "togglejail",
+        "top",
+        "unfreeze",
+        "unjail",
+        "unmute",
+        "unoffend",
+        "vanish",
+        "walkspeed",
+        "weather",
+        "geyser",
+        "grim",
+        "grimac",
+        "mspt",
+        "paper",
+        "plan",
+        "spigot",
+        "timings",
+        "viabackwards",
         "viaversion",
-        // Plugin admin / staff tools
-        "admin","admindelhome","bancheck","bans","clearbans","clearmutes","call","deluxmenu",
-        "maintenancemotd","setmaintenancemotd","maintmotd","limbomaint",
-        "deluxemenus","diagnostics","dm","dmenu","gtp","history","listbans","listmutes",
-        "lp","luckperms","moderation","mute","papi","perm","permban","permission",
-        "permissions","perms","pizzaadmin","pizzaadmintools","pizzabans","pizzadebug",
-        "pizzahome","pizzamenus","pizzasusflag","pizzateams","placeholderapi","pm",
-        "pong","punish","reply","rtpreload","searchid","sethomegui","sfmode","stopwatch",
-        "suicide","sus","suspicious","tools","warp","warps","whisper",
-        // Essentials e-prefixed admin (NOT gameplay — gameplay e-aliases like emsg,
-        // er, ereply, epay, ehome, etpa, etpaccept, etpadeny, etpacancel are kept).
-        "eafk","eantioch","eattack","eban","ebanip","ebreak","ebroadcast","eburn",
-        "eclear","eclearinventory","edelhome","edelwarp","edeop","edisposal","eeco",
-        "eecogive","eecotake","efeed","efireball","efirework","efly","egamemode",
-        "egetpos","egive","egod","eheal","ehelpop","einvsee","eitem","ejails","ejump",
-        "ekick","ekickall","ekill","ekit","ekittycannon","elist","emore","emute",
-        "enchant","enear","enick","eopme","eplayerlist","epowertool","eptime",
-        "epweather","equit","eremove","erepair","eseen","esell","esetspawn","esetwarp",
-        "eshowkit","esocialspy","espawnmob","esudo","etempban","etop","etreasure",
-        "evanish","ewarp","eweather","eworkbench","eworld"
+        "admin",
+        "admindelhome",
+        "bancheck",
+        "bans",
+        "clearbans",
+        "clearmutes",
+        "call",
+        "deluxmenu",
+        "maintenancemotd",
+        "setmaintenancemotd",
+        "maintmotd",
+        "limbomaint",
+        "deluxemenus",
+        "diagnostics",
+        "dm",
+        "dmenu",
+        "gtp",
+        "history",
+        "listbans",
+        "listmutes",
+        "lp",
+        "luckperms",
+        "moderation",
+        "mute",
+        "papi",
+        "perm",
+        "permban",
+        "permission",
+        "permissions",
+        "perms",
+        "pizzaadmin",
+        "pizzaadmintools",
+        "pizzabans",
+        "pizzadebug",
+        "pizzahome",
+        "pizzamenus",
+        "pizzasusflag",
+        "pizzateams",
+        "placeholderapi",
+        "pm",
+        "pong",
+        "punish",
+        "reply",
+        "rtpreload",
+        "searchid",
+        "sethomegui",
+        "sfmode",
+        "stopwatch",
+        "suicide",
+        "sus",
+        "suspicious",
+        "tools",
+        "warps",
+        "whisper",
+        "eafk",
+        "eantioch",
+        "eattack",
+        "eban",
+        "ebanip",
+        "ebreak",
+        "ebroadcast",
+        "eburn",
+        "eclear",
+        "eclearinventory",
+        "edelhome",
+        "edelwarp",
+        "edeop",
+        "edisposal",
+        "eeco",
+        "eecogive",
+        "eecotake",
+        "efeed",
+        "efireball",
+        "efirework",
+        "efly",
+        "egamemode",
+        "egetpos",
+        "egive",
+        "egod",
+        "eheal",
+        "ehelpop",
+        "einvsee",
+        "eitem",
+        "ejails",
+        "ejump",
+        "ekick",
+        "ekickall",
+        "ekill",
+        "ekit",
+        "ekittycannon",
+        "elist",
+        "emore",
+        "emute",
+        "enchant",
+        "enear",
+        "enick",
+        "eopme",
+        "eplayerlist",
+        "epowertool",
+        "eptime",
+        "epweather",
+        "equit",
+        "eremove",
+        "erepair",
+        "eseen",
+        "esell",
+        "esetspawn",
+        "esetwarp",
+        "eshowkit",
+        "esocialspy",
+        "espawnmob",
+        "esudo",
+        "etempban",
+        "etop",
+        "etreasure",
+        "evanish",
+        "ewarp",
+        "eweather",
+        "eworkbench",
+        "eworld"
     );
     // NOTE: "plugins"/"pl" intentionally NOT gated — /plugins must show the real
     // Bukkit plugin list. Branded list stays available via /pizzaplugins.
@@ -204,7 +482,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         Map.entry("e", "world_the_end")
     );
 
-    private static final String HOME_MENU_TITLE = "&8Server Homes";
+    private static String HOME_MENU_TITLE = "&8ExampleSMP Homes";
     private static final String HOME_DELETE_TITLE = "&8Confirm Home Deletion";
     // Absolute slot ceiling (pizza++ tier). Per-player limits come from allowedHomes().
     // NOTE: the current GUI still renders only the 5 BED_SLOTS — the GUI rework lands later;
@@ -222,7 +500,28 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private static final int[] BED_SLOTS = {10, 11, 12, 13, 14};
     private static final int[] DYE_SLOTS = {19, 20, 21, 22, 23};
     private static final String OWNER_BLUE = "&b";
-    private static final String HOME_PRIMARY = OWNER_BLUE;
+    private static String HOME_PRIMARY = OWNER_BLUE;
+
+    /** Reads the active brand profile (display name, Discord, primary colour) from PizzaNetworkCore's branding.yml. */
+    private void loadBranding() {
+        try {
+            org.bukkit.configuration.file.YamlConfiguration b = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(
+                new File(getConfig().getString("branding.file", "plugins/PizzaNetworkCore/branding.yml")));
+            String active = b.getString("active", "example");
+            BRAND_DISPLAY = b.getString("profiles." + active + ".display", "ExampleSMP");
+            BRAND_DISCORD = b.getString("profiles." + active + ".discord", "");
+            String hex = b.getString("profiles." + active + ".colors.primary", "00BFFF").toUpperCase(Locale.ROOT);
+            BRAND_COLOR = net.kyori.adventure.text.format.TextColor.color(Integer.parseInt(hex, 16));
+            StringBuilder section = new StringBuilder("&x");
+            for (char c : hex.toCharArray()) section.append('&').append(c);
+            BRAND_SECTION = section.toString();
+            SUS_MENU_TITLE = "&8" + BRAND_DISPLAY + " Sus";
+            HOME_MENU_TITLE = "&8" + BRAND_DISPLAY + " Homes";
+            HOME_PRIMARY = BRAND_SECTION;
+        } catch (Exception ex) {
+            getLogger().warning("[brand] branding.yml could not be read; using defaults: " + ex.getMessage());
+        }
+    }
     private static final List<String> BRANDED_PLUGIN_LIST = List.of(
         "PizzaTeamsGUI",
         "PizzaTeams",
@@ -264,7 +563,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private File staffModeFile;
     // One-time creative passes granted by the console-only /gmcbypass (bypasses the creative ban).
     private final Set<UUID> creativeBypass = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, Integer> pendingTeleportTasks = new ConcurrentHashMap<>();
     private final Map<UUID, Location> pendingTeleportOrigins = new ConcurrentHashMap<>();
     private final Set<UUID> frozenPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Location> frozenAnchors = new ConcurrentHashMap<>();
@@ -272,20 +570,27 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     // Frozen-in-place maintenance ("virtual maintenance"): non-staff stay connected, see their
     // last location, but can't move/interact while the server is being updated.
     private volatile boolean maintenanceActive = false;
-    private String maintenanceReason = "Scheduled maintenance";
+    private volatile String maintenanceReason = "Scheduled maintenance";
+    private volatile long maintenanceGeneration;
     private final Set<UUID> maintenanceFrozen = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> maintenanceUnfreezePending = ConcurrentHashMap.newKeySet();
     private File maintenanceModeFile;
     private final Map<UUID, Integer> susMenuPages = new ConcurrentHashMap<>();
     private final Set<UUID> nvEnabled = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, UUID> atrackTargets = new ConcurrentHashMap<>();
-    private final Map<UUID, Integer> atrackTasks = new ConcurrentHashMap<>();
+    private final Map<UUID, AtrackSession> atrackSessions = new ConcurrentHashMap<>();
     private final Map<UUID, GameMode> atrackPriorMode = new ConcurrentHashMap<>();
+    private final Map<UUID, Player> atrackTrackers = new ConcurrentHashMap<>();
+    private org.bukkit.NamespacedKey atrackRestoreModeKey;
+    private org.bukkit.NamespacedKey maintenanceRestoreInvulnerabilityKey;
+    private volatile boolean atrackStopping;
     private CommandMap commandMap;
     private File transferDestinationsFile;
     private FileConfiguration transferDestinationsConfig;
     private File maintenanceTransferStateFile;
     private FileConfiguration maintenanceTransferStateConfig;
 
+    private final Object maintenanceTransferLock = new Object();
+    private long maintenanceTransferGeneration;
     /**
      * Shared storage for state that must follow a player between backends.
      *
@@ -327,6 +632,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     @Override
     public void onEnable() {
+        loadBranding();
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "admintools");
         if (!this.storage.isMysql()) {
             getLogger().warning("[storage] running on local files: subscription tiers, staff mode and "
@@ -360,48 +666,153 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         initTransferDestinations();
         initMaintenanceTransferState();
         loadMaintenanceMode();
+        this.atrackRestoreModeKey = new org.bukkit.NamespacedKey(this, "atrack_restore_mode");
+        this.maintenanceRestoreInvulnerabilityKey = new org.bukkit.NamespacedKey(this, "maintenance_restore_invulnerable");
         // Keep the green maintenance hotbar persistent (action bars fade after ~3s) — refresh every 2s.
-        Bukkit.getScheduler().runTaskTimer(this, () -> {
+        PlatformScheduler.globalRepeating(this, () -> {
             if (!maintenanceActive) return;
-            for (UUID id : maintenanceFrozen) {
+            for (UUID id : List.copyOf(maintenanceFrozen)) {
                 Player p = Bukkit.getPlayer(id);
-                if (p != null && p.isOnline()) showMaintenanceTitle(p);
+                if (p == null) continue;
+                PlatformScheduler.entityNow(this, p, () -> {
+                    if (maintenanceActive && maintenanceFrozen.contains(id) && p.isOnline()) showMaintenanceTitle(p);
+                }, null);
             }
         }, 40L, 40L);
         initPizzaPlusSubscriptions();
         getServer().getPluginManager().registerEvents(this, this);
+        // Restore any /atrack or maintenance-freeze state left behind by a reload or crash.
+        scheduleAtrackRecoveryForOnlinePlayers();
+        scheduleMaintenanceRecoveryForOnlinePlayers();
         // Hourly Pizza+ expiry sweep — auto-revokes subscriptions whose 30-day clock ran out.
-        Bukkit.getScheduler().runTaskTimer(this, this::runPizzaPlusExpirySweep, 20L * 60L, 20L * 60L * 60L);
-        // Persisted NV state survives relog/restart.
-        loadNvState();
-        // Re-apply night vision every 2s for players in nvEnabled (handles totem/milk/respawn/any removal)
-        Bukkit.getScheduler().runTaskTimer(this, () -> {
-            for (UUID id : nvEnabled) {
-                Player p = Bukkit.getPlayer(id);
-                if (p != null && p.isOnline() && !p.hasPotionEffect(PotionEffectType.NIGHT_VISION)) {
-                    p.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
-                }
-            }
-        }, 40L, 40L);
+        PlatformScheduler.globalRepeating(this, this::runPizzaPlusExpirySweep, 20L * 60L, 20L * 60L * 60L);
+        // Night vision lives in PizzaNetworkCore (/nv, /nightvision and the settings toggle), so nvEnabled
+        // stays empty here and the respawn/consume re-apply hooks are inert.
+        this.nukeKey = new org.bukkit.NamespacedKey(this, "nuke_power");
+        registerCommand("nuke", true);
         getLogger().info("PizzaAdminTools enabled.");
     }
 
-    @Override
     public void onDisable() {
-        for (int taskId : pendingTeleportTasks.values()) {
-            Bukkit.getScheduler().cancelTask(taskId);
+        this.advanceMaintenanceTransferGeneration();
+        this.stopAllAtrackSessions();
+        this.combatTaggedUntil.clear();
+        this.adminTargetIndex.clear();
+        this.pendingDeleteSlot.clear();
+        this.frozenPlayers.clear();
+        this.frozenAnchors.clear();
+        this.frozenNoticeCooldown.clear();
+        this.susMenuPages.clear();
+        this.commandMap = null;
+        this.saveMaintenanceTransferState();
+        this.savePizzaPlusSubscriptions();
+    }
+
+    // ===== Nuke: hidden staff-only demolition item =====
+    private boolean handleNukeCommand(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player)) { sender.sendMessage("Player-only command."); return true; }
+        Player p = (Player) sender;
+        if (!p.hasPermission(PERM_NUKE_CMD) && !p.hasPermission("pizzasmp.pluginadmin")) {
+            p.sendMessage("\u00a7cThis command does not exist.");
+            return true;
         }
-        pendingTeleportTasks.clear();
-        combatTaggedUntil.clear();
-        adminTargetIndex.clear();
-        pendingDeleteSlot.clear();
-        frozenPlayers.clear();
-        frozenAnchors.clear();
-        frozenNoticeCooldown.clear();
-        susMenuPages.clear();
-        commandMap = null;
-        saveMaintenanceTransferState();
-        savePizzaPlusSubscriptions();
+        int radius = DEFAULT_NUKE_RADIUS;
+        if (args.length >= 1) {
+            try { radius = Integer.parseInt(args[0].trim()); }
+            catch (NumberFormatException ex) { p.sendMessage("\u00a7cUsage: /nuke [radius 1-" + MAX_NUKE_RADIUS + "]"); return true; }
+        }
+        radius = Math.max(1, Math.min(radius, MAX_NUKE_RADIUS));
+        ItemStack nuke = new ItemStack(Material.TNT);
+        org.bukkit.inventory.meta.ItemMeta m = nuke.getItemMeta();
+        m.setDisplayName("\u00a74\u00a7l\u2622 NUKE \u2622");
+        m.setLore(java.util.List.of(
+            "\u00a77Place it, then \u00a7cleft-click\u00a77 the block to detonate.",
+            "\u00a77Blast radius: \u00a7c" + radius,
+            "\u00a78Staff-only ordnance"));
+        m.getPersistentDataContainer().set(this.nukeKey, org.bukkit.persistence.PersistentDataType.INTEGER, radius);
+        nuke.setItemMeta(m);
+        java.util.HashMap<Integer, ItemStack> leftover = p.getInventory().addItem(nuke);
+        if (!leftover.isEmpty()) p.getWorld().dropItemNaturally(p.getLocation(), nuke);
+        p.sendMessage("\u00a77Nuke handed over (radius \u00a7c" + radius + "\u00a77). Place it and \u00a7cleft-click\u00a77 to detonate.");
+        return true;
+    }
+
+    private Integer nukePowerOf(ItemStack it) {
+        if (it == null || it.getType() != Material.TNT || !it.hasItemMeta()) return null;
+        return it.getItemMeta().getPersistentDataContainer().get(this.nukeKey, org.bukkit.persistence.PersistentDataType.INTEGER);
+    }
+
+    private static String nukeBlockKey(Location l) {
+        return l.getWorld().getName() + ":" + l.getBlockX() + ":" + l.getBlockY() + ":" + l.getBlockZ();
+    }
+
+    @org.bukkit.event.EventHandler
+    public void onNukePlace(BlockPlaceEvent e) {
+        Integer power = this.nukePowerOf(e.getItemInHand());
+        if (power == null) return;
+        this.nukeBlocks.put(nukeBlockKey(e.getBlockPlaced().getLocation()), power);
+        e.getPlayer().sendMessage("\u00a77Nuke armed. \u00a7cLeft-click\u00a77 it to detonate.");
+    }
+
+    // Left-click detonation. TNT is instabreak, so a left-click fires interact and/or break;
+    // both are handled and the map.remove guarantees only one detonation.
+    @org.bukkit.event.EventHandler(ignoreCancelled = false)
+    public void onNukeInteract(org.bukkit.event.player.PlayerInteractEvent e) {
+        if (e.getAction() != org.bukkit.event.block.Action.LEFT_CLICK_BLOCK || e.getClickedBlock() == null) return;
+        Integer power = this.nukeBlocks.remove(nukeBlockKey(e.getClickedBlock().getLocation()));
+        if (power == null) return;
+        e.setCancelled(true);
+        Location center = e.getClickedBlock().getLocation().add(0.5, 0.5, 0.5);
+        e.getClickedBlock().setType(Material.AIR, false);
+        this.detonateNuke(center, power);
+    }
+
+    @org.bukkit.event.EventHandler(ignoreCancelled = true)
+    public void onNukeBreak(BlockBreakEvent e) {
+        Integer power = this.nukeBlocks.remove(nukeBlockKey(e.getBlock().getLocation()));
+        if (power == null) return;
+        e.setCancelled(true);
+        Location center = e.getBlock().getLocation().add(0.5, 0.5, 0.5);
+        e.getBlock().setType(Material.AIR, false);
+        this.detonateNuke(center, power);
+    }
+
+    private void clearNukeBlock(World w, int x, int y, int z) {
+        Block b = w.getBlockAt(x, y, z);
+        Material t = b.getType();
+        if (t != Material.AIR && t != Material.CAVE_AIR && t != Material.VOID_AIR && t != Material.BEDROCK) {
+            b.setType(Material.AIR, false);
+        }
+    }
+
+    private void detonateNuke(Location center, int radius) {
+        World w = center.getWorld();
+        if (w == null) return;
+        int r = Math.max(1, Math.min(radius, MAX_NUKE_RADIUS));
+        int cx = center.getBlockX(), cy = center.getBlockY(), cz = center.getBlockZ();
+        int minY = w.getMinHeight(), maxY = w.getMaxHeight() - 1;
+        long r2 = (long) r * r;
+        // Instant, drop-less destruction: every block in the sphere is despawned to air in one shot.
+        // Only LOADED chunks are touched (unloaded ones are skipped, never force-loaded) so even a huge
+        // radius can't stall the server generating thousands of chunks -- it vaporises everything you
+        // can actually see, immediately.
+        for (int x = -r; x <= r; x++) {
+            int wx = cx + x;
+            for (int z = -r; z <= r; z++) {
+                int wz = cz + z;
+                if (!w.isChunkLoaded(wx >> 4, wz >> 4)) continue;
+                for (int y = -r; y <= r; y++) {
+                    int wy = cy + y;
+                    if (wy < minY || wy > maxY) continue;
+                    if ((long) x * x + (long) y * y + (long) z * z > r2) continue;
+                    this.clearNukeBlock(w, wx, wy, wz);
+                }
+            }
+        }
+        // Cosmetic blast: particles + sound + entity knockback (breaks no additional blocks).
+        try { w.createExplosion(center, Math.min(8.0f, (float) r), false, false); } catch (Throwable ignored) {}
+        try { w.spawnParticle(org.bukkit.Particle.EXPLOSION_EMITTER, center, 10, r * 0.12, r * 0.1, r * 0.12, 0.0); } catch (Throwable ignored) {}
+        w.playSound(center, Sound.ENTITY_GENERIC_EXPLODE, 16.0f, 0.5f);
     }
 
     private void registerCommand(String name, boolean tabComplete) {
@@ -415,59 +826,59 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
-    @Override
-    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        String cmd = command.getName().toLowerCase(Locale.ROOT);
-
-        switch (cmd) {
+    public boolean onCommand(CommandSender var1, Command var2, String var3, String[] var4) {
+        String var5 = var2.getName().toLowerCase(Locale.ROOT);
+        switch (var5) {
             case "gtp":
-                return handleGtpCommand(sender, args);
+                return this.handleGtpCommand(var1, var4);
             case "homes":
-                return handleHomesCommand(sender);
+                return this.handleHomesCommand(var1);
             case "menu":
-                return handleMenuCommand(sender);
+                return this.handleMenuCommand(var1);
             case "guide":
-                return handleGuideCommand(sender);
+                return this.handleGuideCommand(var1);
             case "freeze":
-                return handleFreezeCommand(sender, args);
+                return this.handleFreezeCommand(var1, var4);
             case "unfreeze":
-                return handleUnfreezeCommand(sender, args);
+                return this.handleUnfreezeCommand(var1, var4);
             case "servermaint":
-                return handleServerMaintCommand(sender, args);
+                return this.handleServerMaintCommand(var1, var4);
             case "transfer":
-                return handleTransferCommand(sender, args);
+                return this.handleTransferCommand(var1, var4);
             case "transfermaintenance":
-                return handleTransferMaintenanceCommand(sender, args);
+                return this.handleTransferMaintenanceCommand(var1, var4);
             case "pizzaadmintools":
-                return handlePizzaAdminToolsHelp(sender);
+                return this.handlePizzaAdminToolsHelp(var1);
             case "pizzateams":
-                return handlePizzaTeamsHelp(sender);
+                return this.handlePizzaTeamsHelp(var1);
             case "pizzamenus":
-                return handlePizzaMenusHelp(sender);
+                return this.handlePizzaMenusHelp(var1);
             case "pizzahome":
-                return handlePizzaHomeHelp(sender);
+                return this.handlePizzaHomeHelp(var1);
             case "pizzabans":
-                return handlePizzaBansHelp(sender);
+                return this.handlePizzaBansHelp(var1);
             case "pizzaplugins":
-                return handlePizzaPlugins(sender);
+                return this.handlePizzaPlugins(var1);
             case "sus":
-                return handleSusCommand(sender, args);
+                return this.handleSusCommand(var1, var4);
             case "stash":
             case "spawnstash":
-                return handleStashCommand(sender);
+                return this.handleStashCommand(var1);
+            case "nuke":
+                return this.handleNukeCommand(var1, var4);
             case "pizzaplus":
-                return handlePizzaPlusCommand(sender, args);
+                return this.handlePizzaPlusCommand(var1, var4);
             case "perks":
-                return handlePerksCommand(sender);
+                return this.handlePerksCommand(var1);
             case "atrack":
-                return handleAtrackCommand(sender, args);
+                return this.handleAtrackCommand(var1, var4);
             case "sfmode":
-                return handleSfModeCommand(sender);
+                return this.handleSfModeCommand(var1);
             case "gmcbypass":
-                return handleGmcBypassCommand(sender, args);
+                return this.handleGmcBypassCommand(var1, var4);
             case "nv":
             case "nightvision":
-                return handleNightVisionCommand(sender, args);
+                return this.handleNightVisionCommand(var1, var4);
             default:
                 return false;
         }
@@ -659,44 +1070,112 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             sender.sendMessage(color("&cOnly players can use /stash."));
             return true;
         }
+        // Built on the player's own scheduler; spawnStash checks permission, target and region ownership.
+        try {
+            PlatformScheduler.entityNow(this, player, () -> this.spawnStash(player), () -> { });
+        } catch (RuntimeException exception) {
+            getLogger().warning("Could not schedule /stash for its player.");
+        }
+        return true;
+    }
+
+    private void spawnStash(Player player) {
+        if (!player.isOnline()) return;
         if (!player.hasPermission(PERM_STASH_CMD)) {
             player.sendMessage(color("&cYou do not have permission to use /stash."));
-            return true;
+            return;
         }
-        org.bukkit.block.Block center = player.getTargetBlockExact(64);
-        if (center == null || center.getType() == Material.AIR) {
-            player.sendActionBar(color("&cLook at a solid block within 64 blocks."));
-            return true;
-        }
-        try {
-            World world = center.getWorld();
-            java.util.concurrent.ThreadLocalRandom rng = java.util.concurrent.ThreadLocalRandom.current();
-            int cx = center.getX(), cy = center.getY(), cz = center.getZ();
 
-            // Weighted variant pick — usually small, rarely a full camp.
-            int roll = rng.nextInt(100);
-            String variant;
-            if (roll < 45) {
-                variant = "tiny";
-                buildStashTiny(world, cx, cy, cz, rng);
-            } else if (roll < 75) {
-                variant = "small";
-                buildStashSmall(world, cx, cy, cz, rng);
-            } else if (roll < 92) {
-                variant = "medium";
-                buildStashMedium(world, cx, cy, cz, rng);
+        Block target = this.findOwnedStashTarget(player, 64);
+        if (target == null) {
+            player.sendActionBar(color("&cLook at a solid block within 64 blocks and within your current region."));
+            return;
+        }
+
+        World world = target.getWorld();
+        int x = target.getX();
+        int y = target.getY();
+        int z = target.getZ();
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        int roll = random.nextInt(100);
+        String size;
+        int highestBlockY;
+        if (roll < 45) {
+            size = "tiny";
+            highestBlockY = y + 1;
+        } else if (roll < 75) {
+            size = "small";
+            highestBlockY = y + 1;
+        } else if (roll < 92) {
+            size = "medium";
+            highestBlockY = y + 2;
+        } else {
+            size = "full";
+            highestBlockY = y + 3;
+        }
+
+        if (highestBlockY >= world.getMaxHeight()) {
+            player.sendActionBar(color("&cThere is not enough vertical space for this stash."));
+            return;
+        }
+        if (!this.isStashFootprintOwnedByCurrentRegion(world, x, y, z)) {
+            player.sendActionBar(color("&cThe stash footprint crosses a region boundary. Choose another block."));
+            return;
+        }
+
+        try {
+            if ("tiny".equals(size)) {
+                this.buildStashTiny(world, x, y, z, random);
+            } else if ("small".equals(size)) {
+                this.buildStashSmall(world, x, y, z, random);
+            } else if ("medium".equals(size)) {
+                this.buildStashMedium(world, x, y, z, random);
             } else {
-                variant = "full";
-                buildStashFull(world, cx, cy, cz, rng);
+                this.buildStashFull(world, x, y, z, random);
             }
 
-            // Console-only audit; nothing sent to the player.
-            getLogger().info(player.getName() + " spawned a " + variant + " stash at "
-                + cx + "," + cy + "," + cz + " in " + world.getName());
-        } catch (Exception ex) {
+            this.getLogger().info(player.getName() + " spawned a " + size + " stash at " + x + "," + y + "," + z + " in " + world.getName());
+        } catch (Exception exception) {
             player.sendActionBar(color("&cStash build failed."));
-            getLogger().warning("Stash build failed for " + player.getName() + ": " + ex);
+            this.getLogger().warning("Stash build failed for " + player.getName() + ": " + exception);
         }
+    }
+
+    private Block findOwnedStashTarget(Player player, int maxDistance) {
+        Location eye = player.getEyeLocation();
+        World world = eye.getWorld();
+        Vector direction = eye.getDirection();
+        int lastX = Integer.MIN_VALUE;
+        int lastY = Integer.MIN_VALUE;
+        int lastZ = Integer.MIN_VALUE;
+
+        // TargetBlockExact may read across region boundaries before returning a block.
+        for (int step = 0; step <= maxDistance * 5; step++) {
+            double distance = step / 5.0;
+            int x = Location.locToBlock(eye.getX() + direction.getX() * distance);
+            int y = Location.locToBlock(eye.getY() + direction.getY() * distance);
+            int z = Location.locToBlock(eye.getZ() + direction.getZ() * distance);
+            if (x == lastX && y == lastY && z == lastZ) continue;
+            lastX = x;
+            lastY = y;
+            lastZ = z;
+
+            Location blockLocation = new Location(world, x, y, z);
+            if (!Bukkit.isOwnedByCurrentRegion(blockLocation)) return null;
+            Block block = world.getBlockAt(x, y, z);
+            if (block.rayTrace(eye, direction, maxDistance, FluidCollisionMode.NEVER) != null) return block;
+        }
+
+        return null;
+    }
+
+    private boolean isStashFootprintOwnedByCurrentRegion(World world, int x, int y, int z) {
+        for (int offsetX = -1; offsetX <= 1; offsetX++) {
+            for (int offsetZ = -1; offsetZ <= 1; offsetZ++) {
+                if (!Bukkit.isOwnedByCurrentRegion(new Location(world, x + offsetX, y, z + offsetZ))) return false;
+            }
+        }
+
         return true;
     }
 
@@ -907,10 +1386,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             setPizzaPlusExpiry(uuid, null, 0L);
             getLogger().info(tierDisplay(tier) + " expired and revoked for " + name);
             Player online = Bukkit.getPlayer(uuid);
-            if (online != null && online.isOnline()) {
-                online.sendMessage(net.kyori.adventure.text.Component.text(
+            if (online != null) {
+                net.kyori.adventure.text.Component notice = net.kyori.adventure.text.Component.text(
                     "Your " + tierDisplay(tier) + " subscription has expired. Use /perks to learn how to renew.",
-                    net.kyori.adventure.text.format.NamedTextColor.GRAY));
+                    net.kyori.adventure.text.format.NamedTextColor.GRAY);
+                PlatformScheduler.entityNow(this, online, () -> { if (online.isOnline()) online.sendMessage(notice); }, null);
             }
         }
         savePizzaPlusSubscriptions();
@@ -1201,14 +1681,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             .action(DialogAction.customClick((view, audience) -> {
                 if (audience instanceof Player p) {
                     String raw = view.getText("name");
-                    Bukkit.getScheduler().runTask(this, () -> {
+                    PlatformScheduler.entityNow(this, p, () -> {
                         if (raw == null || raw.isBlank()) {
                             p.sendActionBar(net.kyori.adventure.text.Component.text("§cEnter a player name."));
                             return;
                         }
                         p.performCommand("pizzaplus give " + raw.trim() + " " + tier);
                         handlePizzaPlusList(p, null);
-                    });
+                    }, null);
                 }
             }, net.kyori.adventure.text.event.ClickCallback.Options.builder().build()))
             .build();
@@ -1224,7 +1704,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private void sendPizzaPlusWelcome(Player p, String tier) {
-        net.kyori.adventure.text.format.TextColor brand = net.kyori.adventure.text.format.TextColor.color(0x00BFFF);
+        net.kyori.adventure.text.format.TextColor brand = BRAND_COLOR;
         net.kyori.adventure.text.format.TextColor gold = net.kyori.adventure.text.format.NamedTextColor.GOLD;
         net.kyori.adventure.text.format.TextColor yellow = net.kyori.adventure.text.format.NamedTextColor.YELLOW;
         net.kyori.adventure.text.format.TextColor gray = net.kyori.adventure.text.format.NamedTextColor.GRAY;
@@ -1247,81 +1727,411 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         try { p.playSound(p.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 0.6f, 1.2f); } catch (Throwable ignored) {}
     }
 
-    // ---- /atrack <player> — admin spectator tracking in 3rd person ----
-
     private boolean handleAtrackCommand(CommandSender sender, String[] args) {
-        if (!(sender instanceof Player admin)) {
+        if (!(sender instanceof Player tracker)) {
             sender.sendMessage(color("&cOnly players can use /atrack."));
             return true;
         }
-        if (!admin.hasPermission(PERM_ATRACK_CMD)) {
-            admin.sendMessage(color("&cNo permission."));
-            return true;
-        }
-        // No args = stop tracking
+
         if (args.length == 0) {
-            stopTracking(admin);
-            return true;
-        }
-        Player target = getServer().getPlayer(args[0]);
-        if (target == null || !target.isOnline()) {
-            admin.sendMessage(color("&cPlayer not found or offline."));
-            return true;
-        }
-        if (target.getUniqueId().equals(admin.getUniqueId())) {
-            admin.sendMessage(color("&cYou can't track yourself."));
-            return true;
-        }
-        // If already tracking someone, stop previous tracking first
-        if (atrackTargets.containsKey(admin.getUniqueId())) {
-            stopTrackingTask(admin.getUniqueId());
-        }
-        // Save prior gamemode if not already spectator
-        if (admin.getGameMode() != GameMode.SPECTATOR) {
-            atrackPriorMode.put(admin.getUniqueId(), admin.getGameMode());
-        }
-        admin.setGameMode(GameMode.SPECTATOR);
-        admin.teleport(target.getLocation());
-        atrackTargets.put(admin.getUniqueId(), target.getUniqueId());
-        // Schedule repeating task: re-lock spectator target every tick
-        int taskId = getServer().getScheduler().runTaskTimer(this, () -> {
-            if (!admin.isOnline()) { stopTrackingTask(admin.getUniqueId()); return; }
-            UUID targetUuid = atrackTargets.get(admin.getUniqueId());
-            if (targetUuid == null) { stopTrackingTask(admin.getUniqueId()); return; }
-            Player t = getServer().getPlayer(targetUuid);
-            if (t == null || !t.isOnline()) {
-                admin.sendActionBar(net.kyori.adventure.text.Component.text("§cTarget disconnected — tracking stopped"));
-                stopTracking(admin);
-                return;
+            try {
+                PlatformScheduler.entityNow(this, tracker, () -> {
+                    if (!tracker.isOnline()) return;
+                    if (!tracker.hasPermission("pizzasmp.admin.track")) {
+                        tracker.sendMessage(color("&cNo permission."));
+                        return;
+                    }
+                    this.stopTracking(tracker);
+                }, () -> { });
+            } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not schedule /atrack stop for the command sender.");
             }
-            admin.setSpectatorTarget(t);
-        }, 1L, 1L).getTaskId();
-        atrackTasks.put(admin.getUniqueId(), taskId);
-        admin.sendActionBar(net.kyori.adventure.text.Component.text("§dNow tracking §f" + target.getName() + " §d— /atrack to stop"));
+            return true;
+        }
+
+        String targetName = args[0];
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                if (this.atrackStopping) return;
+                Player target = Bukkit.getPlayerExact(targetName);
+                if (target == null) {
+                    this.scheduleAtrackMessage(tracker, color("&cPlayer not found or offline."));
+                    return;
+                }
+
+                UUID targetId = target.getUniqueId();
+                PlatformScheduler.entityNow(this, tracker,
+                    () -> this.startTracking(tracker, target, targetId, targetName), () -> { });
+            });
+        } catch (RuntimeException exception) {
+            this.scheduleAtrackMessage(tracker, color("&cCould not start tracking."));
+        }
         return true;
     }
 
-    private void stopTracking(Player admin) {
-        UUID uuid = admin.getUniqueId();
-        if (!atrackTargets.containsKey(uuid)) {
-            admin.sendMessage(color("&7Not tracking anyone."));
-            return;
+    private void scheduleAtrackMessage(Player tracker, String message) {
+        try {
+            PlatformScheduler.entityNow(this, tracker, () -> {
+                if (tracker.isOnline()) tracker.sendMessage(message);
+            }, () -> { });
+        } catch (RuntimeException ignored) {
         }
-        stopTrackingTask(uuid);
-        // Remove spectator target before mode change
-        admin.setSpectatorTarget(null);
-        GameMode prior = atrackPriorMode.remove(uuid);
-        if (prior != null && prior != GameMode.SPECTATOR) {
-            admin.setGameMode(prior);
-        }
-        admin.sendActionBar(net.kyori.adventure.text.Component.text("§7Tracking stopped"));
     }
 
-    private void stopTrackingTask(UUID uuid) {
-        atrackTargets.remove(uuid);
-        Integer taskId = atrackTasks.remove(uuid);
-        if (taskId != null) {
-            getServer().getScheduler().cancelTask(taskId);
+    private void startTracking(Player tracker, Player target, UUID targetId, String targetName) {
+        if (this.atrackStopping || !tracker.isOnline()) return;
+        if (!tracker.hasPermission("pizzasmp.admin.track")) {
+            tracker.sendMessage(color("&cNo permission."));
+            return;
+        }
+
+        UUID trackerId = tracker.getUniqueId();
+        if (targetId.equals(trackerId)) {
+            tracker.sendMessage(color("&cYou can't track yourself."));
+            return;
+        }
+
+        AtrackSession previous = this.atrackSessions.get(trackerId);
+        if (!this.atrackTrackers.containsKey(trackerId) && tracker.getGameMode() != GameMode.SPECTATOR) {
+            GameMode priorMode = tracker.getGameMode();
+            this.atrackPriorMode.putIfAbsent(trackerId, priorMode);
+            this.persistAtrackPriorMode(tracker, priorMode);
+        }
+        if (previous != null) this.deactivateAtrack(previous);
+
+        tracker.setGameMode(GameMode.SPECTATOR);
+        if (tracker.getGameMode() != GameMode.SPECTATOR) {
+            this.restoreAtrackTracker(tracker, trackerId, null, null);
+            tracker.sendMessage(color("&cCould not enter spectator mode."));
+            return;
+        }
+
+        AtrackSession session = new AtrackSession(tracker, trackerId, targetId);
+        this.atrackTrackers.put(trackerId, tracker);
+        this.atrackSessions.put(trackerId, session);
+        try {
+            PlatformScheduler.TaskHandle targetTask = PlatformScheduler.entityRepeating(this, target, () -> {
+                if (!this.isCurrentAtrack(session) || !session.updatePending.compareAndSet(false, true)) return;
+
+                if (!target.isOnline()) {
+                    session.updatePending.set(false);
+                    this.stopAtrackSession(session, Component.text("§cTarget disconnected — tracking stopped"));
+                    return;
+                }
+
+                Location location = target.getLocation();
+                Vector velocity = target.getVelocity();
+                AtrackPose pose = new AtrackPose(location.getWorld(), location.getX(), location.getY(), location.getZ(),
+                    location.getYaw(), location.getPitch(), velocity.getX(), velocity.getY(), velocity.getZ());
+                try {
+                    PlatformScheduler.entityNow(this, tracker, () -> {
+                        try {
+                            this.applyAtrackPose(session, pose);
+                        } finally {
+                            session.updatePending.set(false);
+                        }
+                    }, () -> {
+                        session.updatePending.set(false);
+                        this.retireAtrackTracker(session);
+                    });
+                } catch (RuntimeException exception) {
+                    session.updatePending.set(false);
+                    this.stopAtrackSession(session, null);
+                }
+            }, () -> this.stopAtrackSession(session,
+                Component.text("§cTarget disconnected — tracking stopped")), 1L, 1L);
+            session.setTargetTask(targetTask);
+        } catch (RuntimeException exception) {
+            this.stopAtrackSession(session, null);
+            this.getLogger().warning("Could not schedule /atrack target sampling; tracker state was restored.");
+            return;
+        }
+
+        if (this.isCurrentAtrack(session)) {
+            tracker.sendActionBar(Component.text("§dNow tracking §f" + targetName + " §d— /atrack to stop"));
+        }
+    }
+
+    private void applyAtrackPose(AtrackSession session, AtrackPose pose) {
+        if (!this.isCurrentAtrack(session)) return;
+        Player tracker = session.tracker;
+        if (!tracker.isOnline()) {
+            this.retireAtrackTracker(session);
+            return;
+        }
+
+        Location targetLocation = pose.toLocation();
+        if (!session.initialPoseApplied) {
+            if (!tracker.teleport(targetLocation)) {
+                this.stopAtrackSession(session, null);
+                return;
+            }
+            session.initialPoseApplied = true;
+            return;
+        }
+
+        Vector flatVelocity = new Vector(pose.velocityX, 0.0, pose.velocityZ);
+        Vector behind;
+        if (flatVelocity.lengthSquared() > 0.0025) {
+            behind = flatVelocity.normalize().multiply(-1.0);
+        } else {
+            Vector look = targetLocation.getDirection();
+            behind = new Vector(look.getX(), 0.0, look.getZ());
+            if (behind.lengthSquared() < 1.0E-6) behind = new Vector(0.0, 0.0, 1.0);
+            behind.normalize().multiply(-1.0);
+        }
+
+        Location desired = targetLocation.clone().add(behind.clone().multiply(4.5)).add(0.0, 2.2, 0.0);
+        Location previous = session.cameraLocation;
+        Location camera;
+        if (previous == null || previous.getWorld() != desired.getWorld() || previous.distanceSquared(desired) > 900.0) {
+            camera = desired.clone();
+        } else {
+            double easing = 0.35;
+            camera = previous.clone();
+            camera.add((desired.getX() - previous.getX()) * easing,
+                (desired.getY() - previous.getY()) * easing,
+                (desired.getZ() - previous.getZ()) * easing);
+        }
+        Vector direction = targetLocation.clone().add(0.0, 1.2, 0.0).toVector().subtract(camera.toVector());
+        if (direction.lengthSquared() > 1.0E-6) camera.setDirection(direction);
+
+        if (!tracker.teleport(camera)) {
+            this.stopAtrackSession(session, null);
+            return;
+        }
+        session.cameraLocation = camera;
+    }
+
+    private boolean isCurrentAtrack(AtrackSession session) {
+        return !session.stopped.get() && this.atrackSessions.get(session.trackerId) == session;
+    }
+
+    private boolean deactivateAtrack(AtrackSession session) {
+        if (!session.stopped.compareAndSet(false, true)) return false;
+        this.atrackSessions.remove(session.trackerId, session);
+        session.cancelTargetTask();
+        return true;
+    }
+
+    private void stopAtrackSession(AtrackSession session, Component message) {
+        if (!this.deactivateAtrack(session)) return;
+        this.restoreAtrackTracker(session.tracker, session.trackerId, message, null);
+    }
+
+    private void retireAtrackTracker(AtrackSession session) {
+        if (!this.isCurrentAtrack(session) || !this.deactivateAtrack(session)) return;
+        this.atrackPriorMode.remove(session.trackerId);
+        this.atrackTrackers.remove(session.trackerId, session.tracker);
+    }
+
+    private void restoreAtrackTracker(Player tracker, UUID trackerId, Component message, CompletableFuture<Void> completion) {
+        Runnable restore = () -> {
+            boolean shouldClear = false;
+            try {
+                if (this.atrackSessions.containsKey(trackerId)) return;
+                if (!tracker.isOnline()) {
+                    shouldClear = true;
+                    return;
+                }
+
+                tracker.setSpectatorTarget(null);
+                GameMode previousMode = this.atrackPriorMode.get(trackerId);
+                if (previousMode == null) previousMode = this.readAtrackPriorMode(tracker);
+                if (previousMode != null && previousMode != GameMode.SPECTATOR) tracker.setGameMode(previousMode);
+                if (previousMode != null && tracker.getGameMode() != previousMode) {
+                    throw new IllegalStateException("Previous game mode was not restored.");
+                }
+                this.clearAtrackPriorMode(tracker);
+                if (message != null) tracker.sendActionBar(message);
+                shouldClear = true;
+                this.atrackPriorMode.remove(trackerId);
+            } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not fully restore /atrack state for a tracker.");
+                if (completion != null) completion.completeExceptionally(exception);
+            } finally {
+                if (shouldClear && !this.atrackSessions.containsKey(trackerId)) {
+                    this.atrackPriorMode.remove(trackerId);
+                    this.atrackTrackers.remove(trackerId, tracker);
+                }
+                if (completion != null) completion.complete(null);
+            }
+        };
+
+        try {
+            if (Bukkit.isOwnedByCurrentRegion(tracker)) {
+                restore.run();
+            } else {
+                PlatformScheduler.entityNow(this, tracker, restore, () -> {
+                    if (!this.atrackSessions.containsKey(trackerId)) {
+                        this.atrackPriorMode.remove(trackerId);
+                        this.atrackTrackers.remove(trackerId, tracker);
+                    }
+                    if (completion != null) completion.complete(null);
+                });
+            }
+        } catch (RuntimeException exception) {
+            if (completion != null) completion.completeExceptionally(exception);
+            this.getLogger().warning("Could not schedule /atrack tracker-state cleanup.");
+        }
+    }
+
+    private void scheduleAtrackRecoveryForOnlinePlayers() {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            try {
+                PlatformScheduler.TaskHandle task = PlatformScheduler.entityNow(this, player,
+                    () -> this.recoverAtrackMode(player), () -> { });
+                if (!task.wasAccepted()) {
+                    this.getLogger().warning("Could not schedule /atrack recovery for an online player.");
+                }
+            } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not schedule /atrack recovery for an online player.");
+            }
+        }
+    }
+
+    private void persistAtrackPriorMode(Player player, GameMode gameMode) {
+        if (this.atrackRestoreModeKey == null || gameMode == null || gameMode == GameMode.SPECTATOR) return;
+        player.getPersistentDataContainer().set(this.atrackRestoreModeKey,
+            org.bukkit.persistence.PersistentDataType.STRING, gameMode.name());
+    }
+
+    private GameMode readAtrackPriorMode(Player player) {
+        if (this.atrackRestoreModeKey == null) return null;
+        String stored = player.getPersistentDataContainer().get(this.atrackRestoreModeKey,
+            org.bukkit.persistence.PersistentDataType.STRING);
+        if (stored == null) return null;
+        try {
+            return GameMode.valueOf(stored);
+        } catch (IllegalArgumentException exception) {
+            this.getLogger().warning("Ignoring an invalid saved /atrack game mode.");
+            return null;
+        }
+    }
+
+    private void clearAtrackPriorMode(Player player) {
+        if (this.atrackRestoreModeKey != null) {
+            player.getPersistentDataContainer().remove(this.atrackRestoreModeKey);
+        }
+    }
+
+    private void recoverAtrackMode(Player player) {
+        if (!player.isOnline() || this.atrackSessions.containsKey(player.getUniqueId())) return;
+        GameMode previousMode = this.readAtrackPriorMode(player);
+        if (previousMode == null) {
+            this.clearAtrackPriorMode(player);
+            this.atrackPriorMode.remove(player.getUniqueId());
+            this.atrackTrackers.remove(player.getUniqueId(), player);
+            return;
+        }
+        if (player.getGameMode() == GameMode.SPECTATOR && previousMode != GameMode.SPECTATOR) {
+            player.setSpectatorTarget(null);
+            player.setGameMode(previousMode);
+        }
+        if (player.getGameMode() == previousMode) {
+            this.clearAtrackPriorMode(player);
+            this.atrackPriorMode.remove(player.getUniqueId());
+            this.atrackTrackers.remove(player.getUniqueId(), player);
+        } else if (player.getGameMode() != GameMode.SPECTATOR) {
+            // The player already left spectator mode; never apply an old session marker later.
+            this.clearAtrackPriorMode(player);
+            this.atrackPriorMode.remove(player.getUniqueId());
+            this.atrackTrackers.remove(player.getUniqueId(), player);
+        }
+    }
+
+    private void stopTracking(Player tracker) {
+        UUID trackerId = tracker.getUniqueId();
+        AtrackSession session = this.atrackSessions.get(trackerId);
+        if (session == null || !this.deactivateAtrack(session)) {
+            tracker.sendMessage(color("&7Not tracking anyone."));
+            return;
+        }
+        this.restoreAtrackTracker(tracker, trackerId, Component.text("§7Tracking stopped"), null);
+    }
+
+    private void onAtrackPlayerQuit(Player quittingPlayer) {
+        UUID quittingId = quittingPlayer.getUniqueId();
+        AtrackSession ownSession = this.atrackSessions.get(quittingId);
+        if (ownSession != null && this.deactivateAtrack(ownSession)) {
+            this.restoreAtrackTracker(quittingPlayer, quittingId, null, null);
+        } else if (ownSession != null && ownSession.stopped.get()) {
+            this.atrackSessions.remove(quittingId, ownSession);
+            ownSession.cancelTargetTask();
+            this.restoreAtrackTracker(quittingPlayer, quittingId, null, null);
+        } else if (ownSession == null && !this.atrackTrackers.containsKey(quittingId)) {
+            this.atrackPriorMode.remove(quittingId);
+            this.atrackTrackers.remove(quittingId, quittingPlayer);
+        } else if (ownSession == null) {
+            this.restoreAtrackTracker(quittingPlayer, quittingId, null, null);
+        }
+
+        for (AtrackSession session : new ArrayList<>(this.atrackSessions.values())) {
+            if (session.targetId.equals(quittingId)) {
+                this.stopAtrackSession(session, Component.text("§cTarget disconnected — tracking stopped"));
+            }
+        }
+    }
+
+    private void stopAllAtrackSessions() {
+        this.atrackStopping = true;
+        for (AtrackSession session : new ArrayList<>(this.atrackSessions.values())) {
+            this.deactivateAtrack(session);
+        }
+
+        List<CompletableFuture<Void>> cleanups = new ArrayList<>();
+        for (Map.Entry<UUID, Player> entry : new ArrayList<>(this.atrackTrackers.entrySet())) {
+            CompletableFuture<Void> completed = new CompletableFuture<>();
+            cleanups.add(completed);
+            this.restoreAtrackTracker(entry.getValue(), entry.getKey(), null, completed);
+        }
+        if (cleanups.isEmpty()) return;
+
+        try {
+            CompletableFuture.allOf(cleanups.toArray(CompletableFuture[]::new)).get(2L, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            this.getLogger().warning("Interrupted while restoring /atrack state during plugin shutdown.");
+        } catch (ExecutionException | TimeoutException exception) {
+            this.getLogger().warning("Some /atrack cleanup tasks did not finish before plugin shutdown.");
+        }
+    }
+
+    private record AtrackPose(World world, double x, double y, double z, float yaw, float pitch,
+                                      double velocityX, double velocityY, double velocityZ) {
+        private Location toLocation() {
+            return new Location(this.world, this.x, this.y, this.z, this.yaw, this.pitch);
+        }
+    }
+
+    private static final class AtrackSession {
+        private final Player tracker;
+        private final UUID trackerId;
+        private final UUID targetId;
+        private final AtomicBoolean stopped = new AtomicBoolean();
+        private final AtomicBoolean updatePending = new AtomicBoolean();
+        private final AtomicReference<PlatformScheduler.TaskHandle> targetTask = new AtomicReference<>();
+        private boolean initialPoseApplied;
+        private Location cameraLocation;
+
+        private AtrackSession(Player tracker, UUID trackerId, UUID targetId) {
+            this.tracker = tracker;
+            this.trackerId = trackerId;
+            this.targetId = targetId;
+        }
+
+        private void setTargetTask(PlatformScheduler.TaskHandle task) {
+            if (this.stopped.get()) {
+                task.cancel();
+            } else if (!this.targetTask.compareAndSet(null, task)) {
+                task.cancel();
+            }
+            if (this.stopped.get()) this.cancelTargetTask();
+        }
+
+        private void cancelTargetTask() {
+            PlatformScheduler.TaskHandle task = this.targetTask.getAndSet(null);
+            if (task != null) task.cancel();
         }
     }
 
@@ -1334,7 +2144,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             player.sendMessage(color("&cYou do not have permission to use /perks."));
             return true;
         }
-        net.kyori.adventure.text.format.TextColor brand = net.kyori.adventure.text.format.TextColor.color(0x00BFFF);
+        net.kyori.adventure.text.format.TextColor brand = BRAND_COLOR;
         net.kyori.adventure.text.format.TextColor gold = net.kyori.adventure.text.format.NamedTextColor.GOLD;
         net.kyori.adventure.text.format.TextColor gray = net.kyori.adventure.text.format.NamedTextColor.GRAY;
         net.kyori.adventure.text.format.TextColor white = net.kyori.adventure.text.format.NamedTextColor.WHITE;
@@ -1447,7 +2257,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return true;
         }
         if (useDialogUi(player)) {
-            // Java/dialog clients open the Example SMP quick menu (the same datapack dialog the
+            // Java/dialog clients open the quick menu (the same datapack dialog the
             // pause screen uses, so there is a single source of truth for the quick menu).
             Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "dialog show " + player.getName() + " pizzasmp:menu");
         } else {
@@ -1484,7 +2294,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private void openGuideDialog(Player player) {
         java.util.List<DialogBody> body = java.util.List.of(
-            DialogBody.plainMessage(Component.text("Welcome to PizzaSMP. Pick a section below.", NamedTextColor.GRAY)));
+            DialogBody.plainMessage(Component.text("Welcome to " + BRAND_DISPLAY + ". Pick a section below.", NamedTextColor.GRAY)));
         java.util.List<ActionButton> buttons = java.util.List.of(
             dialogButton(Component.text("Commands", DIALOG_BRAND), null, 150, p -> openGuideSection(p, "commands")),
             dialogButton(Component.text("Economy & Shop", DIALOG_BRAND), null, 150, p -> openGuideSection(p, "economy")),
@@ -1492,7 +2302,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             dialogButton(Component.text("Rules", DIALOG_BRAND), null, 150, p -> openGuideSection(p, "rules")),
             dialogButton(Component.text("Discord", NamedTextColor.BLUE), null, 150, p -> { p.closeDialog(); p.performCommand("discord"); }),
             dialogButton(Component.text("Open Menu", NamedTextColor.WHITE), null, 150, p -> { p.closeDialog(); p.performCommand("menu"); }));
-        Dialog dialog = buildDialog(Component.text("Server Guide", DIALOG_BRAND), body, java.util.List.of(),
+        Dialog dialog = buildDialog(Component.text(BRAND_DISPLAY + " Guide", DIALOG_BRAND), body, java.util.List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(dialogButton(Component.text("Close"), null, 150, p -> p.closeDialog())).build());
         player.showDialog(dialog);
@@ -1546,70 +2356,174 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         player.showDialog(dialog);
     }
 
-    private boolean handleFreezeCommand(CommandSender sender, String[] args) {
-        if (sender instanceof Player player && !player.hasPermission(PERM_FREEZE_CMD)) {
-            player.sendMessage(color("&cYou do not have permission to use /freeze."));
+    private boolean handleFreezeCommand(CommandSender var1, String[] var2) {
+        if (var1 instanceof Player var3 && !var3.hasPermission("pizzasmp.freeze")) {
+            var3.sendMessage(color("&cYou do not have permission to use /freeze."));
             return true;
         }
 
-        if (args.length != 1) {
-            sender.sendMessage(color("&cUsage: &e/freeze <player>"));
+        if (var2.length != 1) {
+            var1.sendMessage(color("&cUsage: &e/freeze <player>"));
             return true;
         }
 
-        Player target = Bukkit.getPlayerExact(args[0]);
-        if (target == null) {
-            sendOfflinePlayerMessage(sender, args[0]);
-            return true;
-        }
-
-        UUID uuid = target.getUniqueId();
-        if (!frozenPlayers.add(uuid)) {
-            sender.sendMessage(color("&e" + target.getName() + " is already frozen."));
-            return true;
-        }
-
-        frozenAnchors.put(uuid, target.getLocation().clone());
-        frozenNoticeCooldown.remove(uuid);
-        target.setVelocity(new Vector(0, 0, 0));
-        if (target.isFlying()) {
-            target.setFlying(false);
-        }
-
-        target.sendMessage(color("&cYou have been frozen by staff. Do not log out."));
-        target.sendActionBar(color("&cYou are frozen."));
-        sender.sendMessage(color("&aFrozen &e" + target.getName() + "&a."));
+        this.scheduleTargetFreezeChange(var1, var2[0], true);
         return true;
     }
 
-    private boolean handleUnfreezeCommand(CommandSender sender, String[] args) {
-        if (sender instanceof Player player && !player.hasPermission(PERM_UNFREEZE_CMD)) {
-            player.sendMessage(color("&cYou do not have permission to use /unfreeze."));
+    private boolean handleUnfreezeCommand(CommandSender var1, String[] var2) {
+        if (var1 instanceof Player var3 && !var3.hasPermission("pizzasmp.unfreeze")) {
+            var3.sendMessage(color("&cYou do not have permission to use /unfreeze."));
             return true;
         }
 
-        if (args.length != 1) {
-            sender.sendMessage(color("&cUsage: &e/unfreeze <player>"));
+        if (var2.length != 1) {
+            var1.sendMessage(color("&cUsage: &e/unfreeze <player>"));
             return true;
         }
 
-        Player target = Bukkit.getPlayerExact(args[0]);
-        if (target == null) {
-            sendOfflinePlayerMessage(sender, args[0]);
-            return true;
-        }
-
-        UUID uuid = target.getUniqueId();
-        if (!frozenPlayers.remove(uuid)) {
-            sender.sendMessage(color("&e" + target.getName() + " is not frozen."));
-            return true;
-        }
-
-        frozenAnchors.remove(uuid);
-        frozenNoticeCooldown.remove(uuid);
-        target.sendMessage(color("&aYou have been unfrozen."));
-        sender.sendMessage(color("&aUnfroze &e" + target.getName() + "&a."));
+        this.scheduleTargetFreezeChange(var1, var2[0], false);
         return true;
+    }
+
+    private void scheduleTargetFreezeChange(CommandSender sender, String targetName, boolean freeze) {
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                Player target = Bukkit.getPlayerExact(targetName);
+                if (target == null) {
+                    this.scheduleCommandFeedback(sender, color("&cThe user is not online"), true);
+                    return;
+                }
+
+                UUID targetId = target.getUniqueId();
+                try {
+                    PlatformScheduler.entityNow(this, target, () -> {
+                        if (!target.isOnline()) {
+                            this.scheduleCommandFeedback(sender, color("&cThe user is not online"), true);
+                            return;
+                        }
+
+                        String actualName = target.getName();
+                        if (!freeze) {
+                            if (!this.frozenPlayers.remove(targetId)) {
+                                this.scheduleCommandFeedback(sender, color("&e" + actualName + " is not frozen."), false);
+                                return;
+                            }
+
+                            this.frozenAnchors.remove(targetId);
+                            this.frozenNoticeCooldown.remove(targetId);
+                            target.sendMessage(color("&aYou have been unfrozen."));
+                            this.scheduleCommandFeedback(sender, color("&aUnfroze &e" + actualName + "&a."), false);
+                            return;
+                        }
+
+                        Location anchor = target.getLocation().clone();
+                        Vector previousVelocity = target.getVelocity();
+                        if (!this.frozenPlayers.add(targetId)) {
+                            this.scheduleCommandFeedback(sender, color("&e" + actualName + " is already frozen."), false);
+                            return;
+                        }
+
+                        try {
+                            this.frozenAnchors.put(targetId, anchor);
+                            this.frozenNoticeCooldown.remove(targetId);
+                            target.setVelocity(new Vector(0, 0, 0));
+                        } catch (RuntimeException exception) {
+                            this.clearManualFreezeState(targetId);
+                            try {
+                                if (target.isOnline()) {
+                                    target.setVelocity(previousVelocity);
+                                }
+                            } catch (RuntimeException ignored) {
+                            }
+                            this.getLogger().warning("Could not apply /freeze to an online player.");
+                            this.scheduleCommandFeedback(sender, color("&cCould not freeze that player."), false);
+                            return;
+                        }
+
+                        target.sendMessage(color("&cYou have been frozen by staff. Do not log out."));
+                        target.sendActionBar(color("&cYou are frozen."));
+                        this.scheduleCommandFeedback(sender, color("&aFrozen &e" + actualName + "&a."), false);
+                    }, () -> {
+                        // A quit already clears the prior session's manual freeze state. Do not let
+                        // a retired scheduler callback erase state belonging to a fast reconnect.
+                        this.scheduleCommandFeedback(sender, color("&cThe user is not online"), true);
+                    });
+                } catch (RuntimeException exception) {
+                    this.getLogger().warning("Could not schedule a freeze-state update for an online player.");
+                    this.scheduleCommandFeedback(sender, color("&cCould not update that player's freeze state."), false);
+                }
+            });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not look up the target for a freeze-state update.");
+            this.scheduleCommandFeedback(sender, color("&cCould not update that player's freeze state."), false);
+        }
+    }
+
+    private void clearManualFreezeState(UUID playerId) {
+        this.frozenPlayers.remove(playerId);
+        this.frozenAnchors.remove(playerId);
+        this.frozenNoticeCooldown.remove(playerId);
+    }
+
+    private void scheduleCommandFeedback(CommandSender sender, String message, boolean actionBar) {
+        if (sender instanceof Player player) {
+            try {
+                PlatformScheduler.entityNow(this, player, () -> {
+                    if (!player.isOnline()) return;
+                    if (actionBar) player.sendActionBar(message);
+                    else player.sendMessage(message);
+                }, () -> { });
+            } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not deliver a command response to its player sender.");
+            }
+            return;
+        }
+
+        try {
+            PlatformScheduler.globalNow(this, () -> sender.sendMessage(message));
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not deliver a command response to its sender.");
+        }
+    }
+
+    private void scheduleTeleportToTarget(Player viewer, UUID targetId, String targetName) {
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                Player target = Bukkit.getPlayer(targetId);
+                if (target == null) {
+                    this.scheduleCommandFeedback(viewer, color("&c" + targetName + " is no longer online."), false);
+                    return;
+                }
+
+                try {
+                    PlatformScheduler.entityNow(this, target, () -> {
+                        if (!target.isOnline()) {
+                            this.scheduleCommandFeedback(viewer, color("&c" + targetName + " is no longer online."), false);
+                            return;
+                        }
+
+                        Location destination = target.getLocation().clone();
+                        PlatformScheduler.entityNow(this, viewer, () -> {
+                            if (!viewer.isOnline()) return;
+                            viewer.teleportAsync(destination, TeleportCause.COMMAND).whenComplete((success, failure) ->
+                                this.scheduleCommandFeedback(viewer,
+                                    failure != null || !Boolean.TRUE.equals(success)
+                                        ? color("&cCould not teleport to " + targetName + ".")
+                                        : color("&aTeleported to &e" + targetName + "&a."),
+                                    false));
+                        }, null);
+                    }, () -> this.scheduleCommandFeedback(viewer,
+                        color("&c" + targetName + " is no longer online."), false));
+                } catch (RuntimeException exception) {
+                    this.scheduleCommandFeedback(viewer,
+                        color("&cCould not schedule a teleport to " + targetName + "."), false);
+                }
+            });
+        } catch (RuntimeException exception) {
+            this.scheduleCommandFeedback(viewer,
+                color("&cCould not schedule a teleport to " + targetName + "."), false);
+        }
     }
 
     // ===== Frozen-in-place maintenance ("virtual maintenance") =====
@@ -1628,29 +2542,91 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         enterMaintenanceFreeze(p, false);
     }
 
-    private void enterMaintenanceFreeze(Player p, boolean force) {
-        if (p == null || !p.isOnline()) return;
-        if (!force && isMaintenanceStaff(p)) return;
-        UUID id = p.getUniqueId();
-        frozenAnchors.put(id, p.getLocation().clone());
-        frozenPlayers.add(id);
-        maintenanceFrozen.add(id);
-        try { p.setInvulnerable(true); } catch (Throwable ignored) {}
-        showMaintenanceTitle(p);
+    private boolean enterMaintenanceFreeze(Player var1, boolean var2) {
+        if (var1 != null && var1.isOnline()) {
+            if (var2 || !this.isMaintenanceStaff(var1)) {
+                UUID var3 = var1.getUniqueId();
+                org.bukkit.persistence.PersistentDataContainer pdc = var1.getPersistentDataContainer();
+                Byte priorInvulnerable = pdc.get(this.maintenanceRestoreInvulnerabilityKey,
+                    org.bukkit.persistence.PersistentDataType.BYTE);
+                boolean createdRecoveryMarker = priorInvulnerable == null;
+                if (createdRecoveryMarker) {
+                    pdc.set(this.maintenanceRestoreInvulnerabilityKey,
+                        org.bukkit.persistence.PersistentDataType.BYTE, (byte)(var1.isInvulnerable() ? 1 : 0));
+                }
+                try {
+                    var1.setInvulnerable(true);
+                } catch (RuntimeException exception) {
+                    if (createdRecoveryMarker) pdc.remove(this.maintenanceRestoreInvulnerabilityKey);
+                    this.getLogger().warning("Could not apply maintenance invulnerability; recovery marker was retained.");
+                    return false;
+                }
+                this.frozenAnchors.put(var3, var1.getLocation().clone());
+                this.frozenPlayers.add(var3);
+                this.maintenanceFrozen.add(var3);
+                this.maintenanceUnfreezePending.remove(var3);
+                this.showMaintenanceTitle(var1);
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    private void exitMaintenanceFreeze(Player p) {
-        if (p == null) return;
-        UUID id = p.getUniqueId();
-        maintenanceFrozen.remove(id);
-        frozenPlayers.remove(id);
-        frozenAnchors.remove(id);
-        frozenNoticeCooldown.remove(id);
-        try { p.setInvulnerable(false); } catch (Throwable ignored) {}
-        if (p.isOnline()) {
-            p.resetTitle();
-            p.sendActionBar(net.kyori.adventure.text.Component.text(color("&aMaintenance complete — welcome back!")));
+    private boolean exitMaintenanceFreeze(Player var1) {
+        if (var1 == null) return false;
+        UUID var2 = var1.getUniqueId();
+        try {
+            var1.setInvulnerable(this.priorMaintenanceInvulnerability(var1));
+        } catch (RuntimeException var4) {
+            this.maintenanceUnfreezePending.add(var2);
+            this.getLogger().warning("Could not clear maintenance invulnerability; recovery state was retained.");
+            return false;
         }
+
+        var1.getPersistentDataContainer().remove(this.maintenanceRestoreInvulnerabilityKey);
+        this.clearMaintenanceFreezeState(var2, false);
+        if (var1.isOnline()) {
+            var1.resetTitle();
+            var1.sendActionBar(Component.text(color("&aMaintenance complete — welcome back!")));
+        }
+
+        return true;
+    }
+
+    private boolean priorMaintenanceInvulnerability(Player player) {
+        Byte previous = player.getPersistentDataContainer().get(this.maintenanceRestoreInvulnerabilityKey,
+            org.bukkit.persistence.PersistentDataType.BYTE);
+        return previous != null && previous.byteValue() != 0;
+    }
+
+    private boolean hasMaintenanceRecoveryMarker(Player player) {
+        return player.getPersistentDataContainer().has(this.maintenanceRestoreInvulnerabilityKey,
+            org.bukkit.persistence.PersistentDataType.BYTE);
+    }
+
+    private void scheduleMaintenanceRecoveryForOnlinePlayers() {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            UUID playerId = player.getUniqueId();
+            try {
+                PlatformScheduler.TaskHandle task = PlatformScheduler.entityNow(this, player,
+                    () -> this.reconcileMaintenanceJoin(player, playerId), () -> { });
+                if (!task.wasAccepted()) {
+                    this.getLogger().warning("Could not schedule maintenance-state recovery for an online player.");
+                }
+            } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not schedule maintenance-state recovery for an online player.");
+            }
+        }
+    }
+
+    private void clearMaintenanceFreezeState(UUID playerId, boolean clearInvulnerabilityOnJoin) {
+        this.maintenanceFrozen.remove(playerId);
+        this.frozenPlayers.remove(playerId);
+        this.frozenAnchors.remove(playerId);
+        this.frozenNoticeCooldown.remove(playerId);
+        if (clearInvulnerabilityOnJoin) this.maintenanceUnfreezePending.add(playerId);
+        else this.maintenanceUnfreezePending.remove(playerId);
     }
 
     private boolean handleServerMaintCommand(CommandSender sender, String[] args) {
@@ -1661,32 +2637,13 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         String sub = args.length >= 1 ? args[0].toLowerCase(Locale.ROOT) : "status";
         switch (sub) {
             case "start", "on" -> {
-                if (args.length >= 2) {
-                    maintenanceReason = String.join(" ", java.util.Arrays.copyOfRange(args, 1, args.length));
-                }
-                maintenanceActive = true;
-                saveMaintenanceMode();
-                int frozen = 0;
-                // Freeze EVERYONE, including staff (force=true). Maintenance-admins keep command
-                // access (see onFrozenCommandBlock) so they can still run /servermaint end.
-                for (Player p : Bukkit.getOnlinePlayers()) {
-                    enterMaintenanceFreeze(p, true); frozen++;
-                }
-                sender.sendMessage(color("&aFrozen-maintenance &lON&a. Froze &e" + frozen + " &aplayer(s). Reason: &f" + maintenanceReason));
-                getLogger().info("[Maintenance] Frozen-maintenance ON by " + sender.getName() + " (" + maintenanceReason + ") — froze " + frozen + ".");
+                // Freezes EVERYONE, including staff; maintenance-admins keep command access (see
+                // onFrozenCommandBlock) so they can still run /servermaint end. Each player is frozen on
+                // their own scheduler and the sender is told the count once all of them have answered.
+                String reason = args.length >= 2 ? String.join(" ", java.util.Arrays.copyOfRange(args, 1, args.length)) : null;
+                scheduleMaintenanceStart(sender, sender.getName(), reason);
             }
-            case "end", "off" -> {
-                maintenanceActive = false;
-                saveMaintenanceMode();
-                int unfrozen = 0;
-                for (UUID id : java.util.List.copyOf(maintenanceFrozen)) {
-                    Player p = Bukkit.getPlayer(id);
-                    if (p != null) { exitMaintenanceFreeze(p); unfrozen++; }
-                    else { maintenanceFrozen.remove(id); frozenPlayers.remove(id); frozenAnchors.remove(id); }
-                }
-                sender.sendMessage(color("&aFrozen-maintenance &lOFF&a. Released &e" + unfrozen + " &aplayer(s)."));
-                getLogger().info("[Maintenance] Frozen-maintenance OFF by " + sender.getName() + " — released " + unfrozen + ".");
-            }
+            case "end", "off" -> scheduleMaintenanceEnd(sender, sender.getName());
             case "status" -> {
                 sender.sendMessage(color("&fFrozen-maintenance: " + (maintenanceActive ? "&aACTIVE" : "&cinactive")
                     + " &7| frozen players: &e" + maintenanceFrozen.size() + " &7| reason: &f" + maintenanceReason));
@@ -1694,6 +2651,129 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             default -> sender.sendMessage(color("&cUsage: &e/servermaint <start [reason]|end|status>"));
         }
         return true;
+    }
+
+    private void scheduleMaintenanceStart(CommandSender sender, String issuerName, String requestedReason) {
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                if (requestedReason != null) this.maintenanceReason = requestedReason;
+                long generation = ++this.maintenanceGeneration;
+                this.maintenanceActive = true;
+                this.saveMaintenanceMode();
+                String reason = this.maintenanceReason;
+
+                List<CompletableFuture<Boolean>> updates = new ArrayList<>();
+                for (Player target : Bukkit.getOnlinePlayers()) {
+                    updates.add(this.scheduleMaintenanceFreeze(target, generation));
+                }
+
+                CompletableFuture.allOf(updates.toArray(CompletableFuture[]::new)).thenRun(() -> {
+                    int frozenCount = this.countSuccessfulPlayerUpdates(updates);
+                    this.scheduleCommandFeedback(sender,
+                        color("&aFrozen-maintenance &lON&a. Froze &e" + frozenCount + " &aplayer(s). Reason: &f" + reason), false);
+                    this.getLogger().info("[Maintenance] Frozen-maintenance ON by " + issuerName + " (" + reason + ") — froze " + frozenCount + ".");
+                });
+            });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule frozen-maintenance start.");
+            this.scheduleCommandFeedback(sender, color("&cCould not start frozen-maintenance."), false);
+        }
+    }
+
+    private CompletableFuture<Boolean> scheduleMaintenanceFreeze(Player target, long generation) {
+        CompletableFuture<Boolean> completed = new CompletableFuture<>();
+        try {
+            PlatformScheduler.entityNow(this, target, () -> {
+                try {
+                    if (!this.maintenanceActive || generation != this.maintenanceGeneration || !target.isOnline()) {
+                        completed.complete(false);
+                        return;
+                    }
+                    completed.complete(this.enterMaintenanceFreeze(target, true));
+                } catch (RuntimeException exception) {
+                    this.getLogger().warning("Could not freeze an online player for maintenance.");
+                    completed.complete(false);
+                }
+            }, () -> completed.complete(false));
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule a player's maintenance freeze.");
+            completed.complete(false);
+        }
+        return completed;
+    }
+
+    private void scheduleMaintenanceEnd(CommandSender sender, String issuerName) {
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                long generation = ++this.maintenanceGeneration;
+                this.maintenanceActive = false;
+                this.saveMaintenanceMode();
+
+                List<CompletableFuture<Boolean>> updates = new ArrayList<>();
+                for (UUID playerId : List.copyOf(this.maintenanceFrozen)) {
+                    updates.add(this.scheduleMaintenanceRelease(playerId, generation));
+                }
+
+                CompletableFuture.allOf(updates.toArray(CompletableFuture[]::new)).thenRun(() -> {
+                    int releasedCount = this.countSuccessfulPlayerUpdates(updates);
+                    this.scheduleCommandFeedback(sender,
+                        color("&aFrozen-maintenance &lOFF&a. Released &e" + releasedCount + " &aplayer(s)."), false);
+                    this.getLogger().info("[Maintenance] Frozen-maintenance OFF by " + issuerName + " — released " + releasedCount + ".");
+                });
+            });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule frozen-maintenance end.");
+            this.scheduleCommandFeedback(sender, color("&cCould not end frozen-maintenance."), false);
+        }
+    }
+
+    private CompletableFuture<Boolean> scheduleMaintenanceRelease(UUID playerId, long generation) {
+        this.maintenanceUnfreezePending.add(playerId);
+        Player target = Bukkit.getPlayer(playerId);
+        if (target == null) {
+            if (!this.maintenanceActive && generation == this.maintenanceGeneration) {
+                this.clearMaintenanceFreezeState(playerId, true);
+            }
+            return CompletableFuture.completedFuture(false);
+        }
+
+        CompletableFuture<Boolean> completed = new CompletableFuture<>();
+        try {
+            PlatformScheduler.entityNow(this, target, () -> {
+                try {
+                    if (this.maintenanceActive || generation != this.maintenanceGeneration) {
+                        completed.complete(false);
+                        return;
+                    }
+                    if (!target.isOnline()) {
+                        this.clearMaintenanceFreezeState(playerId, true);
+                        completed.complete(false);
+                        return;
+                    }
+                    completed.complete(this.exitMaintenanceFreeze(target));
+                } catch (RuntimeException exception) {
+                    this.getLogger().warning("Could not release an online player from maintenance.");
+                    completed.complete(false);
+                }
+            }, () -> {
+                if (!this.maintenanceActive && generation == this.maintenanceGeneration) {
+                    this.clearMaintenanceFreezeState(playerId, true);
+                }
+                completed.complete(false);
+            });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule a player's maintenance release.");
+            completed.complete(false);
+        }
+        return completed;
+    }
+
+    private int countSuccessfulPlayerUpdates(List<CompletableFuture<Boolean>> updates) {
+        int count = 0;
+        for (CompletableFuture<Boolean> update : updates) {
+            if (Boolean.TRUE.equals(update.getNow(false))) count++;
+        }
+        return count;
     }
 
     private void loadMaintenanceMode() {
@@ -1713,12 +2793,35 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         try { c.save(maintenanceModeFile); } catch (Exception ex) { getLogger().warning("Failed saving maintenance mode: " + ex.getMessage()); }
     }
 
+    private void reconcileMaintenanceJoin(Player player, UUID playerId) {
+        if (!player.isOnline()) return;
+        if (this.maintenanceActive) {
+            this.enterMaintenanceFreeze(player, true);
+            return;
+        }
+        if (!this.maintenanceUnfreezePending.contains(playerId)
+            && !this.hasMaintenanceRecoveryMarker(player)) return;
+
+        try {
+            player.setInvulnerable(this.priorMaintenanceInvulnerability(player));
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not restore maintenance invulnerability state on player join.");
+            return;
+        }
+        player.getPersistentDataContainer().remove(this.maintenanceRestoreInvulnerabilityKey);
+        this.clearMaintenanceFreezeState(playerId, false);
+        player.resetTitle();
+        player.sendActionBar(Component.text(color("&aMaintenance complete — welcome back!")));
+    }
+
     @EventHandler(priority = EventPriority.MONITOR)
     public void onMaintenanceJoin(org.bukkit.event.player.PlayerJoinEvent event) {
-        if (!maintenanceActive) return;
         Player p = event.getPlayer();
-        // Everyone (including staff) is frozen during maintenance.
-        Bukkit.getScheduler().runTaskLater(this, () -> enterMaintenanceFreeze(p, true), 2L);
+        UUID id = p.getUniqueId();
+        // Everyone (including staff) is frozen during maintenance; players released while offline, or left
+        // frozen by a crash, are reconciled on join (see reconcileMaintenanceJoin).
+        if (!maintenanceActive && !maintenanceUnfreezePending.contains(id) && !hasMaintenanceRecoveryMarker(p)) return;
+        PlatformScheduler.entityLater(this, p, () -> reconcileMaintenanceJoin(p, id), () -> { }, 2L);
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGH)
@@ -1731,90 +2834,108 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (maintenanceFrozen.contains(event.getPlayer().getUniqueId())) event.setCancelled(true);
     }
 
-    private boolean handleTransferCommand(CommandSender sender, String[] args) {
-        if (sender instanceof Player player && !player.hasPermission(PERM_TRANSFER_CMD)) {
-            player.sendMessage(color("&cYou do not have permission to use /transfer."));
+    private boolean handleTransferCommand(CommandSender var1, String[] var2) {
+        if (var1 instanceof Player var3 && !var3.hasPermission("pizzasmp.transfer")) {
+            var3.sendMessage(color("&cYou do not have permission to use /transfer."));
             return true;
         }
 
-        if (args.length < 1) {
-            sender.sendMessage(color("&cUsage: &e/transfer <destination|host:port|host port>"));
-            sender.sendMessage(color("&cUsage: &e/transfer <player> <destination|host:port|host port>"));
+        if (var2.length < 1) {
+            var1.sendMessage(color("&cUsage: &e/transfer <destination|host:port|host port>"));
+            var1.sendMessage(color("&cUsage: &e/transfer <player> <destination|host:port|host port>"));
             return true;
         }
 
-        TransferDestination destination;
-        Player target;
+        if (var1 instanceof Player var3) {
+            boolean transferSelf = var2.length == 1 || var2.length == 2 && isLikelyPort(var2[1]);
+            if (transferSelf) {
+                PizzaAdminTools.TransferDestination destination = this.parseTransferDestination(
+                    var2[0], var2.length == 2 ? var2[1] : null);
+                if (destination == null) {
+                    var3.sendMessage(color(var2.length == 2 ? "&cInvalid host/port." : "&cUnknown destination. Use a configured destination name or host:port."));
+                    return true;
+                }
+                this.schedulePlayerTransfer(var3, var3, destination, true, var3.getName());
+                return true;
+            }
 
-        if (sender instanceof Player playerSender) {
-            if (args.length == 1) {
-                destination = parseTransferDestination(args[0], null);
-                if (destination == null) {
-                    playerSender.sendMessage(color("&cUnknown destination. Use a configured destination name or host:port."));
-                    return true;
-                }
-                target = playerSender;
-            } else if (args.length == 2 && isLikelyPort(args[1])) {
-                destination = parseTransferDestination(args[0], args[1]);
-                if (destination == null) {
-                    playerSender.sendMessage(color("&cInvalid host/port."));
-                    return true;
-                }
-                target = playerSender;
-            } else {
-                if (!playerSender.hasPermission(PERM_TRANSFER_OTHERS_CMD)) {
-                    playerSender.sendMessage(color("&cYou do not have permission to transfer other players."));
-                    return true;
-                }
-                target = Bukkit.getPlayerExact(args[0]);
-                if (target == null) {
-                    sendOfflinePlayerMessage(playerSender, args[0]);
-                    return true;
-                }
-                if (args.length == 2) {
-                    destination = parseTransferDestination(args[1], null);
-                } else if (args.length == 3) {
-                    destination = parseTransferDestination(args[1], args[2]);
-                } else {
-                    playerSender.sendMessage(color("&cUsage: &e/transfer <player> <destination|host:port|host port>"));
-                    return true;
-                }
-                if (destination == null) {
-                    playerSender.sendMessage(color("&cUnknown destination. Use a configured destination name or host:port."));
-                    return true;
-                }
-            }
-        } else {
-            if (args.length < 2) {
-                sender.sendMessage(color("&cConsole usage: &e/transfer <player> <destination|host:port|host port>"));
+            if (!var3.hasPermission("pizzasmp.transfer.others")) {
+                var3.sendMessage(color("&cYou do not have permission to transfer other players."));
                 return true;
             }
-            target = Bukkit.getPlayerExact(args[0]);
-            if (target == null) {
-                sendOfflinePlayerMessage(sender, args[0]);
+            if (var2.length != 2 && var2.length != 3) {
+                var3.sendMessage(color("&cUsage: &e/transfer <player> <destination|host:port|host port>"));
                 return true;
             }
-            if (args.length == 2) {
-                destination = parseTransferDestination(args[1], null);
-            } else if (args.length == 3) {
-                destination = parseTransferDestination(args[1], args[2]);
-            } else {
-                sender.sendMessage(color("&cConsole usage: &e/transfer <player> <destination|host:port|host port>"));
-                return true;
-            }
+
+            PizzaAdminTools.TransferDestination destination = this.parseTransferDestination(
+                var2[1], var2.length == 3 ? var2[2] : null);
             if (destination == null) {
-                sender.sendMessage(color("&cUnknown destination. Use a configured destination name or host:port."));
+                var3.sendMessage(color("&cUnknown destination. Use a configured destination name or host:port."));
                 return true;
             }
+            this.scheduleNamedPlayerTransfer(var3, var2[0], destination);
+            return true;
         }
 
-        target.transfer(destination.host, destination.port);
-        if (sender instanceof Player playerSender && playerSender.getUniqueId().equals(target.getUniqueId())) {
-            sender.sendMessage(color("&aTransferring you to &e" + destination.host + ":" + destination.port + "&a..."));
-        } else {
-            sender.sendMessage(color("&aTransferring &e" + target.getName() + " &ato &e" + destination.host + ":" + destination.port + "&a..."));
+        if (var2.length != 2 && var2.length != 3) {
+            var1.sendMessage(color("&cConsole usage: &e/transfer <player> <destination|host:port|host port>"));
+            return true;
         }
+        PizzaAdminTools.TransferDestination destination = this.parseTransferDestination(
+            var2[1], var2.length == 3 ? var2[2] : null);
+        if (destination == null) {
+            var1.sendMessage(color("&cUnknown destination. Use a configured destination name or host:port."));
+            return true;
+        }
+        this.scheduleNamedPlayerTransfer(var1, var2[0], destination);
         return true;
+    }
+
+    private void scheduleNamedPlayerTransfer(CommandSender sender, String targetName,
+                                                          PizzaAdminTools.TransferDestination destination) {
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                Player target = Bukkit.getPlayerExact(targetName);
+                if (target == null) {
+                    this.scheduleCommandFeedback(sender, color("&cThe user is not online"), true);
+                    return;
+                }
+                this.schedulePlayerTransfer(sender, target, destination, sender == target, targetName);
+            });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not look up the /transfer target.");
+            this.scheduleCommandFeedback(sender, color("&cCould not schedule the transfer."), false);
+        }
+    }
+
+    private void schedulePlayerTransfer(CommandSender sender, Player target,
+                                                    PizzaAdminTools.TransferDestination destination,
+                                                    boolean senderIsTarget, String requestedName) {
+        try {
+            PlatformScheduler.entityNow(this, target, () -> {
+                if (!target.isOnline()) {
+                    this.scheduleCommandFeedback(sender, color("&cThe user is not online"), true);
+                    return;
+                }
+
+                String actualName = target.getName();
+                try {
+                    target.transfer(destination.host, destination.port);
+                    String message = senderIsTarget
+                        ? color("&aTransferring you to &e" + destination.host + ":" + destination.port + "&a...")
+                        : color("&aTransferring &e" + actualName + " &ato &e" + destination.host + ":" + destination.port + "&a...");
+                    if (sender == target) sender.sendMessage(message);
+                    else this.scheduleCommandFeedback(sender, message, false);
+                } catch (RuntimeException exception) {
+                    this.getLogger().warning("Could not transfer an online player to another server.");
+                    this.scheduleCommandFeedback(sender, color("&cCould not schedule the transfer for " + requestedName + "."), false);
+                }
+            }, () -> this.scheduleCommandFeedback(sender, color("&cThe user is not online"), true));
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule a /transfer player update.");
+            this.scheduleCommandFeedback(sender, color("&cCould not schedule the transfer for " + requestedName + "."), false);
+        }
     }
 
     private boolean handleTransferMaintenanceCommand(CommandSender sender, String[] args) {
@@ -1839,9 +2960,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             case "end":
                 return handleMaintenanceTransferDisable(sender);
             case "status":
-                sender.sendMessage(color("&fMaintenance transfer active: " + (isMaintenanceTransferActive() ? "&aON" : "&cOFF")));
-                sender.sendMessage(color("&fDestination: &b" + getMaintenanceTransferDestinationName()));
-                sender.sendMessage(color("&fTracked transferred users: &b" + getMaintenanceTransferred().size()));
+                scheduleMaintenanceTransferStatus(sender);
                 return true;
             default:
                 sender.sendMessage(color("&cUsage: &e/transfermaintenance <on|off|status>"));
@@ -1850,41 +2969,174 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private boolean handleMaintenanceTransferEnable(CommandSender sender) {
-        TransferDestination destination = parseTransferDestination(getMaintenanceTransferDestinationName(), null);
-        if (destination == null) {
-            sender.sendMessage(color("&cInvalid maintenance destination. Check &eplugins/PizzaAdminTools/transfer-destinations.yml"));
-            return true;
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                try {
+                    this.beginMaintenanceTransfer(sender);
+                } catch (RuntimeException exception) {
+                    this.getLogger().warning("Could not begin maintenance transfer.");
+                    this.scheduleCommandFeedback(sender, color("&cCould not start maintenance transfer."), false);
+                }
+            });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule maintenance transfer startup.");
+            this.scheduleCommandFeedback(sender, color("&cCould not start maintenance transfer."), false);
         }
-
-        setMaintenanceTransferActive(true);
-
-        int moved = 0;
-        int skipped = 0;
-        Set<String> transferred = getMaintenanceTransferred();
-        for (Player online : Bukkit.getOnlinePlayers()) {
-            if (shouldStayDuringMaintenance(online)) {
-                skipped++;
-                continue;
-            }
-            for (String line : getMaintenanceStartMessages(destination.host, destination.port)) {
-                online.sendMessage(color(line));
-            }
-            online.transfer(destination.host, destination.port);
-            moved++;
-            transferred.add(online.getUniqueId().toString());
-        }
-        saveMaintenanceTransferred(transferred);
-        saveMaintenanceTransferState();
-
-        sender.sendMessage(color("&aMaintenance transfer started. Moved: &e" + moved + "&a, skipped: &e" + skipped + "&a."));
         return true;
     }
 
-    private boolean handleMaintenanceTransferDisable(CommandSender sender) {
-        setMaintenanceTransferActive(false);
-        saveMaintenanceTransferState();
-        sender.sendMessage(color("&aMaintenance transfer disabled."));
-        sender.sendMessage(color("&7Note: players already on maintenance server cannot be force-returned from here."));
+    private void beginMaintenanceTransfer(CommandSender sender) {
+        PizzaAdminTools.TransferDestination destination = this.parseTransferDestination(this.getMaintenanceTransferDestinationName(), null);
+        if (destination == null) {
+            this.scheduleCommandFeedback(sender,
+                color("&cInvalid maintenance destination. Check &eplugins/PizzaAdminTools/transfer-destinations.yml"), false);
+            return;
+        }
+
+        // Player callbacks compare this token before acting so a later /on or /off retires this batch.
+        long generation = this.advanceMaintenanceTransferGeneration();
+        List<String> startMessages = this.getMaintenanceStartMessages(destination.host, destination.port)
+            .stream().map(PizzaAdminTools::color).toList();
+        List<Player> onlinePlayers = new ArrayList<>(Bukkit.getOnlinePlayers());
+        this.setMaintenanceTransferActive(true);
+        this.saveMaintenanceTransferState();
+
+        List<CompletableFuture<MaintenanceTransferAttempt>> attempts = new ArrayList<>(onlinePlayers.size());
+        for (Player target : onlinePlayers) {
+            attempts.add(this.scheduleMaintenanceTransfer(target, generation, destination, startMessages));
+        }
+
+        CompletableFuture.allOf(attempts.toArray(CompletableFuture[]::new)).whenComplete((ignored, failure) -> {
+            try {
+                PlatformScheduler.globalNow(this, () -> {
+                    try {
+                        this.finishMaintenanceTransfer(sender, attempts, failure);
+                    } catch (RuntimeException exception) {
+                        this.getLogger().warning("Could not finalize maintenance transfer results.");
+                        this.scheduleCommandFeedback(sender, color("&cCould not finalize maintenance transfer."), false);
+                    }
+                });
+            } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not finalize maintenance transfer results.");
+            }
+        });
+    }
+
+    private CompletableFuture<MaintenanceTransferAttempt> scheduleMaintenanceTransfer(
+        Player target, long generation, PizzaAdminTools.TransferDestination destination, List<String> startMessages
+    ) {
+        CompletableFuture<MaintenanceTransferAttempt> attempt = new CompletableFuture<>();
+        try {
+            PlatformScheduler.entityNow(this, target, () -> {
+                try {
+                    if (!target.isOnline()) {
+                        attempt.complete(new MaintenanceTransferAttempt(MaintenanceTransferStatus.CANCELLED, null));
+                        return;
+                    }
+                    boolean shouldStay = this.shouldStayDuringMaintenance(target);
+                    MaintenanceTransferAttempt result;
+                    // Keep cancellation from interleaving after the final token check but before transfer.
+                    synchronized (this.maintenanceTransferLock) {
+                        if (generation != this.maintenanceTransferGeneration) {
+                            result = new MaintenanceTransferAttempt(MaintenanceTransferStatus.CANCELLED, null);
+                        } else if (shouldStay) {
+                            result = new MaintenanceTransferAttempt(MaintenanceTransferStatus.SKIPPED, null);
+                        } else {
+                            for (String message : startMessages) {
+                                target.sendMessage(message);
+                            }
+                            String playerId = target.getUniqueId().toString();
+                            target.transfer(destination.host, destination.port);
+                            result = new MaintenanceTransferAttempt(MaintenanceTransferStatus.MOVED, playerId);
+                        }
+                    }
+                    attempt.complete(result);
+                } catch (RuntimeException exception) {
+                    this.getLogger().warning("Could not transfer an online player to the maintenance server.");
+                    attempt.complete(new MaintenanceTransferAttempt(MaintenanceTransferStatus.FAILED, null));
+                }
+            }, () -> attempt.complete(new MaintenanceTransferAttempt(MaintenanceTransferStatus.CANCELLED, null)));
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule a player's maintenance transfer.");
+            attempt.complete(new MaintenanceTransferAttempt(MaintenanceTransferStatus.FAILED, null));
+        }
+        return attempt;
+    }
+
+    private long advanceMaintenanceTransferGeneration() {
+        synchronized (this.maintenanceTransferLock) {
+            return ++this.maintenanceTransferGeneration;
+        }
+    }
+
+    private void finishMaintenanceTransfer(CommandSender sender,
+                                                        List<CompletableFuture<MaintenanceTransferAttempt>> attempts,
+                                                        Throwable completionFailure) {
+        Set<String> transferred = this.getMaintenanceTransferred();
+        int moved = 0;
+        int skipped = 0;
+        int cancelled = 0;
+        int failed = 0;
+        for (CompletableFuture<MaintenanceTransferAttempt> future : attempts) {
+            MaintenanceTransferAttempt attempt;
+            try {
+                attempt = future.getNow(null);
+            } catch (RuntimeException exception) {
+                attempt = null;
+            }
+            if (attempt == null) {
+                failed++;
+                continue;
+            }
+
+            switch (attempt.status()) {
+                case MOVED -> {
+                    moved++;
+                    if (attempt.playerId() != null) transferred.add(attempt.playerId());
+                }
+                case SKIPPED -> skipped++;
+                case CANCELLED -> cancelled++;
+                case FAILED -> failed++;
+            }
+        }
+
+        this.saveMaintenanceTransferred(transferred);
+        this.saveMaintenanceTransferState();
+        String summary = "&aMaintenance transfer started. Moved: &e" + moved + "&a, skipped: &e" + skipped + "&a.";
+        if (failed > 0 || completionFailure != null) summary += " &cFailed: &e" + Math.max(1, failed) + "&c.";
+        if (cancelled > 0) summary += " &eCancelled: " + cancelled + ".";
+        this.scheduleCommandFeedback(sender, color(summary), false);
+    }
+
+    private void scheduleMaintenanceTransferStatus(CommandSender sender) {
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                this.scheduleCommandFeedback(sender,
+                    color("&fMaintenance transfer active: " + (this.isMaintenanceTransferActive() ? "&aON" : "&cOFF")), false);
+                this.scheduleCommandFeedback(sender, color("&fDestination: &b" + this.getMaintenanceTransferDestinationName()), false);
+                this.scheduleCommandFeedback(sender,
+                    color("&fTracked transferred users: &b" + this.getMaintenanceTransferred().size()), false);
+            });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule maintenance transfer status lookup.");
+            this.scheduleCommandFeedback(sender, color("&cCould not read maintenance transfer status."), false);
+        }
+    }
+
+    private boolean handleMaintenanceTransferDisable(CommandSender var1) {
+        try {
+            PlatformScheduler.globalNow(this, () -> {
+                this.advanceMaintenanceTransferGeneration();
+                this.setMaintenanceTransferActive(false);
+                this.saveMaintenanceTransferState();
+                this.scheduleCommandFeedback(var1, color("&aMaintenance transfer disabled."), false);
+                this.scheduleCommandFeedback(var1,
+                    color("&7Note: players already on maintenance server cannot be force-returned from here."), false);
+            });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule maintenance transfer shutdown.");
+            this.scheduleCommandFeedback(var1, color("&cCould not disable maintenance transfer."), false);
+        }
         return true;
     }
 
@@ -1912,8 +3164,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private boolean handlePizzaMenusHelp(CommandSender sender) {
         sender.sendMessage(color("&bPizzaMenus Commands"));
-        sender.sendMessage(color("&f/menu &7- Open PizzaSMP main menu"));
-        sender.sendMessage(color("&f/guide &7- Open PizzaSMP guide"));
+        sender.sendMessage(color("&f/menu &7- Open " + BRAND_DISPLAY + " main menu"));
+        sender.sendMessage(color("&f/guide &7- Open " + BRAND_DISPLAY + " guide"));
         return true;
     }
 
@@ -2031,7 +3283,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private void sendBrandedPluginList(CommandSender sender) {
-        sender.sendMessage(color("&bPizzaSMP Plugin Stack &7(" + BRANDED_PLUGIN_LIST.size() + ")"));
+        sender.sendMessage(color(BRAND_SECTION + BRAND_DISPLAY + " Plugin Stack &7(" + BRANDED_PLUGIN_LIST.size() + ")"));
         sender.sendMessage(color("&f" + String.join("&7, &f", BRANDED_PLUGIN_LIST)));
     }
 
@@ -2632,6 +3884,15 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return filterByPrefix(out, prefix);
     }
 
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onFrozenFlightToggle(PlayerToggleFlightEvent event) {
+        Player player = event.getPlayer();
+        if (this.isFrozen(player)) {
+            event.setCancelled(true);
+            this.notifyFrozen(player);
+        }
+    }
+
     @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
     public void onFrozenCommandBlock(PlayerCommandPreprocessEvent event) {
         Player player = event.getPlayer();
@@ -2782,10 +4043,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
-        Integer taskId = pendingTeleportTasks.remove(uuid);
-        if (taskId != null) {
-            Bukkit.getScheduler().cancelTask(taskId);
-        }
         combatTaggedUntil.remove(uuid);
         adminTargetIndex.remove(uuid);
         pendingDeleteSlot.remove(uuid);
@@ -2795,8 +4052,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         frozenAnchors.remove(uuid);
         frozenNoticeCooldown.remove(uuid);
         susMenuPages.remove(uuid);
-        stopTrackingTask(uuid);
-        atrackPriorMode.remove(uuid);
+        onAtrackPlayerQuit(event.getPlayer());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -2895,7 +4151,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (homeName == null) {
             if (!selfTarget) return;
             if (setHomeInSlot(viewer, index)) {
-                viewer.sendMessage(color("&7Home " + HOME_PRIMARY + "home" + (index + 1) + "&7 set."));
+                viewer.sendMessage(color("&7Home set"));
             }
             openHomesMenu(viewer, target);
             return;
@@ -3003,13 +4259,16 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
-    /** Wraps a player click handler as a single-use dialog action, re-dispatched onto the main thread. */
-    private DialogAction dialogClick(java.util.function.Consumer<Player> handler) {
-        return DialogAction.customClick((view, audience) -> {
-            if (audience instanceof Player p) {
-                Bukkit.getScheduler().runTask(this, () -> handler.accept(p));
+    private DialogAction dialogClick(Consumer<Player> var1) {
+        return DialogAction.customClick((var2, var3) -> {
+            if (var3 instanceof Player var4) {
+                PlatformScheduler.entityNow(this, var4, () -> {
+                    if (var4.isOnline()) {
+                        var1.accept(var4);
+                    }
+                }, () -> { });
             }
-        }, ClickCallback.Options.builder().build());
+        }, (Options)Options.builder().build());
     }
 
     private ActionButton dialogButton(Component label, String tooltip, int width, java.util.function.Consumer<Player> click) {
@@ -3101,7 +4360,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return dialogButton(Component.text("New Home", NamedTextColor.GRAY),
             "Set a home at your current location", width, p -> {
                 if (setHomeInSlot(p, slotIndex)) {
-                    p.sendMessage(color("&7Home " + HOME_PRIMARY + "home" + (slotIndex + 1) + "&7 set."));
+                    p.sendMessage(color("&7Home set"));
                 } else {
                     p.sendMessage(color("&cFailed to set that home."));
                 }
@@ -3280,30 +4539,24 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         openRenameDialog(player, home, null, home);
     }
 
-    /** Rename screen with an optional inline error line and the player's previous input preserved. */
-    private void openRenameDialog(Player player, String home, String error, String typed) {
-        List<DialogBody> body = error == null
-            ? List.of()
-            : List.of(DialogBody.plainMessage(Component.text(error, NamedTextColor.RED)));
-        List<DialogInput> inputs = List.of(
+    private void openRenameDialog(Player var1, String var2, String var3, String var4) {
+        List var5 = var3 == null ? List.of() : List.of(DialogBody.plainMessage(Component.text(var3, NamedTextColor.RED)));
+        List var6 = List.of(
             DialogInput.text("name", Component.text("New Name", NamedTextColor.GRAY))
                 .width(200)
                 .maxLength(20)
-                .initial(typed == null || typed.isBlank() ? home : typed)
-                .build());
-        ActionButton save = ActionButton.builder(Component.text("Save", NamedTextColor.GREEN))
-            .width(110)
-            .action(DialogAction.customClick((view, audience) -> {
-                if (audience instanceof Player p) {
-                    String raw = view.getText("name");
-                    Bukkit.getScheduler().runTask(this, () -> handleHomeRename(p, home, raw));
-                }
-            }, ClickCallback.Options.builder().build()))
-            .build();
-        ActionButton cancel = dialogButton(Component.text("Cancel"), null, 110, p -> openHomeDetailDialog(p, home));
-        Dialog dialog = buildDialog(Component.text("Rename " + homeDisplayName(home), DIALOG_BRAND),
-            body, inputs, DialogType.confirmation(save, cancel));
-        player.showDialog(dialog);
+                .initial(var4 != null && !var4.isBlank() ? var4 : var2)
+                .build()
+        );
+        ActionButton var7 = ActionButton.builder(Component.text("Save", NamedTextColor.GREEN)).width(110).action(DialogAction.customClick((var2x, var3x) -> {
+            if (var3x instanceof Player var4x) {
+                String var5x = var2x.getText("name");
+                PlatformScheduler.entityNow(this, var4x, () -> this.handleHomeRename(var4x, var2, var5x), null);
+            }
+        }, (Options)Options.builder().build())).build();
+        ActionButton var8 = this.dialogButton(Component.text("Cancel"), null, 110, var2x -> this.openHomeDetailDialog(var2x, var2));
+        Dialog var9 = this.buildDialog(Component.text("Rename " + this.homeDisplayName(var2), DIALOG_BRAND), var5, var6, DialogType.confirmation(var7, var8));
+        var1.showDialog(var9);
     }
 
     /** Renames the yaml key in place, keeping the home's list position (= slot). */
@@ -3742,7 +4995,42 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return arg;
         }
 
-        return null;
+        // Forgiving match: a unique prefix, else the closest name within two typos.
+        String query = arg.toLowerCase(Locale.ROOT);
+        String prefixHit = null;
+        int prefixCount = 0;
+        for (String home : homes) {
+            if (home.toLowerCase(Locale.ROOT).startsWith(query)) { prefixHit = home; prefixCount++; }
+        }
+        if (prefixCount == 1) return prefixHit;
+        String best = null;
+        int bestDistance = 3;
+        for (String home : homes) {
+            int distance = homeNameDistance(query, home.toLowerCase(Locale.ROOT), 2);
+            if (distance >= 0 && distance < bestDistance) { bestDistance = distance; best = home; }
+        }
+        return best;
+    }
+
+    // Small bounded Levenshtein for home-name typo matching (-1 when over max).
+    private static int homeNameDistance(String a, String b, int max) {
+        int n = a.length(), m = b.length();
+        if (Math.abs(n - m) > max) return -1;
+        int[] prev = new int[m + 1];
+        int[] cur = new int[m + 1];
+        for (int j = 0; j <= m; j++) prev[j] = j;
+        for (int i = 1; i <= n; i++) {
+            cur[0] = i;
+            int rowMin = cur[0];
+            for (int j = 1; j <= m; j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                rowMin = Math.min(rowMin, cur[j]);
+            }
+            if (rowMin > max) return -1;
+            int[] swap = prev; prev = cur; cur = swap;
+        }
+        return prev[m] <= max ? prev[m] : -1;
     }
 
     private Location readHomeLocation(OfflinePlayer target, String home) {
@@ -3917,15 +5205,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 return;
             }
             SusEntry entry = entries.get(index);
-            Player target = Bukkit.getPlayer(entry.uuid);
-            if (target == null || !target.isOnline()) {
-                sendOfflinePlayerMessage(viewer, entry.playerName);
-                openSusMenu(viewer, currentPage);
-                return;
-            }
             viewer.closeInventory();
-            viewer.teleport(target, PlayerTeleportEvent.TeleportCause.COMMAND);
-            viewer.sendMessage(color("&aTeleported to &e" + target.getName() + "&a."));
+            // The target's location is read on its own scheduler; the viewer then teleports async.
+            scheduleTeleportToTarget(viewer, entry.uuid, entry.playerName);
             return;
         }
 
@@ -3959,7 +5241,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         int start = page * perPage;
         int end = Math.min(entries.size(), start + perPage);
 
-        sender.sendMessage(color("&bServer Suspects &7(page " + (page + 1) + "/" + (maxPage + 1) + ")"));
+        sender.sendMessage(color(BRAND_SECTION + BRAND_DISPLAY + " Suspects &7(page " + (page + 1) + "/" + (maxPage + 1) + ")"));
         for (int i = start; i < end; i++) {
             SusEntry entry = entries.get(i);
             sender.sendMessage(color(
@@ -3990,7 +5272,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile.getAbsolutePath());
              PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, "ExampleSMP");
+            statement.setString(1, getConfig().getString("suspects.grim-server-name", "Server"));
             statement.setLong(2, cutoff);
 
             try (ResultSet resultSet = statement.executeQuery()) {
@@ -4124,33 +5406,29 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         viewer.openInventory(inv);
     }
 
-    private void handleDeleteConfirmClick(Player viewer, int rawSlot) {
-        if (rawSlot == 11) {
-            pendingDeleteHome.remove(viewer.getUniqueId());
-            pendingDeleteSlot.remove(viewer.getUniqueId());
-            openHomesMenu(viewer, getCurrentTarget(viewer));
-            return;
+    private void handleDeleteConfirmClick(Player var1, int var2) {
+        if (var2 == 11) {
+            this.pendingDeleteHome.remove(var1.getUniqueId());
+            this.pendingDeleteSlot.remove(var1.getUniqueId());
+            this.openHomesMenu(var1, this.getCurrentTarget(var1));
+        } else if (var2 == 15) {
+            String var3 = this.pendingDeleteHome.remove(var1.getUniqueId());
+            if (var3 != null) {
+                this.handleDelHomeCommand(var1, var3);
+                this.openHomesMenu(var1, var1);
+            } else {
+                Integer var4 = this.pendingDeleteSlot.remove(var1.getUniqueId());
+                if (var4 == null) {
+                    this.openHomesMenu(var1, this.getCurrentTarget(var1));
+                } else {
+                    if (this.removeHomeAtSlot(var1, var4)) {
+                        var1.sendActionBar(color("&7Home deleted"));
+                    }
+
+                    this.openHomesMenu(var1, var1);
+                }
+            }
         }
-        if (rawSlot != 15) {
-            return;
-        }
-        // Name-keyed delete (grid path): resolves the actual home by name (handles custom names).
-        String homeName = pendingDeleteHome.remove(viewer.getUniqueId());
-        if (homeName != null) {
-            handleDelHomeCommand(viewer, homeName);
-            openHomesMenu(viewer, viewer);
-            return;
-        }
-        // Legacy slot-index path (kept for safety).
-        Integer slotIndex = pendingDeleteSlot.remove(viewer.getUniqueId());
-        if (slotIndex == null) {
-            openHomesMenu(viewer, getCurrentTarget(viewer));
-            return;
-        }
-        if (removeHomeAtSlot(viewer, slotIndex)) {
-            viewer.sendActionBar(color("&7Deleted Home " + (slotIndex + 1) + "&7."));
-        }
-        openHomesMenu(viewer, viewer);
     }
 
     /**
@@ -4221,7 +5499,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return;
         }
         if (isNew) {
-            player.sendMessage(color("&7Home " + HOME_PRIMARY + name + "&7 set. &8(" + homes.size() + "/" + limit + " homes)"));
+            player.sendMessage(color("&7Home set"));
         } else {
             player.sendMessage(color("&7Home " + HOME_PRIMARY + name + "&7 moved here."));
         }
@@ -4259,9 +5537,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
         // "Deleted home {number}" for default slots (homeN), "Deleted {name}" for custom-named homes.
         if (name.matches("home\\d+")) {
-            player.sendMessage(color("&7Deleted home " + HOME_PRIMARY + name.substring(4) + "&7."));
+            player.sendMessage(color("&7Home deleted"));
         } else {
-            player.sendMessage(color("&7Deleted " + HOME_PRIMARY + name + "&7."));
+            player.sendMessage(color("&7Home deleted"));
         }
     }
 
@@ -4375,20 +5653,30 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return Math.max(1, (remainingMs + 999) / 1000);
     }
 
-    private void startCountdownTeleport(Player player, Location destination, String successActionBarMessage) {
-        startCountdownCommand(player, () -> {
-            player.teleportAsync(destination).thenAccept(ok -> {
-                if (ok) {
-                    // Kill momentum + accrued fall so teleporting mid-fall deals no fall damage.
-                    player.setFallDistance(0.0f);
-                    player.setVelocity(new org.bukkit.util.Vector(0, 0, 0));
-                    noFallDamageUntil.put(player.getUniqueId(), System.currentTimeMillis() + 4000L);
-                    player.sendActionBar(color(successActionBarMessage));
-                    // Ender-pearl arrival sound, consistent with RTP/TPA.
-                    try { player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_ENDERMAN_TELEPORT, 0.8f, 1.2f); } catch (Throwable ignored) {}
+    private void startCountdownTeleport(Player var1, Location var2, String var3) {
+        this.startCountdownCommand(var1, () -> {
+            var playerScheduler = var1.getScheduler();
+            var1.teleportAsync(var2).thenAccept(success -> {
+                if (!success) return;
+
+                try {
+                    playerScheduler.run(this, task -> {
+                        if (!var1.isOnline()) return;
+                        var1.setFallDistance(0.0F);
+                        var1.setVelocity(new Vector(0, 0, 0));
+                        this.noFallDamageUntil.put(var1.getUniqueId(), System.currentTimeMillis() + 4000L);
+                        var1.sendActionBar(color(var3));
+
+                        try {
+                            var1.playSound(var1.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 0.8F, 1.2F);
+                        } catch (Throwable ignored) {
+                        }
+                    }, () -> { });
+                } catch (RuntimeException exception) {
+                    this.getLogger().warning("Could not schedule post-teleport player effects.");
                 }
             });
-        }, successActionBarMessage);
+        }, var3);
     }
 
     /** Cancel fall damage briefly after a teleport (covers momentum the client carried in). */
@@ -4420,13 +5708,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         action.run();
     }
 
-    private void cancelPendingTeleport(Player player) {
-        UUID uuid = player.getUniqueId();
-        Integer taskId = pendingTeleportTasks.remove(uuid);
-        if (taskId != null) {
-            Bukkit.getScheduler().cancelTask(taskId);
-        }
-        pendingTeleportOrigins.remove(uuid);
+    private void cancelPendingTeleport(Player var1) {
+        UUID var2 = var1.getUniqueId();
+        this.pendingTeleportOrigins.remove(var2);
     }
 
     private boolean hasPlayerMoved(Location from, Location to) {
@@ -4753,29 +6037,80 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         this.storage.saveDoc(DOC_STAFF_MODE, cfg);
     }
 
-    /** /gmcbypass <player> — CONSOLE ONLY. Grants one creative-mode change that bypasses the ban. */
-    private boolean handleGmcBypassCommand(CommandSender sender, String[] args) {
-        if (sender instanceof Player p) {
-            // Console-only: players get the unknown-command treatment.
-            p.sendActionBar(color("&cThis command does not exist"));
+    private boolean handleGmcBypassCommand(CommandSender var1, String[] var2) {
+        if (var1 instanceof Player var4) {
+            this.scheduleCommandFeedback(var4, color("&cThis command does not exist"), true);
+            return true;
+        } else if (var2.length < 1) {
+            var1.sendMessage(color("&cUsage: /gmcbypass <player>"));
+            return true;
+        } else {
+            String targetName = var2[0];
+            try {
+                PlatformScheduler.globalNow(this, () -> {
+                    Player target = Bukkit.getPlayerExact(targetName);
+                    if (target == null) {
+                        this.scheduleCommandFeedback(var1, color("&cPlayer not found or offline: &e" + targetName), false);
+                        return;
+                    }
+
+                    UUID targetId = target.getUniqueId();
+                    try {
+                        PlatformScheduler.entityNow(this, target, () -> {
+                            if (!target.isOnline()) {
+                                this.scheduleCommandFeedback(var1, color("&cPlayer not found or offline: &e" + targetName), false);
+                                return;
+                            }
+
+                            String actualName = target.getName();
+                            boolean alreadyCreative = target.getGameMode() == GameMode.CREATIVE;
+                            if (!alreadyCreative) this.creativeBypass.add(targetId);
+                            try {
+                                if (!alreadyCreative) target.setGameMode(GameMode.CREATIVE);
+                                if (target.getGameMode() == GameMode.CREATIVE) {
+                                    this.scheduleCommandFeedback(var1,
+                                        color("&aSet &e" + actualName + " &ato creative (rule bypassed)."), false);
+                                } else {
+                                    this.scheduleCommandFeedback(var1, color("&cCould not set " + actualName + " to creative."), false);
+                                }
+                            } catch (RuntimeException exception) {
+                                this.getLogger().warning("Could not apply /gmcbypass to an online player.");
+                                this.scheduleCommandFeedback(var1, color("&cCould not set " + actualName + " to creative."), false);
+                            } finally {
+                                if (!alreadyCreative) this.creativeBypass.remove(targetId);
+                            }
+                        }, () -> this.scheduleCommandFeedback(var1,
+                            color("&cPlayer not found or offline: &e" + targetName), false));
+                    } catch (RuntimeException exception) {
+                        this.getLogger().warning("Could not schedule a /gmcbypass player update.");
+                        this.scheduleCommandFeedback(var1, color("&cCould not update that player's game mode."), false);
+                    }
+                });
+            } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not look up the /gmcbypass target.");
+                this.scheduleCommandFeedback(var1, color("&cCould not update that player's game mode."), false);
+            }
             return true;
         }
-        if (args.length < 1) {
-            sender.sendMessage(color("&cUsage: /gmcbypass <player>"));
-            return true;
-        }
-        Player target = Bukkit.getPlayerExact(args[0]);
-        if (target == null || !target.isOnline()) {
-            sender.sendMessage(color("&cPlayer not found or offline: &e" + args[0]));
-            return true;
-        }
-        creativeBypass.add(target.getUniqueId());
-        target.setGameMode(GameMode.CREATIVE);
-        sender.sendMessage(color("&aSet &e" + target.getName() + " &ato creative (rule bypassed)."));
-        return true;
     }
 
     /** /sfmode — toggle staff mode (hides staff commands + blocks their use). Staff only. */
+    /** Appends a staff-mode toggle to the console log and staffmode-audit.log in the plugin folder. */
+    private void auditStaffMode(Player player, boolean enabled) {
+        String stamp = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+            .withZone(java.time.ZoneId.systemDefault()).format(java.time.Instant.now());
+        String line = stamp + " " + player.getName() + " (" + player.getUniqueId() + ") staff-mode " + (enabled ? "ENABLED" : "DISABLED");
+        getLogger().info("[sfmode] " + line);
+        PlatformScheduler.asyncNow(this, () -> {
+            try {
+                getDataFolder().mkdirs();
+                java.nio.file.Files.writeString(new File(getDataFolder(), "staffmode-audit.log").toPath(),
+                    line + System.lineSeparator(), java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
     private boolean handleSfModeCommand(CommandSender sender) {
         if (!(sender instanceof Player player)) {
             sender.sendMessage(color("&cOnly players can use /sfmode."));
@@ -4789,12 +6124,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         UUID uuid = player.getUniqueId();
         if (staffMode.contains(uuid)) {
             staffMode.remove(uuid);
+            auditStaffMode(player, false);
             player.sendActionBar(net.kyori.adventure.text.Component.text(
-                "§aStaff mode is now OFF. Your staff functions are back."));
+                "§7Staff mode is now disabled. Your next login will be normal."));
         } else {
             staffMode.add(uuid);
+            auditStaffMode(player, true);
             player.sendActionBar(net.kyori.adventure.text.Component.text(
-                "§eStaff mode is now ON. All staff functions are hidden and you can no longer use any."));
+                "§7Staff mode is now on, all staff functions will hide on next log in and you won't be able to use any."));
         }
         saveStaffMode();
         // Re-send the command tree now so the hide/show applies immediately (no relog needed).
@@ -4966,10 +6303,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         StringBuilder rebuilt = new StringBuilder()
             .append(ChatColor.RED)
-            .append("You are banned from this server. If you believe this was a mistake please make a ticket in the Example SMP Discord")
+            .append("You are banned from " + BRAND_DISPLAY + ". If you believe this was a mistake please make a ticket in the " + BRAND_DISPLAY + " Discord")
             .append('\n')
             .append(ChatColor.YELLOW)
-            .append(DISCORD_INVITE)
+            .append(BRAND_DISCORD)
             .append("\n\n");
         if (date != null) {
             rebuilt.append(ChatColor.GRAY).append("Date: ").append(ChatColor.WHITE).append(date).append('\n');
@@ -4979,53 +6316,75 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             rebuilt.append(ChatColor.GRAY).append("Ban ID: ").append(ChatColor.WHITE).append(banId).append('\n');
         }
         rebuilt.append(ChatColor.GRAY).append("Reason: ").append(ChatColor.WHITE).append(reason).append('\n');
-        rebuilt.append(ChatColor.GRAY).append("You may be able to appeal this ban on ").append(ChatColor.WHITE).append(DISCORD_INVITE).append(ChatColor.GRAY).append('.');
+        rebuilt.append(ChatColor.GRAY).append("You may be able to appeal this ban on ").append(ChatColor.WHITE).append(BRAND_DISCORD).append(ChatColor.GRAY).append('.');
         return rebuilt.toString();
     }
 
     @EventHandler
-    public void onNvPlayerRespawn(org.bukkit.event.player.PlayerRespawnEvent event) {
-        if (nvEnabled.contains(event.getPlayer().getUniqueId())) {
-            Bukkit.getScheduler().runTask(this, () -> {
-                Player p = event.getPlayer();
-                if (p.isOnline()) p.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
-            });
+    public void onNvPlayerRespawn(PlayerRespawnEvent var1) {
+        if (this.nvEnabled.contains(var1.getPlayer().getUniqueId())) {
+            PlatformScheduler.entityLater(this, var1.getPlayer(), () -> {
+                Player var1x = var1.getPlayer();
+                if (var1x.isOnline()) {
+                    var1x.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
+                }
+            }, null, 1L);
         }
     }
 
     @EventHandler
-    public void onNvItemConsume(org.bukkit.event.player.PlayerItemConsumeEvent event) {
-        if (nvEnabled.contains(event.getPlayer().getUniqueId())) {
-            Bukkit.getScheduler().runTaskLater(this, () -> {
-                Player p = event.getPlayer();
-                if (p.isOnline()) p.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
-            }, 2L);
+    public void onNvItemConsume(PlayerItemConsumeEvent var1) {
+        if (this.nvEnabled.contains(var1.getPlayer().getUniqueId())) {
+            PlatformScheduler.entityLater(this, var1.getPlayer(), () -> {
+                Player var1x = var1.getPlayer();
+                if (var1x.isOnline()) {
+                    var1x.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
+                }
+            }, null, 2L);
         }
     }
 
     @EventHandler
-    public void onNvResurrect(org.bukkit.event.entity.EntityResurrectEvent event) {
-        if (event.getEntity() instanceof Player p && nvEnabled.contains(p.getUniqueId())) {
-            Bukkit.getScheduler().runTaskLater(this, () -> {
-                if (p.isOnline()) p.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
-            }, 2L);
+    public void onNvResurrect(EntityResurrectEvent var1) {
+        if (var1.getEntity() instanceof Player var2 && this.nvEnabled.contains(var2.getUniqueId())) {
+            PlatformScheduler.entityLater(this, var2, () -> {
+                if (var2.isOnline()) {
+                    var2.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
+                }
+            }, null, 2L);
         }
     }
 
     @EventHandler
-    public void onNvJoin(PlayerJoinEvent event) {
-        if (nvEnabled.contains(event.getPlayer().getUniqueId())) {
-            Bukkit.getScheduler().runTaskLater(this, () -> {
-                Player p = event.getPlayer();
-                if (p.isOnline()) p.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
-            }, 10L);
+    public void onNvJoin(PlayerJoinEvent var1) {
+        if (this.nvEnabled.contains(var1.getPlayer().getUniqueId())) {
+            PlatformScheduler.entityLater(this, var1.getPlayer(), () -> {
+                Player var1x = var1.getPlayer();
+                if (var1x.isOnline()) {
+                    var1x.addPotionEffect(new PotionEffect(PotionEffectType.NIGHT_VISION, Integer.MAX_VALUE, 0, false, false, false));
+                }
+            }, null, 10L);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onAtrackRecoveryJoin(PlayerJoinEvent event) {
+        Player player = event.getPlayer();
+        try {
+            PlatformScheduler.TaskHandle task = PlatformScheduler.entityLater(this, player,
+                () -> this.recoverAtrackMode(player), () -> { }, 1L);
+            if (!task.wasAccepted()) {
+                this.getLogger().warning("Could not schedule /atrack recovery after player join.");
+            }
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not schedule /atrack recovery after player join.");
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerJoinBrand(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        Bukkit.getScheduler().runTaskLater(this, () -> {
+        PlatformScheduler.entityLater(this, player, () -> {
             if (!player.isOnline()) return;
             try {
                 Method getHandle = player.getClass().getMethod("getHandle");
@@ -5054,7 +6413,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             } catch (Exception e) {
                 getLogger().warning("Failed to send brand packet: " + e.getMessage());
             }
-        }, 20L);
+        }, null, 20L);
     }
 
     private static String safeName(OfflinePlayer p) {
@@ -5103,5 +6462,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             this.host = host;
             this.port = port;
         }
+    }
+    private enum MaintenanceTransferStatus {
+        MOVED,
+        SKIPPED,
+        CANCELLED,
+        FAILED
+    }
+
+    private record MaintenanceTransferAttempt(MaintenanceTransferStatus status, String playerId) {
     }
 }

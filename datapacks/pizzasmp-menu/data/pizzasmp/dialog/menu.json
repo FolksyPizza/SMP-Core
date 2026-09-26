@@ -1,0 +1,123 @@
+{
+  "type": "minecraft:multi_action",
+  "title": {
+    "text": "Menu",
+    "color": "#00BFFF",
+    "bold": true
+  },
+  "external_title": "Menu",
+  "pause": false,
+  "can_close_with_escape": true,
+  "after_action": "close",
+  "columns": 2,
+  "actions": [
+    {
+      "label": "Homes",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "homes"
+      }
+    },
+    {
+      "label": "RTP",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "rtp"
+      }
+    },
+    {
+      "label": "RTP Queue",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "rtpq"
+      }
+    },
+    {
+      "label": "Auction",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "ah"
+      }
+    },
+    {
+      "label": "Friends",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "friend"
+      }
+    },
+    {
+      "label": "Orders",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "orders"
+      }
+    },
+    {
+      "label": "Shop",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "shop"
+      }
+    },
+    {
+      "label": "Sell",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "sell"
+      }
+    },
+    {
+      "label": "Pay",
+      "width": 200,
+      "action": {
+        "type": "show_dialog",
+        "dialog": "pizzasmp:pay"
+      }
+    },
+    {
+      "label": "Teleport",
+      "width": 200,
+      "action": {
+        "type": "show_dialog",
+        "dialog": "pizzasmp:teleport"
+      }
+    },
+    {
+      "label": "Stats",
+      "width": 200,
+      "action": {
+        "type": "show_dialog",
+        "dialog": "pizzasmp:stats"
+      }
+    },
+    {
+      "label": "Leaderboards",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "leaderboard"
+      }
+    },
+    {
+      "label": "Settings",
+      "width": 200,
+      "action": {
+        "type": "run_command",
+        "command": "settings"
+      }
+    }
+  ],
+  "exit_action": {
+    "label": "Back",
+    "width": 200
+  }
+}

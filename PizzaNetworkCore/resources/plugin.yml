@@ -2,8 +2,8 @@ name: PizzaNetworkCore
 version: 1.0.0
 main: dev.pizzasmp.networkcore.PizzaNetworkCore
 api-version: '1.21.6'
-authors: [PizzaSMP]
-description: PizzaSMP core UX plugin (join/quit suppression, guide/settings/stats GUIs)
+authors: [FolksyPizza]
+description: Core plugin for the SMP-Core suite (economy, homes, teleports, social, settings, duels, hubs).
 # ProtocolLib is a HARD class-load dependency: this plugin imports com.comphenix.protocol.*
 # directly for four packet listeners. Without this declaration its absence surfaced as an
 # unexplained failure inside PluginClassLoader.<init>, before any guard in the code could run
@@ -85,7 +85,7 @@ commands:
     permission: pizzasmp.admin.console
   branding:
     usage: /branding [status] | /branding set <pizzasmp|horizonsmp>
-    description: Switch the active server brand profile (PizzaSMP/HorizonSMP).
+    description: Switch the active server brand profile.
     permission: pizzasmp.admin.console
   worth:
     usage: /worth [item]

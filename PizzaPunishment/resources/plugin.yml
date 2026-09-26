@@ -2,8 +2,8 @@ name: PizzaPunishment
 main: me.pizzasmp.punishdrop.PunishDropPlugin
 version: 1.0.0
 api-version: "1.21"
-author: PizzaSMP
-description: PizzaSMP punishment stack with presets, Ban IDs, history, and admin GUIs.
+author: FolksyPizza
+description: Punishment stack with presets, Ban IDs, history, and admin GUIs.
 # SuiteStorage needs a JDBC driver and a pool to put shared state in the database.
 # Paper's runtime library loader fetches these; without the block the plugin loads and
 # then silently falls back to per-server YAML files.
@@ -72,7 +72,7 @@ commands:
     usage: /searchid <id>
     permission: pizzasmp.history
   bans:
-    description: Open the PizzaSMP moderation GUI.
+    description: Open the moderation GUI.
     usage: /bans [page]
     permission: pizzasmp.bans
   moderation:

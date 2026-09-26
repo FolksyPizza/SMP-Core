@@ -1,7 +1,7 @@
 package dev.pizzasmp.ruleguard;
 
 /*
- * PizzaRuleGuardPlugin — part of the PizzaSMP plugin suite.
+ * PizzaRuleGuardPlugin — part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */

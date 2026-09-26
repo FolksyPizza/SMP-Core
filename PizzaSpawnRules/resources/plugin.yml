@@ -3,7 +3,7 @@ version: 1.0.0
 main: dev.pizzasmp.spawnrules.PizzaSpawnRulesPlugin
 api-version: '1.21'
 folia-supported: true
-authors: [PizzaSMP]
+authors: [FolksyPizza]
 description: Lobby spawn protections and silent unlimited double-jump
 commands:
   spawnedit:

@@ -1,4 +1,4 @@
--- PizzaSMP network schema — single shared MariaDB for velocity + lobby + survival + maintenance.
+-- SMP-Core network schema — single shared MariaDB for velocity + lobby + survival + maintenance.
 --
 -- This schema is the backbone of cross-server sync: because every backend and the
 -- Velocity bridge read and write this one database, a player's inventory, balance,

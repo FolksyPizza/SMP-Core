@@ -213,7 +213,7 @@ TOP=("Servers" "Plugins" "Maintenance" "Data" "All scripts")
 top_sel=0
 while true; do
   clear
-  printf '%s  PizzaSMP ops%s   %s%s%s\n' "$B$CY" "$R" "$DIM" "$ROOT" "$R"
+  printf '%s  SMP-Core ops%s   %s%s%s\n' "$B$CY" "$R" "$DIM" "$ROOT" "$R"
   printf '%s%s%s\n' "$DIM" "$(printf '─%.0s' {1..70})" "$R"
   for s in velocity $(all_backends 2>/dev/null); do
     p="$(service_port "$s" 2>/dev/null)"

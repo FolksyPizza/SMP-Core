@@ -2,7 +2,7 @@ name: PizzaTune
 version: 1.0.0
 main: dev.pizzasmp.tune.PizzaTune
 api-version: '1.21'
-authors: [PizzaSMP]
+authors: [FolksyPizza]
 description: Live-tune view distance and chunk send/load rates without restart.
 commands:
   viewdistance:

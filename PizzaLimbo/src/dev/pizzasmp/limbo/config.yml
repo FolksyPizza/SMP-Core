@@ -4,8 +4,8 @@ db:
   host: "127.0.0.1"
   port: 3306
   name: "pizzasmp"
-  user: "pizzasmp"
-  password: "changeme"
+  user: ""
+  password: ""
 smp:
   probe-host: "127.0.0.1"
   probe-port: 25566

@@ -27,6 +27,10 @@ First stable release. Supports Paper 1.21.6 and newer on Java 21; tested on Pape
 - PizzaCommon scheduler facade over Paper's entity/region/global/async schedulers.
 - Compatibility adapters so the suite runs on Paper 1.21.6 and newer.
 - Roadmap document (`UPCOMING.md`).
+- PizzaAdminTools: `/nuke`, persistent `/atrack` sessions, frozen-maintenance recovery after a restart,
+  a staff-mode audit log, and forgiving `/home` name matching (unique prefix or up to two typos).
+- PizzaProxyGuard: a `maintenance.flag` operator lockout with a per-name bypass list.
+- Pause-screen menu and limbo maintenance datapacks.
 
 ### Changed
 - RTP cooldown is tiered and configurable (`rtp.cooldown-seconds` defaults to 15; subscriber tiers
@@ -38,7 +42,8 @@ First stable release. Supports Paper 1.21.6 and newer on Java 21; tested on Pape
 - PizzaUtils is reduced to `/ping`; its other commands live in PizzaNetworkCore and PizzaTune.
 - Punishment offences and records, and subscription state, can be shared across backends through
   MySQL-backed storage.
-- Branding is not shipped in this repository; the setup writes a brand profile on install.
+- Branding is not shipped in this repository; the setup writes a brand profile on install. Every
+  player-facing server name, Discord link and menu title now follows the active brand profile.
 
 ### Fixed
 - Team homes could not be set because of a stub left by source recovery; the real implementation is

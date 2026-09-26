@@ -1,5 +1,5 @@
 /*
- * SuiteStorage — part of the PizzaSMP plugin suite (PizzaCommon shared library).
+ * SuiteStorage — part of the SMP-Core plugin suite (PizzaCommon shared library).
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
  */
@@ -26,7 +26,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Unified, backend-agnostic persistence for the PizzaSMP suite. Each plugin creates ONE instance
+ * Unified, backend-agnostic persistence for the SMP-Core suite. Each plugin creates ONE instance
  * with a namespace ("admintools", "chatguard", ...). Two storage backends, chosen by config:
  *
  *   storage:

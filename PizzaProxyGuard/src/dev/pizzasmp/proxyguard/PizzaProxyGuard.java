@@ -126,6 +126,12 @@ public class PizzaProxyGuard {
 
     @Subscribe
     public void onLogin(LoginEvent event) {
+        // Operator lockout (tier 0): while plugins/pizzaproxyguard/maintenance.flag exists, deny new joins
+        // outright (never limbo). Usernames listed in the file may still connect.
+        if (this.maintenanceLockout() && !this.isBypassed(event.getPlayer().getUsername())) {
+            event.setResult(ResultedEvent.ComponentResult.denied(this.maintenanceComponent()));
+            return;
+        }
         // A fresh player always targets the SMP first (try order). If it is down, refuse entry here so
         // Velocity never falls them into the limbo lobby.
         // Tier 2 (whole-network maintenance): refuse entry outright. Repeatedly kicking
@@ -146,6 +152,10 @@ public class PizzaProxyGuard {
 
     @Subscribe
     public void onKicked(KickedFromServerEvent event) {
+        if (this.maintenanceLockout() && !this.isBypassed(event.getPlayer().getUsername())) {
+            event.setResult(KickedFromServerEvent.DisconnectPlayer.create(this.maintenanceComponent()));
+            return;
+        }
         String fromServer = event.getServer() != null ? event.getServer().getServerInfo().getName() : "";
         // Player was kicked mid-connect (the SMP refused / died during handshake): don't dump to limbo.
         if (event.kickedDuringServerConnect()) {
@@ -312,6 +322,26 @@ public class PizzaProxyGuard {
     }
 
     private static final LegacyComponentSerializer AMP = LegacyComponentSerializer.legacyAmpersand();
+
+    private boolean maintenanceLockout() {
+        return this.dataDir.resolve("maintenance.flag").toFile().isFile();
+    }
+
+    /** A username on any non-comment line of maintenance.flag (comma-separated) may still connect. */
+    private boolean isBypassed(String username) {
+        if (username == null || username.isEmpty()) return false;
+        try {
+            for (String line : java.nio.file.Files.readAllLines(this.dataDir.resolve("maintenance.flag"))) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                for (String name : line.split(",")) {
+                    if (name.trim().equalsIgnoreCase(username)) return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
 
     private Component maintenanceComponent() {
         String msg = this.maintenanceMotd == null || this.maintenanceMotd.isBlank()

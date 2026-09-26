@@ -119,6 +119,7 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/queuetest` | Force-enqueue yourself to test the join queue. |
 | `/pizzaplugins` | Show the plugin stack. |
 | `/setmoneyboard` | Place the spawn money leaderboard at your location. |
+| `/nuke [radius]` | Staff-only demolition item. |
 
 ## Staff: network and maintenance (Alpha, off by default)
 
