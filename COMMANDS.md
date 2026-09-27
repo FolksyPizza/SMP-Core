@@ -101,7 +101,6 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/pizzasusflag <player> <check> <vl>` | Raise a manual anti-cheat flag. |
 | `/diagnostics` | Server diagnostics. |
 | `/txlog [player] [page]` | Economy transaction log. |
-| `/pizzadebug hud` | Toggle HUD debug output. |
 
 ## Staff: server administration
 

@@ -2,13 +2,35 @@
 
 All notable changes to SMP-Core are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
-[Semantic Versioning](https://semver.org/) from 1.0.0 on.
+[Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-26
+Changes since 1.0.0-beta, toward the 1.0.0 release.
 
-First stable release. Supports Paper 1.21.6 and newer on Java 21; tested on Paper 1.21.11.
+### Added
+- Staff auction tools (`/ah admin <player>`): view, return or remove a player's listings. Returned items go
+  to an item mailbox, delivered on join or immediately when the player is online.
+- The database schema is applied on every start, so a fresh database needs no manual import.
+
+### Changed
+- RTP arrival animations are off by default (`rtp.animation.enabled`).
+- `/ah sell <price>` lists the item without opening the auction menu.
+- The Totem Particles setting hides only other players' totem particles; totem sounds and your own pop
+  animation stay.
+- ProtocolLib is a required dependency of PizzaNetworkCore.
+- PizzaUtils is retired: `/ping` lives in PizzaNetworkCore.
+
+### Removed
+- The unfinished join queue and `/queuetest`, `/pizzadebug`, and the placeholder plugin list in
+  PizzaAdminTools.
+
+### Fixed
+- A duel opponent no longer stays frozen after the other player disconnects and reconnects mid-match.
+
+## [1.0.0-beta] - 2026-09-26
+
+Feature-complete beta of the 1.0.0 suite. Supports Paper 1.21.6 and newer on Java 21; tested on Paper 1.21.11.
 
 ### Added
 - Duels: `/duel` challenges with wagers, rounds and loadout options, a private generated arena world

@@ -62,10 +62,6 @@ commands:
   pizzabans:
     description: PizzaBans command hub.
     usage: /pizzabans [help]
-  pizzaplugins:
-    description: Show the plugin stack.
-    usage: /pizzaplugins
-    permission: pizzasmp.pluginadmin
   # /sus and /suspicious are handled by PizzaNetworkCore — keeping it registered here would cause a conflict
   # /nv and /nightvision are handled by PizzaNetworkCore (same state as the /settings Night Vision toggle);
   # registering them here too would conflict.
@@ -77,11 +73,6 @@ commands:
     description: Spawn a small randomized survival camp where you are looking.
     usage: /stash
     aliases: [spawnstash]
-    permission: pizzasmp.admin.stash
-  spawnstash:
-    description: Spawn a small randomized survival camp where you are looking.
-    usage: /spawnstash
-    aliases: [stash]
     permission: pizzasmp.admin.stash
   pizzaplus:
     description: Manage Pizza+/Pizza++ subscriptions (30-day default, renewable, monthly shard stipends).

@@ -1,25 +1,27 @@
 # Upcoming
 
-Things I want to build for SMP-Core. This is a direction and a wishlist, not a promise or a timeline. Some of it is close, some of it is ambitious, and some of it is a long way off. If you want one of these badly, open an issue and say so.
+Planned work for SMP-Core. This is direction, not a commitment or a schedule. Open an issue to argue for an item.
 
-## Performance and scale
+## 1.0.0
 
-- **Folia support.** The plugins currently use the classic Bukkit scheduler, so they are not Folia-safe yet, and the plugin metadata says so honestly. Folia's region threading is the real way to run a large world across many cores, so making the whole suite region-aware is a major goal.
-- **Clustered Folia.** Further out: spread Folia's regions across more than one machine, so a single logical server runs on a cluster of compute instances with the region threads living on real separate hardware, not just separate cores. This is a big research-and-build effort, not a config flag.
-- **Multiple connection regions.** Geo-distributed entry points (NA-East, NA-West, EU, Asia) so players connect to something close to them while the world and economy stay shared behind it. This builds on the cross-server layer that is Alpha today.
-- **Canopy integration.** First-class support for deploying the suite alongside [Canopy](https://github.com/folksypizza/canopy), so its gateway and session handling can front SMP-Core cleanly. The aim is a supported, well-documented path rather than a bespoke glue layer.
+| Item | Summary |
+| --- | --- |
+| File storage | Every feature gets two storage backends, Database and File, so a single server can run without MySQL. Networks use the database. |
+| Network handoff | A player who arrives before their data is held safe (invulnerable, inventory locked) until it loads. |
+| Cross-server RTP | The destination is found before the player moves, then one transfer and one teleport. |
+| Staff tools | Manage other players' homes and open their menus (homes, auctions) from the admin console. |
+| Version range | Paper 1.21.7 to 26.2 with dialogs, and 1.21.6 through inventory menus. Players can choose menus over dialogs. |
+| Portable build | One build that works from a clean clone. |
 
-## Gameplay and UX
+## Later
 
-- **Owner-configurable features.** Config switches so each server decides what it runs: teams, friends, or both; the legacy inventory menus or the newer dialog menus; and similar toggles. Anything the live server retired should stay available to everyone else, not forced off.
-- **Visual effects.** A player-facing effects layer: subtle ambient effects for teleports and sales, bigger celebratory ones for milestones and advancements, and cosmetic trails as a perk. A few of the big-moment effects are meant to fill the screen, not just be small particles.
-- **Local storage.** A flat-file or SQLite option so PizzaNetworkCore can run without a MySQL database. The database requirement is the biggest thing standing between someone and just trying it.
-- **Finish the order-matching engine.** Route selling through the best available player order when it beats the base sell price, and sweep matching listings when an order is created.
-
-## Moderation and anti-cheat
-
-- **Hardened moderation and a custom detection layer.** Not a replacement for GrimAC, but a supplemental layer built on PizzaRuleGuard: a unified violation-level system, behavioral pattern detection (autoclicker, and AFK-farm and macro cadence), and mechanic checks tuned to this suite's own economy and dupe surfaces.
-
-## Project health
-
-- A build file for every plugin, continuous integration, checksummed releases, and tests around the money-handling paths.
+| Area | Item |
+| --- | --- |
+| Scale | Folia support across the suite, then research into spreading Folia regions across machines |
+| Scale | Geo-distributed entry points with a shared world and economy behind them |
+| Integration | A supported deployment path alongside [Canopy](https://github.com/folksypizza/canopy) |
+| Gameplay | Owner switches for optional features (teams, friends, menu style) |
+| Gameplay | Visual effects for teleports, sales and milestones, and cosmetic trails |
+| Economy | Route sales through the best player order when it beats the base price; sweep matching listings when an order is created |
+| Moderation | A detection layer on PizzaRuleGuard: unified violation levels, autoclicker and macro cadence checks, economy and dupe checks. Supplements GrimAC, does not replace it |
+| Project | Continuous integration, checksummed releases, tests around money handling, performance work |

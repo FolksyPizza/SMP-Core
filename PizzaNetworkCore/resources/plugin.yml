@@ -59,9 +59,6 @@ commands:
   bounty:
     usage: /bounty [player] [amount]
     aliases: [bounties]
-  queuetest:
-    usage: /queuetest
-    description: Force-enqueue yourself to test the join queue (admin).
   vdthrottle:
     usage: /vdthrottle [player|set <n>|reset]
     description: View/control the view-distance throttle (admin).
@@ -155,8 +152,6 @@ commands:
   sus:
     usage: /sus
     aliases: [suspicious]
-  viewdistance:
-    usage: /viewdistance <distance>
   diagnostics:
     usage: /diagnostics
   shards:
@@ -167,8 +162,6 @@ commands:
     usage: /pizzasusflag <player> <checkName> <vl>
   txlog:
     usage: /txlog [player] [page]
-  pizzadebug:
-    usage: /pizzadebug hud
   admindelhome:
     usage: /admindelhome <player> <home>
 permissions:
@@ -264,6 +257,12 @@ permissions:
     default: op
   pizzasmp.admin.homes:
     default: op
+  pizzasmp.admin.auction:
+    description: View any player's auction listings and remove them (/ah admin <player>); items return to the seller.
+    default: op
+  pizzasmp.admin.invsee:
+    description: Open an online player's inventory from the /admin player menu.
+    default: op
   pizzasmp.hub.bypass:
     description: Edit protected hub worlds (break/place blocks in spawn/afk).
     default: op
@@ -272,4 +271,6 @@ permissions:
     default: op
 # Load after Essentials/EssentialsChat so the chat-icon renderer wraps their chat renderer (same priority
 # runs in registration order).
-softdepend: [ProtocolLib, Essentials, EssentialsChat]
+# ProtocolLib is required: the main class uses its packet API, and the plugin can't load without it.
+depend: [ProtocolLib]
+softdepend: [Essentials, EssentialsChat]

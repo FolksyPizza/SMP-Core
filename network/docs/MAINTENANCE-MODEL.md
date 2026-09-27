@@ -1,4 +1,4 @@
-# Maintenance model — design
+# Maintenance model: design
 
 Status: agreed design, not yet implemented. Written 2026-08-07.
 
@@ -17,8 +17,8 @@ Two reasons, in order of weight:
 
 1. **Blast radius under permission leakage.** `/admin` and `/manage` expose maintenance
    toggles, world access, economy controls and feature flags behind a single permission
-   node. One mis-set LuckPerms inheritance — and the group chain carries ~271 explicit
-   `=false` negations precisely because this has been fiddly before — hands an unprivileged
+   node. One mis-set LuckPerms inheritance (the group chain carries ~271 explicit
+   `=false` negations precisely because this has been fiddly before) hands an unprivileged
    player the ability to take the network down. A shell command cannot leak this way.
 2. **Rolling restarts are a planning problem, not a button.** The execution plan (§4) has
    ordering, verification and abort semantics. That belongs in a script that can be read,
@@ -35,12 +35,12 @@ win, without a large deletion pass through a 20k-line class. Specifically:
 - `pizzasmp.manage` and `pizzasmp.admin.console` stop granting anything reachable. Keep
   the nodes; they still gate other things.
 
-Do NOT rip out `/region` while doing this. It is **60 call sites**, not a button — a
+Do NOT rip out `/region` while doing this. It is **60 call sites**, not a button; a
 world-access engine plus the `closed_worlds` channel and limbo-hold path. A Folia-era
 variant will likely reuse it. Hide the command; keep the machinery.
 
 `/servermaint` (4 refs, freeze-in-place, does nothing useful) can go. `frozenmaint` already
-does not exist. `/limbomaint` **stays** — downstream server owners without a lobby need the
+does not exist. `/limbomaint` **stays**: downstream server owners without a lobby need the
 limbo offload path even though this network does not use it.
 
 ---
@@ -49,10 +49,10 @@ limbo offload path even though this network does not use it.
 
 | Tier | Purpose | What stops | Where players go |
 | --- | --- | --- | --- |
-| **0 — dev** | plugin iteration | `dev` only | nobody is there; invisible to players |
-| **1 — backend** | deploy an update, work on a world | one backend at a time | **maintenance backend**, auto-return when verified healthy |
-| **2 — network** | major/structural update needing hours and repeated full restarts | everything except the proxy | **nobody joins at all** |
-| **3 — emergency** | exploit, corruption, active damage | access denied immediately | kicked at once |
+| **0: dev** | plugin iteration | `dev` only | nobody is there; invisible to players |
+| **1: backend** | deploy an update, work on a world | one backend at a time | **maintenance backend**, auto-return when verified healthy |
+| **2: network** | major/structural update needing hours and repeated full restarts | everything except the proxy | **nobody joins at all** |
+| **3: emergency** | exploit, corruption, active damage | access denied immediately | kicked at once |
 
 **Tier 1 is the common case** and is explicitly a *rolling* restart: backends are cycled one
 at a time so the network is never fully down.
@@ -62,7 +62,7 @@ repeatedly over hours. Kicking players on a loop as each restart lands is a wors
 experience than a closed door, so Tier 2 **denies login outright** with an explanatory
 message rather than admitting and then kicking.
 
-**Tier 3 kicks immediately** — no drain, no hold.
+**Tier 3 kicks immediately**: no drain, no hold.
 
 ### Messages
 
@@ -84,7 +84,7 @@ connection to X is opened.**
 
 This is the difference between a player never touching a down backend and a player
 connecting, being noticed, and being kicked. The latter only works while the backend is
-*up* — which during maintenance is exactly what it is not. It is also what produced the
+*up*, which during maintenance is exactly what it is not. It is also what produced the
 kick-loop behaviour we want gone.
 
 PizzaProxyGuard is the right home: it already gates `LoginEvent` and `ServerPreConnect`,
@@ -107,7 +107,7 @@ available backend.** If none is available, deny with the Tier 2 message.
 routing.
 
 Access is restricted to **dev / admin / sradmin**. Anyone else attempting it is refused
-**at the proxy** with the "server that doesn't exist" message — deliberately uninformative,
+**at the proxy** with the "server that doesn't exist" message, deliberately uninformative,
 so an unprivileged player learns nothing about the backend's existence. A backend-side
 check is kept as defence in depth in case the proxy check is ever bypassed.
 
@@ -127,7 +127,7 @@ repointed at the proxy MOTD or removed.
 ## 4. Rolling restart: plan first, then execute
 
 The system **computes and emits a complete execution plan before doing anything.** The plan
-is a printable, reviewable ordering — not a decide-as-you-go loop.
+is a printable, reviewable ordering, not a decide-as-you-go loop.
 
 ```
 ./scripts/backend_maint.sh plan survival lobby      # emit the plan, change nothing
@@ -139,7 +139,7 @@ Per backend, in order:
 
 1. Mark the backend in-maintenance in `maintenance_state` (proxy stops admitting to it).
 2. Move its players to the **maintenance backend**.
-3. Stop the backend. **Verify the relaunch is staged before stopping anything** — see §6.
+3. Stop the backend. **Verify the relaunch is staged before stopping anything** (see §6).
 4. Start it.
 5. **Verify healthy** (§5) before readmitting anyone.
 6. Return the held players; clear the maintenance flag.
@@ -154,14 +154,14 @@ Properties, all required:
 
 ---
 
-## 5. Readmission gate — "up" is not "ready"
+## 5. Readmission gate: "up" is not "ready"
 
 A backend that has bound its port is not necessarily fit for players. Readmission requires
 **all** of:
 
 - process alive and port listening
 - `Done (` in the log for *this* boot
-- **TPS stable** — sustained above a floor (suggest ≥18.0) across several consecutive
+- **TPS stable**: sustained above a floor (suggest ≥18.0) across several consecutive
   samples, not a single reading
 - no ERROR-level plugin failures during this boot (a plugin that failed to enable means
   the backend is up but broken)
@@ -178,7 +178,7 @@ them and surface it to the operator. Specifically:
 This exists because of a real incident: the limbo full-stop flow moved players off, the
 relaunch never fired, and **the server stayed down for two days**
 (see `memory/pizzalimbo-restart-bug.md`). Readmitting into a half-broken backend is the
-same class of failure with a worse outcome — players lose items rather than just time.
+same class of failure with a worse outcome: players lose items rather than just time.
 
 Held players get the Tier 2 message and a retry, never a silent drop.
 
@@ -201,17 +201,17 @@ hosts. Two facts shape this design now:
 
 - **Restart granularity equals process granularity.** Folia regions are threads sharing one
   heap and one classloader; they cannot be restarted individually. "Restart region by
-  region" means "restart process by process" — structurally identical to the rolling
+  region" means "restart process by process", structurally identical to the rolling
   backend restart above.
-- **Adding compute raises real player capacity.** Past a point no single box — however many
-  Folia JVMs it runs — has the cores, memory bandwidth or NIC for the population. This is
+- **Adding compute raises real player capacity.** Past a point no single box, however many
+  Folia JVMs it runs, has the cores, memory bandwidth or NIC for the population. This is
   how large survival networks scale. (Distinct from the single-hotspot case: one saturated
   region is still one thread wherever it runs, and is fixed by per-region work budgeting,
   not by adding machines.)
 
 Therefore, build now so the Folia version is a data change rather than a redesign:
 
-- Keep `maintenance_state.targets_csv` **generic** — a list of unit names. Today
+- Keep `maintenance_state.targets_csv` **generic**: a list of unit names. Today
   `survival`, `lobby`. Later, process/slice IDs.
 - Keep the plan/apply split and the abort semantics. They are the same constraints as
   §5.2 slice-transfer ordering in the distributed-Folia plan.
@@ -219,14 +219,14 @@ Therefore, build now so the Folia version is a data change rather than a redesig
 
 ### Repartitioning: static, with manual rebalance
 
-Not "never repartition" — **do not automate it yet.**
+Not "never repartition"; **do not automate it yet.**
 
 The purpose is load balancing between compute instances: if host A runs four Folia
 processes and two are under heavy load, a rebalance hands one off to host B (trading
 regions) to even things out.
 
 Automating the trigger is deferred because a naive threshold flaps, migration cost
-perturbs the metric being reacted to, and — sharpest — the region most needing migration
+perturbs the metric being reacted to, and, sharpest, the region most needing migration
 (a flood, a large farm) is exactly the one whose dirty set never converges, so pre-copy
 cannot move it. Automation would fire when it can least succeed.
 
@@ -236,13 +236,13 @@ described here, and gets most of the value.
 ### Seam corridors (informational)
 
 The boundary between two processes' territory is a **seam**. Block mechanics do not work
-across it — redstone, pistons and fluids would have to write into territory another process
+across it: redstone, pistons and fluids would have to write into territory another process
 owns, which is where duplication bugs live.
 
 The corridor is the cheap answer: a protected strip along each seam where **building is
 disabled, redstone is inert, fluids do not spread, and contraptions cannot cross.** Only
-entity handoff and read-only rendering cross it. There is a deliberate **slight overlap** —
-a narrow band identically accessible from both regions — so a player crossing has somewhere
+entity handoff and read-only rendering cross it. There is a deliberate **slight overlap**,
+a narrow band identically accessible from both regions, so a player crossing has somewhere
 consistent to stand during handoff rather than a hard discontinuity.
 
 Requires seams placed in dead space (ocean, badlands, unclaimed wilderness); incompatible
@@ -255,7 +255,7 @@ is ugly, not broken.
 
 ## 8. Implementation order
 
-1. `scripts/backend_maint.sh` — `plan` / `apply` / `status`, with the §5 health gate.
+1. `scripts/backend_maint.sh`: `plan` / `apply` / `status`, with the §5 health gate.
 2. PizzaProxyGuard: read `maintenance_state`; login-resolution order; dev access control;
    Tier 2 and Tier 3 messages.
 3. Unregister `/admin` and `/manage`; drop `/servermaint`; hide `/region`.

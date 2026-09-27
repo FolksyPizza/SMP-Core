@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in SMP-Core does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Security problems go through the Security tab, not an issue. Remove server names, IPs and player names before posting.
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: Plugin
+      options:
+        - PizzaNetworkCore
+        - PizzaAdminTools
+        - PizzaPunishment
+        - PizzaChatGuard
+        - PizzaRuleGuard
+        - EnderchestExpander
+        - PizzaTune
+        - PizzaSpawnRules
+        - PizzaLimbo
+        - PizzaProxyGuard
+        - Datapacks or setup script
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: SMP-Core version, Paper version and build, Java version.
+      placeholder: 1.0.0-beta, Paper 1.21.11 build 100, Java 21
+    validations:
+      required: true
+  - type: dropdown
+    id: setup
+    attributes:
+      label: Setup
+      options:
+        - Single server
+        - Velocity network
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run /ah sell 100
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The relevant console output or stack trace.
+      render: text

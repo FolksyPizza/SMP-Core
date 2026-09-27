@@ -241,6 +241,16 @@ CREATE TABLE IF NOT EXISTS anticheat_violations (
   INDEX idx_violation_severity (severity, reported_at)
 );
 
+-- Items owed to a player (for example an auction listing removed by staff), delivered on their next join.
+CREATE TABLE IF NOT EXISTS player_mailbox (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  uuid CHAR(36) NOT NULL,
+  item_blob LONGBLOB NOT NULL,
+  reason VARCHAR(64) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_mailbox_uuid (uuid)
+);
+
 CREATE TABLE IF NOT EXISTS auction_listings (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   seller_uuid CHAR(36) NOT NULL,

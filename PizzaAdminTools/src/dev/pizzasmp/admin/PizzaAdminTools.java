@@ -375,7 +375,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         "pizzaadmin",
         "pizzaadmintools",
         "pizzabans",
-        "pizzadebug",
         "pizzahome",
         "pizzamenus",
         "pizzasusflag",
@@ -463,8 +462,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         "eworkbench",
         "eworld"
     );
-    // NOTE: "plugins"/"pl" intentionally NOT gated — /plugins must show the real
-    // Bukkit plugin list. Branded list stays available via /pizzaplugins.
+    // NOTE: "plugins"/"pl" intentionally NOT gated — /plugins must show the real Bukkit plugin list.
     private static final Set<String> PLUGIN_ADMIN_COMMANDS = Set.of(
         "lp", "luckperms", "version", "ver", "about", "paper", "timings"
     );
@@ -522,30 +520,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             getLogger().warning("[brand] branding.yml could not be read; using defaults: " + ex.getMessage());
         }
     }
-    private static final List<String> BRANDED_PLUGIN_LIST = List.of(
-        "PizzaTeamsGUI",
-        "PizzaTeams",
-        "PizzaMenus",
-        "Essentials",
-        "Essentials Chat",
-        "floodgate",
-        "Geyser-Spigot",
-        "PizzaAC",
-        "PizzaBans",
-        "LuckPerms",
-        "Maintenance",
-        "MyCommand",
-        "PizzaAdminTools",
-        "PizzaChatGuard",
-        "PlaceholderAPI",
-        "Plan",
-        "PunishDrop",
-        "PizzaHome",
-        "TAB",
-        "Vault",
-        "ViaBackwards",
-        "ViaVersion"
-    );
 
     private final Map<UUID, Long> combatTaggedUntil = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> adminTargetIndex = new ConcurrentHashMap<>();
@@ -651,9 +625,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         registerCommand("pizzamenus", false);
         registerCommand("pizzahome", false);
         registerCommand("pizzabans", false);
-        registerCommand("pizzaplugins", false);
         registerCommand("stash", false);
-        registerCommand("spawnstash", false);
         registerCommand("pizzaplus", true);
         registerCommand("perks", false);
         registerCommand("atrack", true);
@@ -857,8 +829,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 return this.handlePizzaHomeHelp(var1);
             case "pizzabans":
                 return this.handlePizzaBansHelp(var1);
-            case "pizzaplugins":
-                return this.handlePizzaPlugins(var1);
             case "sus":
                 return this.handleSusCommand(var1, var4);
             case "stash":
@@ -3147,7 +3117,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         sender.sendMessage(color("&f/pizzamenus help &7- Menu command hub"));
         sender.sendMessage(color("&f/pizzahome help &7- Home command hub"));
         sender.sendMessage(color("&f/pizzabans help &7- Moderation command hub"));
-        sender.sendMessage(color("&f/pizzaplugins &7- Branded plugin list (staff)"));
         sender.sendMessage(color("&f/gtp, /homes, /menu, /guide, /freeze, /unfreeze, /transfer, /sus"));
         return true;
     }
@@ -3216,15 +3185,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return true;
     }
 
-    private boolean handlePizzaPlugins(CommandSender sender) {
-        if (sender instanceof Player player && !player.hasPermission(PERM_PLUGIN_ADMIN)) {
-            player.sendMessage(color("&cYou do not have permission to view plugin/admin commands."));
-            return true;
-        }
-        sendBrandedPluginList(sender);
-        return true;
-    }
-
     private boolean handleNightVisionCommand(CommandSender sender, String[] args) {
         if (!(sender instanceof Player player)) {
             sender.sendMessage(color("&cThis command can only be used by players."));
@@ -3280,11 +3240,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         } catch (Exception ex) {
             getLogger().warning("Failed loading NV state: " + ex.getMessage());
         }
-    }
-
-    private void sendBrandedPluginList(CommandSender sender) {
-        sender.sendMessage(color(BRAND_SECTION + BRAND_DISPLAY + " Plugin Stack &7(" + BRANDED_PLUGIN_LIST.size() + ")"));
-        sender.sendMessage(color("&f" + String.join("&7, &f", BRANDED_PLUGIN_LIST)));
     }
 
     // /maintenance motd "<text>" — sets the kennytv Maintenance ping MOTD live.
@@ -3356,10 +3311,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return;
         }
 
-        if (root.equals("version") || root.equals("ver") || root.equals("about")) {
-            event.setCancelled(true);
-            sendBrandedPluginList(player);
-        }
     }
 
     // Non-staff command lockdown: for default / pizza+ players, listed admin /

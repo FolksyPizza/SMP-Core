@@ -92,3 +92,8 @@ chat:
   icon-aliases-enabled: true
   cross_server_msg_enabled: true
   cross_server_team_chat_enabled: true
+
+rtp:
+  animation:
+    # Arcing arrival effect for /rtp (players can also turn it off in /settings). Off until it is polished.
+    enabled: false

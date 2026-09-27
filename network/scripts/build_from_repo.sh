@@ -5,7 +5,7 @@
 # never "adapts it backward" to whatever the old install happened to have. It compiles
 # what the repo ships and stages the result.
 #
-# Why a script instead of the raw javac lines: PizzaNetworkCore MUST have
+# Why a script instead of raw javac lines: PizzaNetworkCore MUST have
 # all three of its .java files compiled together, with any OLD PizzaNetworkCore.jar kept
 # OFF the classpath. Compiling only PizzaNetworkCore.java silently produced a jar missing
 # PlayerSyncManager/MaintenanceQueueManager once the old jar was overwritten. Building
@@ -123,7 +123,7 @@ if [ -d "$TOOLS/pizzacommon/src" ]; then
 fi
 
 MODULES=("$@")
-[ ${#MODULES[@]} -eq 0 ] && MODULES=(pizzanetworkcore pizzaadmintools pizzachatguard pizzapunishment pizzaruleguard pizzaspawnrules pizzaenderchest pizzautils pizzatune pizzaproxyguard)
+[ ${#MODULES[@]} -eq 0 ] && MODULES=(pizzanetworkcore pizzaadmintools pizzachatguard pizzapunishment pizzaruleguard pizzaspawnrules pizzaenderchest pizzatune pizzaproxyguard)
 
 for m in "${MODULES[@]}"; do
   case "$m" in
@@ -141,7 +141,6 @@ for m in "${MODULES[@]}"; do
     # tools/-only silently dropped it and double jump stopped working.
     pizzaspawnrules) build pizzaspawnrules  src resources PizzaSpawnRules.jar ;;
     pizzaenderchest)  build pizzaenderchest  src resources PizzaEnderchest.jar ;;
-    pizzautils)       build pizzautils       src resources PizzaUtils.jar ;;
     pizzatune)        build pizzatune        src -         PizzaTune.jar ;;
     # Velocity plugin: compiles against the Velocity API, not Paper.
     pizzaproxyguard)

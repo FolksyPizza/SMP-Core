@@ -1,113 +1,106 @@
 # SMP-Core
 
-SMP-Core is a plugin suite for a survival Minecraft server on Paper. If you run a Paper survival server and want a player-driven economy, a tidy set of quality-of-life commands, and staff tooling that stays out of players' way, most of that work is already done here.
+A plugin suite for survival servers on Paper: a player-driven economy, quality-of-life commands, duels, and staff
+tooling, for a single server or a Velocity network. MIT licensed.
 
-It is fully open source under the MIT license. You can use it, change it, and ship it in commercial projects. The only ask is that you keep the license file.
+Current version: **1.0.0-beta**. See [CHANGELOG.md](CHANGELOG.md).
 
-A full list of commands is in [COMMANDS.md](COMMANDS.md). What I want to build next is in [UPCOMING.md](UPCOMING.md).
-
-## Architecture
-
-[ARCHITECTURE.md](ARCHITECTURE.md) explains plugin lifecycles, command and event routing, persistence, gameplay flows, and Velocity integration. It includes source references, data-flow diagrams, and implementation constraints for developers joining the project.
-
-## About
-
-- Around 49,000 lines of Java across 11 plugins and a shared library, plus two datapacks
-- More than 100 commands
-- Built and run on Paper 1.21.x (1.21.6 or newer), currently 1.21.11
-- Made by one person
-  
-One honest note. I lost the source for part of PizzaNetworkCore at some point and had to recover it by decompiling an old build, then rewrite it back into normal code. A few spots still look like they came out of a decompiler, mostly some awkward labeled loops, and I clean those up as I touch them. It all builds and runs fine, it is just not pretty yet in those corners.
+- 10 plugins and a shared library, about 49,000 lines of Java, plus two datapacks
+- More than 100 commands ([COMMANDS.md](COMMANDS.md))
+- Runs in production on Paper 1.21.11
 
 ## Plugins
 
-| Plugin | Version | What it does |
+| Plugin | Version | Purpose |
 | --- | --- | --- |
-| PizzaNetworkCore | 1.0.0 | The core plugin. Economy (auction house, player buy orders, shop), homes, random teleport with an arrival animation, teleport requests, a follow/friends social system, `/ignore` and `/block`, duels (`/duel`, the RTP duel queue, spectating), protected spawn and AFK hub worlds, chat item and player icons, per-player settings, leaderboards, and the scoreboard HUD. |
-| PizzaAdminTools | 1.1.0 | Staff tooling. Admin console GUIs, home administration, opt-in staff mode with an audit log, `/atrack` spectator tracking, frozen maintenance, transfers, `/stash` camps, `/nuke`, moderation helpers, and subscription tier management. |
-| PizzaChatGuard | 2.0.0 | Chat protection. Rate limiting, duplicate and near-duplicate detection, and configurable word lists. |
-| PizzaPunishment | 1.0.0 | Punishment system with bans, mutes, strike tracking, and death-drop mechanics. |
-| PizzaRuleGuard | 1.0.0 | Rule enforcement and anti-abuse guard. |
-| PizzaLimbo | 0.2.0 | A lightweight limbo backend that holds players during maintenance when you run behind a Velocity proxy. |
-| PizzaProxyGuard | 1.0.0 | A small Velocity proxy plugin: denies new joins while the backend is down (with a maintenance message) and turns moderation kicks/bans into a clean disconnect instead of dropping the player into the limbo fallback. |
-| PizzaCommon | 1.0.0 | Shared library, compiled into the plugins that use it: storage (YAML or MySQL) and a scheduler facade over Paper's region-aware schedulers. |
-| PizzaSpawnRules | 1.0.0 | Lobby spawn protections and a silent unlimited double jump. Hub servers only — its protected zone grants creative flight, and with `lockAllWorld` the zone is the whole world, so on a survival server it hands everyone flight. |
-| EnderchestExpander | 1.0.0 | Expands the ender chest from 27 to 54 slots, with persistent storage and exclusive staff inspection (`/endersee`). |
-| PizzaUtils | 1.0.0 | `/ping`. Night vision lives in PizzaNetworkCore and view distance in PizzaTune. |
-| PizzaTune | 1.0.0 | Live-tunes view distance and chunk send/load rates without a restart. |
-
-## Status
-
-This repository is a snapshot of the plugins as they actually run on the live server, so it is worth being clear about what is solid and what is not.
-
-The single-server survival features are stable and well tested in production: the economy, homes, teleports, settings, moderation, and GUIs.
-
-One thing to know up front: PizzaNetworkCore stores its economy and player data in a MySQL or MariaDB database, not in flat files. You need a database for it to run. That can be a local MySQL on the same box or a remote one. The other plugins (chat, punishment, rules) use plain YAML.
-
-The cross-server functionality is Beta, and it is now the setup I actually run: a Velocity proxy in front of lobby, survival and maintenance backends sharing one database. Shared inventories, balances, permissions, chat and cross-server RTP work. It is still younger than the single-server code and has had less exposure to a crowd, so treat it as Beta rather than settled.
-
-It stays dormant unless you set `sync.enabled: true` in the core config, and a single server never touches that path. If you do want it, [`network/`](network) has the full topology, configuration and ops tooling.
+| PizzaNetworkCore | 1.0.0 | Core gameplay: auction house, buy orders, shop, homes, random teleport, teleport requests, friends and follows, `/ignore` and `/block`, duels and the duel queue, spawn and AFK hubs, chat item icons, per-player settings, leaderboards and the scoreboard |
+| PizzaAdminTools | 1.1.0 | Staff tooling: admin menus, home administration, staff mode with an audit log, `/atrack`, maintenance freeze, transfers, `/stash`, `/nuke`, subscription tiers |
+| PizzaPunishment | 1.0.0 | Bans, mutes, strikes and death-drop penalties |
+| PizzaChatGuard | 2.0.0 | Chat rate limits, duplicate detection and word lists |
+| PizzaRuleGuard | 1.0.0 | Rule enforcement and abuse detection |
+| EnderchestExpander | 1.0.0 | 54-slot ender chests with persistent storage and staff inspection (`/endersee`) |
+| PizzaTune | 1.0.0 | Live view-distance and chunk-rate tuning |
+| PizzaSpawnRules | 1.0.0 | Hub protections and double jump. Hub servers only: its zone grants flight |
+| PizzaLimbo | 0.2.0 | Limbo backend that holds players during maintenance (proxy networks) |
+| PizzaProxyGuard | 1.0.0 | Velocity plugin: holds new joins while the backend is down and turns moderation kicks into clean disconnects |
+| PizzaCommon | 1.0.0 | Shared library compiled into the plugins that use it: storage and a scheduler facade |
 
 ## Requirements
 
-Paper 1.21.6 or newer; tested on Paper 1.21.11. Java 21 is required. PizzaNetworkCore also needs a MySQL or MariaDB database (local or remote); point it at one in the core config.
+| | Minimum | Recommended |
+| --- | --- | --- |
+| Server | Paper 1.21.6 or newer, Java 21 | Paper 1.21.11 |
+| Database | MySQL or MariaDB (local or remote), for PizzaNetworkCore | Same host or low-latency network |
+| Dependencies | ProtocolLib | Vault, LuckPerms, PlaceholderAPI (full list: `setup/deps.txt`) |
+| Hardware | 2 cores, 4 GB RAM | 4+ cores, 8 to 12 GB RAM, SSD |
 
-Minimum: 2 CPU cores, 4 GB RAM (allocate roughly 3 GB to the server), and any modern disk.
+## Installation
 
-Recommended: 4 or more CPU cores, 8 to 12 GB RAM, and SSD storage. That is close to what the live server uses and leaves headroom for a full world and a busy economy.
+### Single server
 
-The core plugin does more per tick than a stock server, so give it real CPU and an SSD if you expect a crowd. Most of the RAM goes to the world and players rather than the plugins.
+1. Download the jars from the Releases page into `plugins/`, with ProtocolLib.
+2. Create an empty MySQL or MariaDB database and a user for it.
+3. Start Paper once to generate the configs, then stop it.
+4. Set the connection under `sync.database` in `plugins/PizzaNetworkCore/config.yml`.
+5. Start the server. PizzaNetworkCore creates its tables on first start.
 
-## Install
+`setup/setup-server.sh` is an interactive alternative: it downloads Paper and the dependencies and writes a brand
+profile. It never touches worlds or player data and can be re-run to rebrand.
 
-### Single server, or a proxy network
+### Velocity network
 
-Both are supported, and the network path is purely additive — nothing about the
-single-server setup changed.
+Lobby, survival, maintenance and optional dev backends run behind one proxy and share player state (inventory,
+balance, rank, settings) through the database. [`network/`](network) has the topology, configs and scripts.
+Network support is in beta.
 
-**Single Paper server** is the simpler choice and what most people want. Everything below
-describes it, and it needs nothing from the `network/` directory.
+## Configuration
 
-**Velocity proxy network** puts a lobby, survival, maintenance and optional dev backend
-behind one proxy, sharing player state through the database, so a player keeps their
-inventory, balance, rank and settings as they move between servers. That is the layout the
-plugins were designed around and the one I run. See [`network/`](network) for the topology,
-configs and ops scripts.
+| What | Where |
+| --- | --- |
+| Branding: name, colors, MOTD, tab list, menus, rank and tier labels | `plugins/PizzaNetworkCore/branding.yml`; switch live with `/branding set <profile>` |
+| Economy, gameplay and database | `plugins/PizzaNetworkCore/config.yml`, `shop.yml` |
+| Chat filtering | `plugins/PizzaChatGuard/` |
+| Punishments and rules | `plugins/PizzaPunishment/`, `plugins/PizzaRuleGuard/` |
 
-### Getting the plugins in place
+Without `branding.yml` the suite uses neutral defaults. Subscription tiers follow the brand name (a brand called
+HappyLand gets HappyLand+ and HappyLand++).
 
-There are two ways to run it.
+### Datapacks
 
-The simplest path is the standalone jars. Download them from the Releases page, drop them into your server's `plugins` folder, and start Paper once to generate the config files. Every plugin is configured from plain YAML, so you can rebrand and tune everything without any extra tooling. See Customizing below.
+| Datapack | Install into | Adds |
+| --- | --- | --- |
+| `datapacks/pizzasmp-menu` | The main world's `datapacks/` | The `/menu` pause-screen dialogs |
+| `datapacks/pizzalimbo-menu` | The limbo world's `datapacks/` | The maintenance dialog |
 
-Guided setup is `setup/setup-server.sh`, an interactive installer that downloads Paper, fetches the third-party plugins these depend on, and writes a full brand profile for you (name, colors, MOTD, Discord, ranks). Re-run it any time to rebrand. It does not touch worlds or player data.
+## Building
 
-## Customizing without the setup script
+Java 21 and the Paper API are required. PizzaNetworkCore builds with Maven (`PizzaNetworkCore/pom.xml`). The
+other plugins compile with `javac` against the Paper API and their dependencies. Prebuilt jars are on the
+Releases page.
 
-You do not need the setup script to rebrand. Everything that players see is data-driven, so you can make the whole server your own from YAML after the first start.
+## Status
 
-Branding lives in `plugins/PizzaNetworkCore/branding.yml`. The setup script writes it for you; without it the plugins use neutral defaults ("ExampleSMP"). To write it by hand, add a profile and change the display name, colors, region, tagline, Discord link, and the subscription tier labels, then set `active:` to your profile and restart. The whole server re-themes at boot: the server name, rank and tier labels, chat prefixes, the scoreboard, the tab list, menus and GUIs, dialog text, the server-list MOTD, join and leave messages, and the server icon. You can also switch profiles live with `/branding set <key>`. The two subscription tiers automatically follow your brand name, so a brand called HappyLand gives HappyLand+ and HappyLand++.
+| Area | Status |
+| --- | --- |
+| Single-server gameplay: economy, homes, teleports, settings, moderation, menus | Stable, in production |
+| Velocity network: shared inventories, balances, permissions, chat, cross-server RTP | Beta, in production |
+| Folia | Not supported yet ([UPCOMING.md](UPCOMING.md)) |
 
-The setup script does the same thing interactively and also configures the LuckPerms rank colors and staff hierarchy for you. Either path gets you a fully rebranded server; the config route just means editing `branding.yml` by hand.
+Parts of PizzaNetworkCore and PizzaAdminTools were recovered from compiled builds. A few areas still carry
+decompiler structure and are cleaned up as they are touched.
 
-Economy, shop, and gameplay tuning live in `plugins/PizzaNetworkCore/config.yml` (and `shop.yml` for the shop). Set the database connection there under `sync.database`. Leave `sync.enabled` false for a single server; turn it on only to run the Beta cross-server network.
+## Documentation
 
-Chat filtering is configured in `plugins/PizzaChatGuard/` (config plus the word list files). Punishment and rule settings live in their own plugin folders the same way.
-
-## Datapacks
-
-`datapacks/pizzasmp-menu` adds the pause-screen game menu dialogs used by `/menu`, and `datapacks/pizzalimbo-menu` adds the maintenance dialog for the limbo backend. Copy them into your world's `datapacks/` folder (and the limbo world's, for the second one).
-
-## Building from source
-
-You need Java 21 and the Paper API. PizzaNetworkCore has a Maven `pom.xml`. The others compile with `javac` against the Paper API and their few third-party APIs on the classpath. If you would rather not build, the Releases page has prebuilt jars for every plugin at the versions listed above.
-
-## Third-party plugins
-
-The suite integrates with, and in some cases needs, common third-party plugins such as ProtocolLib, Vault, LuckPerms, PlaceholderAPI, and EssentialsX. The full list the setup script installs is in `setup/deps.txt`.
+| Document | Contents |
+| --- | --- |
+| [COMMANDS.md](COMMANDS.md) | Every command and permission |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Plugin lifecycles, routing, persistence, gameplay flows, Velocity integration |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
+| [UPCOMING.md](UPCOMING.md) | Planned work |
+| [network/](network) | Network topology and operations |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
+| [SECURITY.md](SECURITY.md) | Reporting vulnerabilities |
 
 ## License
 
-MIT. Use it for anything, including commercial work, and keep the license file.
-
-Author: William W. (FolksyPizza).
+MIT. See [LICENSE](LICENSE). Maintained by FolksyPizza.

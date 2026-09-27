@@ -48,7 +48,7 @@ The diagram shows supported code paths, not a required topology. A gameplay back
 | PizzaSpawnRules | [Hub listener][spawnrules]: protected areas, double jump, station interactions, and gate routing. |
 | PizzaLimbo | [Dedicated holding plugin][limbo]: frozen visual scene during maintenance, backend readiness checks, and return routing. |
 | EnderchestExpander | [Expanded inventory plugin][ender]: separate 54-slot ender-chest inventory and local persistence. |
-| PizzaUtils / PizzaTune | [Utility commands][utils] and [runtime tuning][tune]. Some commands overlap other suite plugins. |
+| PizzaTune | [Runtime tuning][tune]: live view distance (`/viewdistance`) and chunk send/load rates. |
 
 ## Initialization, scheduling, and shutdown
 
@@ -337,7 +337,7 @@ Gate-pad movement dispatches warp commands after a cancellable countdown. Tagged
 
 [EnderchestExpander][ender] redirects vanilla chest opening and selected commands into a cached 54-slot inventory. First load can seed from the vanilla chest. It writes compressed Bukkit-serialized arrays under its own `enderchests` data directory, with a five-second write throttle and periodic saves. It does not write the expanded contents back to the vanilla ender chest or PNC's sync snapshot. Close/quit saves are throttled too, and there is no explicit disable flush in this class.
 
-[PizzaUtils][utils] stores night-vision choices locally and provides ping/view-distance commands. [PizzaTune][tune] changes live view distance and uses reflection into Paper's global configuration for chunk rates. These controls can overlap PNC's adaptive tuning and other command providers. Reflection-based tuning depends on the actual server implementation; it is not a stable suite API.
+[PizzaTune][tune] changes live view distance and uses reflection into Paper's global configuration for chunk rates. These controls can overlap PNC's adaptive tuning and other command providers. Reflection-based tuning depends on the actual server implementation; it is not a stable suite API.
 
 ## Configuration, builds, and operational tooling
 
@@ -398,9 +398,8 @@ These are properties of the current implementation, not proposed refactors. Wher
 [spawnrules]: PizzaSpawnRules/src/dev/pizzasmp/spawnrules/PizzaSpawnRulesPlugin.java
 [limbo]: PizzaLimbo/src/dev/pizzasmp/limbo/PizzaLimbo.java
 [ender]: PizzaEnderchest/src/dev/pizzasmp/plugins/EnderchestExpander.java
-[utils]: PizzaUtils/src/dev/pizzasmp/utils/PizzaUtils.java
 [tune]: PizzaTune/src/dev/pizzasmp/tune/PizzaTune.java
-[schema]: network/configs/schema.sql
+[schema]: PizzaNetworkCore/resources/schema.sql
 [pom]: PizzaNetworkCore/pom.xml
 [build]: network/scripts/build_from_repo.sh
 [deploy]: network/scripts/deploy_plugins.sh

@@ -623,7 +623,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private final Set<UUID> protectedDeathDrops = ConcurrentHashMap.newKeySet();
     private final Map<UUID, SuspiciousPlayersGuiState> suspiciousPlayersGuiState = new ConcurrentHashMap<UUID, SuspiciousPlayersGuiState>();
     private final Map<UUID, UUID> explosionIgniters = new ConcurrentHashMap<>();
-    private final Map<UUID, Long> queueTestHoldUntil = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> vdThrottleOverrides = new ConcurrentHashMap<>();
     private final Map<UUID, Location> teleportAnchors = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> bountyGuiPage = new ConcurrentHashMap<>();
@@ -664,6 +663,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private static final String PERM_ADMIN_CONSOLE = "pizzasmp.admin.console";
     /** Staff browsing another player's homes (/homes <player>, /admindelhome). */
     private static final String PERM_ADMIN_HOMES = "pizzasmp.admin.homes";
+    private static final String PERM_ADMIN_AUCTION = "pizzasmp.admin.auction";
+    private static final String PERM_ADMIN_INVSEE = "pizzasmp.admin.invsee";
+    private static final String TITLE_AH_ADMIN = "Staff: Auction Listings";
     private volatile int currentThrottledVd = 10;
     private volatile int targetVd = 10;
     private volatile long lastVdRecoveryCheck = 0L;
@@ -697,7 +699,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private volatile List<String> cachedNetworkPlayerNames = List.of();
     private volatile long cachedNetworkPlayerNamesLoadedAt;
     private TaskHandle notificationPollTask;
-    private static final List<SettingDefinition> SETTINGS_DEFINITIONS = List.of(new SettingDefinition("public_chat", "Public Chat", Material.OAK_SIGN, 0, 1, true, List.of(), false, null), new SettingDefinition("private_messages", "Private Messages", Material.SPRUCE_SIGN, 1, 1, true, List.of(), false, null), new SettingDefinition("chat_server_messages", "Chat Server Messages", Material.BIRCH_SIGN, 2, 1, true, List.of(), false, null), new SettingDefinition("hotbar_server_messages", "Hotbar Server Messages", Material.JUNGLE_SIGN, 3, 1, true, List.of(), false, null), new SettingDefinition("pay_players", "Pay Players", Material.ACACIA_SIGN, 4, 1, true, List.of(), false, null), new SettingDefinition("bounty_alerts", "Bounty Alerts", Material.DARK_OAK_SIGN, 5, 1, true, List.of(), false, null), new SettingDefinition("auction_alerts", "Auction Alerts", Material.MANGROVE_SIGN, 6, 1, true, List.of(), false, null), new SettingDefinition("fast_crystals", "Fast Crystals", Material.END_CRYSTAL, 9, 1, false, List.of("Hide crystal explosion effects", "for faster crystal PvP"), false, null), new SettingDefinition("totem_particles", "Totem Particles", Material.TOTEM_OF_UNDYING, 10, 1, true, List.of(), false, null), new SettingDefinition("explosion_particles", "Explosion Particles", Material.TNT, 11, 1, true, List.of(), false, null), new SettingDefinition("explosion_sounds", "Explosion Sounds", Material.GOAT_HORN, 12, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_buy", "Quick Auction Buy", Material.GOLD_INGOT, 13, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_sell", "Quick Auction Sell", Material.EMERALD, 8, 1, false, List.of("List instantly with no confirm screen"), false, null), new SettingDefinition("chainmail_on_respawn", "Chainmail on Respawn", Material.CHAINMAIL_HELMET, 14, 1, true, List.of(), false, null), new SettingDefinition("mob_spawns", "Mob Spawns", Material.ZOMBIE_HEAD, 15, 1, true, List.of("Whether mobs spawn near you", "(hostile, passive, all types)"), false, null), new SettingDefinition("fast_anchor", "Fast Anchor", Material.RESPAWN_ANCHOR, 16, 1, false, List.of("Hide anchor explosion effects", "for faster anchor PvP"), false, null), new SettingDefinition("player_visibility", "Player Visibility", Material.PLAYER_HEAD, 18, 1, true, List.of(), false, null), new SettingDefinition("scoreboard_toggle", "Scoreboard Toggle", Material.LECTERN, 19, 1, true, List.of(), false, null), new SettingDefinition("tpa_confirm_menus", "TPA Confirm Menus", Material.FEATHER, 20, 1, true, List.of(), false, null), new SettingDefinition("music_sound_notifications", "Music/Sound Notifications", Material.MUSIC_DISC_MELLOHI, 21, 1, true, List.of(), false, null), new SettingDefinition("order_notifications", "Order Notifications", Material.PAPER, 22, 1, true, List.of(), false, null), new SettingDefinition("tpa_auto_accept", "Auto Accept TPAs", Material.SLIME_BALL, 23, 1, false, List.of("Instantly accept incoming", "TPA requests (/tpauto)"), false, null), new SettingDefinition("tpa_requests", "TPA Requests", Material.ENDER_PEARL, 28, 1, true, List.of(), false, null), new SettingDefinition("tpahere_requests", "TPAHere Requests", Material.ENDER_EYE, 29, 1, true, List.of(), false, null), new SettingDefinition("team_invites", "Team Invites", Material.SHIELD, 30, 1, true, List.of(), false, null), new SettingDefinition("payments", "Payments", Material.EMERALD, 31, 1, true, List.of(), false, null), new SettingDefinition("team_chat", "Team Chat", Material.BELL, 32, 1, false, List.of(), false, null), new SettingDefinition("worth_display", "Worth Display", Material.BOOK, 33, 1, true, List.of(), false, null), new SettingDefinition("night_vision", "Night Vision", Material.GOLDEN_CARROT, 17, 1, false, List.of(), false, null), new SettingDefinition("show_money", "Show Money", Material.SUNFLOWER, 24, 1, true, List.of(), false, null), new SettingDefinition("show_shards", "Show Shards", Material.AMETHYST_SHARD, 25, 1, true, List.of(), false, null), new SettingDefinition("show_kills", "Show Kills", Material.NETHERITE_SWORD, 26, 1, true, List.of(), false, null), new SettingDefinition("show_deaths", "Show Deaths", Material.SKELETON_SKULL, 27, 1, true, List.of(), false, null), new SettingDefinition("show_playtime", "Show Playtime", Material.CLOCK, 34, 1, true, List.of(), false, null), new SettingDefinition("auction_overflow", "Auction Overflow", Material.HOPPER, 7, 1, true, List.of("Drop bought items when your", "inventory is full instead of blocking"), false, null), new SettingDefinition("search_spell_check", "Search Spell Check", Material.NAME_TAG, 35, 1, true, List.of("Auto-correct typos in", "AH and orders search"), false, null), new SettingDefinition("money_nametags", "Money Nametags", Material.GOLD_NUGGET, 36, 1, true, List.of("Show each player's balance", "on a line below their name"), false, null));
+    private static final List<SettingDefinition> SETTINGS_DEFINITIONS = List.of(new SettingDefinition("public_chat", "Public Chat", Material.OAK_SIGN, 0, 1, true, List.of(), false, null), new SettingDefinition("private_messages", "Private Messages", Material.SPRUCE_SIGN, 1, 1, true, List.of(), false, null), new SettingDefinition("chat_server_messages", "Chat Server Messages", Material.BIRCH_SIGN, 2, 1, true, List.of(), false, null), new SettingDefinition("hotbar_server_messages", "Hotbar Server Messages", Material.JUNGLE_SIGN, 3, 1, true, List.of(), false, null), new SettingDefinition("pay_players", "Pay Players", Material.ACACIA_SIGN, 4, 1, true, List.of(), false, null), new SettingDefinition("bounty_alerts", "Bounty Alerts", Material.DARK_OAK_SIGN, 5, 1, true, List.of(), false, null), new SettingDefinition("auction_alerts", "Auction Alerts", Material.MANGROVE_SIGN, 6, 1, true, List.of(), false, null), new SettingDefinition("fast_crystals", "Fast Crystals", Material.END_CRYSTAL, 9, 1, false, List.of("Hide crystal explosion effects", "for faster crystal PvP"), false, null), new SettingDefinition("totem_particles", "Totem Particles", Material.TOTEM_OF_UNDYING, 10, 1, true, List.of("Off hides the particles of other players' totem pops.", "Totem sounds and your own pop animation stay."), false, null), new SettingDefinition("explosion_particles", "Explosion Particles", Material.TNT, 11, 1, true, List.of(), false, null), new SettingDefinition("explosion_sounds", "Explosion Sounds", Material.GOAT_HORN, 12, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_buy", "Quick Auction Buy", Material.GOLD_INGOT, 13, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_sell", "Quick Auction Sell", Material.EMERALD, 8, 1, false, List.of("List instantly with no confirm screen"), false, null), new SettingDefinition("chainmail_on_respawn", "Chainmail on Respawn", Material.CHAINMAIL_HELMET, 14, 1, true, List.of(), false, null), new SettingDefinition("mob_spawns", "Mob Spawns", Material.ZOMBIE_HEAD, 15, 1, true, List.of("Whether mobs spawn near you", "(hostile, passive, all types)"), false, null), new SettingDefinition("fast_anchor", "Fast Anchor", Material.RESPAWN_ANCHOR, 16, 1, false, List.of("Hide anchor explosion effects", "for faster anchor PvP"), false, null), new SettingDefinition("player_visibility", "Player Visibility", Material.PLAYER_HEAD, 18, 1, true, List.of(), false, null), new SettingDefinition("scoreboard_toggle", "Scoreboard Toggle", Material.LECTERN, 19, 1, true, List.of(), false, null), new SettingDefinition("tpa_confirm_menus", "TPA Confirm Menus", Material.FEATHER, 20, 1, true, List.of(), false, null), new SettingDefinition("music_sound_notifications", "Music/Sound Notifications", Material.MUSIC_DISC_MELLOHI, 21, 1, true, List.of(), false, null), new SettingDefinition("order_notifications", "Order Notifications", Material.PAPER, 22, 1, true, List.of(), false, null), new SettingDefinition("tpa_auto_accept", "Auto Accept TPAs", Material.SLIME_BALL, 23, 1, false, List.of("Instantly accept incoming", "TPA requests (/tpauto)"), false, null), new SettingDefinition("tpa_requests", "TPA Requests", Material.ENDER_PEARL, 28, 1, true, List.of(), false, null), new SettingDefinition("tpahere_requests", "TPAHere Requests", Material.ENDER_EYE, 29, 1, true, List.of(), false, null), new SettingDefinition("team_invites", "Team Invites", Material.SHIELD, 30, 1, true, List.of(), false, null), new SettingDefinition("payments", "Payments", Material.EMERALD, 31, 1, true, List.of(), false, null), new SettingDefinition("team_chat", "Team Chat", Material.BELL, 32, 1, false, List.of(), false, null), new SettingDefinition("worth_display", "Worth Display", Material.BOOK, 33, 1, true, List.of(), false, null), new SettingDefinition("night_vision", "Night Vision", Material.GOLDEN_CARROT, 17, 1, false, List.of(), false, null), new SettingDefinition("show_money", "Show Money", Material.SUNFLOWER, 24, 1, true, List.of(), false, null), new SettingDefinition("show_shards", "Show Shards", Material.AMETHYST_SHARD, 25, 1, true, List.of(), false, null), new SettingDefinition("show_kills", "Show Kills", Material.NETHERITE_SWORD, 26, 1, true, List.of(), false, null), new SettingDefinition("show_deaths", "Show Deaths", Material.SKELETON_SKULL, 27, 1, true, List.of(), false, null), new SettingDefinition("show_playtime", "Show Playtime", Material.CLOCK, 34, 1, true, List.of(), false, null), new SettingDefinition("auction_overflow", "Auction Overflow", Material.HOPPER, 7, 1, true, List.of("Drop bought items when your", "inventory is full instead of blocking"), false, null), new SettingDefinition("search_spell_check", "Search Spell Check", Material.NAME_TAG, 35, 1, true, List.of("Auto-correct typos in", "AH and orders search"), false, null), new SettingDefinition("money_nametags", "Money Nametags", Material.GOLD_NUGGET, 36, 1, true, List.of("Show each player's balance", "on a line below their name"), false, null));
     private static final List<ShopEntry> END_CATEGORY_ITEMS = List.of(
         new ShopEntry("ender_chest",        "Ender Chest",        Material.ENDER_CHEST,        2500.0,  1, List.of()),
         new ShopEntry("ender_pearl",         "Ender Pearl",        Material.ENDER_PEARL,        75.0,    1, List.of()),
@@ -987,7 +989,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.registerCommand("afk", this);
         this.registerCommand("discord", this);
         this.registerCommand("gtp", this);
-        this.registerCommand("pizzadebug", this);
         this.registerCommand("homes", this);
         this.registerCommand("home", this);
         this.registerCommand("bal", this);
@@ -995,7 +996,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.registerCommand("leaderboard", this);
         this.registerCommand("leaderboards", this);
         this.registerCommand("bounty", this);
-        this.registerCommand("queuetest", this);
         this.registerCommand("vdthrottle", this);
         this.registerCommand("nv", this);   // /nv + /nightvision: same state as the /settings Night Vision toggle
         this.registerCommand("region", this);   // per-world maintenance (close/evacuate/reopen a dimension)
@@ -1059,8 +1059,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         }, 2L);                                                                                // reclaim temporary hub flight after /reload
         PlatformScheduler.globalRepeating(this, this::tickHubVoidRescue, 40L, 10L);             // catch void falls in hub worlds
-        // Queue admit timer: admit 1 queued player every N ticks (default 60 = 3s)
-        PlatformScheduler.globalRepeating(this, () -> { if (this.isQueueEnabled() && !this.joinQueue.isEmpty()) this.admitNextPlayer(); }, 100L, 60L);
         // Adaptive autosave: every 3 min while players are online, every 10 min when empty
         // (bukkit.yml autosave is the 10-min incremental safety net; this adds the fast path).
         PlatformScheduler.globalRepeating(this, this::tickAdaptiveAutosave, 1200L, 600L);
@@ -1391,13 +1389,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (e.getResult() != PlayerLoginEvent.Result.KICK_FULL) return;
         Player p = e.getPlayer();
         // priority 1-7 = staff (dev..mod). pizza++ (8) / pizza+ (9) do NOT bypass full.
-        if (this.getQueuePriority(p) <= 7 || p.hasPermission("pizzasmp.joinfull")) {
+        if (this.getPlayerPriority(p) <= 7 || p.hasPermission("pizzasmp.joinfull")) {
             e.allow();
         }
     }
 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
+        { Player mailboxPlayer = e.getPlayer(); this.runPlayerTaskLater(mailboxPlayer, () -> this.deliverMailbox(mailboxPlayer), 60L); }
         e.joinMessage(null);
         Player joined = e.getPlayer();
         UUID joinedUuid = joined.getUniqueId();
@@ -1449,7 +1448,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         }
         this.guardVoidOnJoin(e.getPlayer());   // don't let a void-kicked player load back into the void
-        if (!this.shouldQueue(joined)) this.beginJoinSendRamp(joined); // flatten the login chunk burst
+        this.beginJoinSendRamp(joined); // flatten the login chunk burst
         this.refreshSkinOnJoin(e.getPlayer()); // re-fetch skin from Mojang so skin changes take effect
         long now = System.currentTimeMillis();
         this.lastActivityTime.put(e.getPlayer().getUniqueId(), now);
@@ -1483,12 +1482,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.showHubMoneyLeaderboardTo(joinedPlayer);
             }
         }, 2L);
-        // Queue gate: if capacity threshold exceeded, hold player in queue
-        if (this.shouldQueue(e.getPlayer())) {
-            Player qp = e.getPlayer();
-            this.runPlayerTaskLater(qp, () -> this.enqueuePlayer(qp), 5L);
-            return;
-        }
         // Combat logout death screen on next join
         if (this.combatLoggedPending.remove(e.getPlayer().getUniqueId())) {
             Player p = e.getPlayer();
@@ -1594,13 +1587,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.pendingTextInputs.remove(uuid);
         this.ahSellState.remove(uuid);
         this.activeRtpSearches.remove(uuid);
-        synchronized (this.joinQueueLock) {
-            this.queuedPlayers.remove(uuid);
-            this.joinQueue.removeIf(q -> q.uuid.equals(uuid));
-            this.queueReturnLocations.remove(uuid);
-            this.queueReturnGamemodes.remove(uuid);
-            this.queueTestHoldUntil.remove(uuid);
-        }
         this.lastThrottledCommandTime.remove(uuid);
         this.cancelSidebarTask(uuid);
         e.getPlayer().setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
@@ -2317,6 +2303,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if ("ah".equals(label) || "auction".equals(label)) {
             e.setCancelled(true);
+            if (split.length >= 3 && "admin".equalsIgnoreCase(split[1]) && player.hasPermission(PERM_ADMIN_AUCTION)) {
+                this.openAdminAhListingsByName(player, split[2]);
+                return;
+            }
             if (!player.hasPermission("pizzasmp.use.ah")) {
                 return;
             }
@@ -2946,6 +2936,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             e.setCancelled(true);
             this.handleAhMainClick(p, e.getSlot(), e.getCurrentItem(), e.getClick());
+            return;
+        }
+        if (TITLE_AH_ADMIN.equals(title)) {
+            e.setCancelled(true);
+            if (e.getClickedInventory() == null || !e.getClickedInventory().equals((Object)e.getView().getTopInventory())) return;
+            this.handleAdminAhClick(p, e.getCurrentItem());
             return;
         }
         if (TITLE_AH_MY.equals(title)) {
@@ -3851,7 +3847,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         "freeze", "unfreeze", "stash", "spawnstash", "pizzaplus", "maintenance", "maintenancemotd",
         "limbomaint", "limbo", "region", "branding", "vdthrottle", "sfmode", "staffmode", "gmcbypass",
         "atrack", "servermaint", "invsee", "vanish", "sudo", "eco", "lp", "luckperms", "gtp",
-        "admindelhome", "ecobot", "queuetest", "hubbypass", "hubedit",
+        "admindelhome", "ecobot", "hubbypass", "hubedit",
         "sethubspawn", "addafkspot", "clearafkspots", "setmoneyboard");
 
     private boolean knownCommand(String label) {
@@ -4420,33 +4416,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.handleGtpCommand(p, args);
                 break;
             }
-            case "pizzadebug": {
-                if (!p.isOp() && !p.hasPermission("pizzasmp.admin.debug")) {
-                    return true;
-                }
-                if (args.length >= 1 && "hud".equalsIgnoreCase(args[0])) {
-                    this.runAsyncTask(() -> {
-                        StatsSnapshot stats = this.loadStatsSnapshot(p.getUniqueId());
-                        String team = this.loadTeamName(p.getUniqueId());
-                        this.runOnPlayerThread(p, () -> {
-                            StatsSnapshot liveStats = this.mergeLiveHudStats(p, stats);
-                            p.sendMessage("\u00a79[HUD DEBUG] \u00a7fMoney=" + this.formatMillions(liveStats.money) + " \u00a7fShards=" + this.formatCompactNumber(liveStats.shards) + " \u00a7fKills=" + this.formatCompactNumber(liveStats.kills) + " \u00a7fDeaths=" + this.formatCompactNumber(liveStats.deaths) + " \u00a7fPlaytime=" + this.formatPlaytimeDaysHours(liveStats.playtimeSeconds) + " \u00a7fTeam=" + team + " \u00a7fPing=" + Math.max(0, p.getPing()) + "ms");
-                        });
-                    });
-                    return true;
-                }
-                if (args.length >= 2 && "sell".equalsIgnoreCase(args[0])) {
-                    String matName = args[1].toUpperCase(java.util.Locale.ROOT);
-                    Material mat = Material.matchMaterial(matName);
-                    double price = mat != null ? this.sellUnitPrice(mat) : -1.0;
-                    ConfigurationSection dbgPrices = this.sellConfig != null ? this.sellConfig.getConfigurationSection("prices") : null;
-                    int dbgCount = dbgPrices != null ? dbgPrices.getKeys(false).size() : 0;
-                    p.sendMessage("\u00a79[SELL DEBUG] \u00a7fmaterial=" + matName + " mat=" + mat + " price=$" + price + " prices_loaded=" + dbgCount);
-                    return true;
-                }
-                p.sendMessage("\u00a77Usage: \u00a7f/pizzadebug hud\u00a77 | \u00a7f/pizzadebug sell <material>");
-                break;
-            }
             case "homes": {
                 // `/homes <player>` is the staff browse. It used to live in PizzaAdminTools and
                 // read the retired SetHome plugin's per-server YAML, while `/home` read the
@@ -4503,16 +4472,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             case "bounty": {
                 this.handleBountyCommand(p, args);
-                break;
-            }
-            case "queuetest": {
-                if (!p.hasPermission("pizzasmp.admin.queuetest") && !p.isOp()) {
-                    p.sendActionBar(Component.text("§cNo permission."));
-                    return true;
-                }
-                // Force-enqueue yourself to demonstrate the queue, held for ~18s.
-                this.queueTestHoldUntil.put(p.getUniqueId(), System.currentTimeMillis() + 18000L);
-                this.enqueuePlayer(p);
                 break;
             }
             case "vdthrottle": {
@@ -4619,37 +4578,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             case "ping": {
                 int ping = p.getPing();
                 p.sendActionBar(this.legacyColorize("§fYour ping is &#00BFFF" + ping + "§fms"));
-                return true;
-            }
-            case "viewdistance": {
-                if (!p.hasPermission("pizzasmp.admin.viewdistance")) {
-                    p.sendMessage("§cYou do not have permission.");
-                    return true;
-                }
-                if (args.length < 1) {
-                    p.sendActionBar(Component.text("§cUsage: /viewdistance <distance>"));
-                    return true;
-                }
-                try {
-                    int distance = Integer.parseInt(args[0]);
-                    if (distance < 2 || distance > 32) {
-                        p.sendMessage("§cView distance must be between 2 and 32.");
-                        return true;
-                    }
-                    this.runAsyncTask(() -> {
-                        try {
-                            Bukkit.spigot().getConfig().set("settings.view-distance", distance);
-                            this.runOnPlayerThread(p, () -> {
-                                p.getWorld().setViewDistance(distance);
-                                p.sendMessage("§aView distance set to " + distance + ".");
-                            });
-                        } catch (Exception ex) {
-                            this.runOnPlayerThread(p, () -> p.sendMessage("§cFailed: " + ex.getMessage()));
-                        }
-                    });
-                } catch (NumberFormatException ex) {
-                    p.sendMessage("§cInvalid distance: " + args[0]);
-                }
                 return true;
             }
             case "diagnostics": {
@@ -11708,7 +11636,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 Component.text("OPPONENT DISCONNECTED", NamedTextColor.RED),
                 Component.text(graceSeconds + " seconds to reconnect", NamedTextColor.GRAY)));
         }
-        this.tickDuelReconnectGrace(s, quitterId, deadline);
+        // Start ticking after the quit has been processed: during PlayerQuitEvent the quitting player still
+        // counts as online, and an immediate tick "reconnected" them, used up the grace and hung the match.
+        PlatformScheduler.globalLater(this, () -> this.tickDuelReconnectGrace(s, quitterId, deadline), 1L);
     }
 
     private void tickDuelReconnectGrace(DuelSession s, UUID quitterId, long deadline) {
@@ -14937,12 +14867,47 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.dataSource = new com.zaxxer.hikari.HikariDataSource(hc);
             this.mariadbDriverLoaded = true;
             this.getLogger().info("DB pool ready (max=" + hc.getMaximumPoolSize() + ", min-idle=" + hc.getMinimumIdle() + ") -> " + this.jdbcUrl());
+            this.applyBundledSchema(this.dataSource);
         } catch (Throwable t) {
             this.getLogger().warning("Failed to init DB pool; falling back to per-op connections: " + t.getMessage());
             this.dataSource = null;
         }
         return this.dataSource;
     }
+    // A fresh install has an empty database. The bundled schema.sql is idempotent (CREATE TABLE IF NOT EXISTS,
+    // INSERT IGNORE), so it is applied on every start; existing tables and rows are left untouched.
+    private void applyBundledSchema(javax.sql.DataSource ds) {
+        String sql;
+        try (java.io.InputStream in = this.getResource("schema.sql")) {
+            if (in == null) { this.getLogger().warning("[db] schema.sql missing from the jar; tables are not created automatically"); return; }
+            sql = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            this.getLogger().warning("[db] could not read schema.sql: " + e.getMessage());
+            return;
+        }
+        StringBuilder clean = new StringBuilder();
+        for (String line : sql.split("\\R")) {
+            String t = line.trim();
+            if (t.startsWith("--") || t.isEmpty()) continue;
+            clean.append(line).append('\n');
+        }
+        int applied = 0, failed = 0;
+        try (Connection c = ds.getConnection(); java.sql.Statement st = c.createStatement()) {
+            for (String stmt : clean.toString().split(";\\s*\\n")) {
+                String t = stmt.trim();
+                if (t.isEmpty()) continue;
+                String head = t.toUpperCase(Locale.ROOT);
+                if (head.startsWith("CREATE DATABASE") || head.startsWith("USE ")) continue;   // the connection names the database
+                try { st.execute(t); applied++; }
+                catch (SQLException e) { failed++; this.getLogger().warning("[db] schema statement failed: " + e.getMessage()); }
+            }
+        } catch (SQLException e) {
+            this.getLogger().warning("[db] could not apply schema: " + e.getMessage());
+            return;
+        }
+        this.getLogger().info("[db] schema checked: " + applied + " statement(s) applied" + (failed > 0 ? ", " + failed + " failed" : ""));
+    }
+
     // Package-private: PlayerSyncManager borrows from the same pool.
     Connection openSyncConnection() throws SQLException {
         com.zaxxer.hikari.HikariDataSource ds = this.dataSource;
@@ -15649,7 +15614,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // Tiered cooldown — RTP is the biggest single chunk burst, so default players wait longest,
         // ranked members less, staff not at all. All values config-tunable. Staff = mod and up / op.
         if (player == null) return 15_000L;
-        if (player.isOp() || player.hasPermission("pizzasmp.staff") || this.getQueuePriority(player) <= 7) {
+        if (player.isOp() || player.hasPermission("pizzasmp.staff") || this.getPlayerPriority(player) <= 7) {
             return 0L; // staff bypass
         }
         long secs;
@@ -15708,6 +15673,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private boolean canAnimateRtp(Player player, Location destination) {
+        if (!this.settings.getBoolean("rtp.animation.enabled", false)) return false;   // server-wide switch, off by default
         if (player.getGameMode() != GameMode.SURVIVAL || !player.isOnGround() || player.isInsideVehicle()
                 || player.isGliding() || player.isSwimming() || destination == null
                 || player.getWorld() != destination.getWorld()
@@ -17689,7 +17655,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 int calc = this.calcPerPlayerVd(target, tps1m, online);
                 boolean overridden = this.vdThrottleOverrides.containsKey(target.getUniqueId());
                 admin.sendMessage("§e" + target.getName() + "§7's view distance: §f" + target.getViewDistance()
-                    + " §7(calculated: §f" + calc + "§7, priority §f" + this.getQueuePriority(target) + "§7"
+                    + " §7(calculated: §f" + calc + "§7, priority §f" + this.getPlayerPriority(target) + "§7"
                     + (overridden ? "§7, §coverridden" : "") + "§7)");
             }
         }
@@ -17701,40 +17667,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
-    // ---- Queue system ----
-    // Players joining above capacity threshold enter spectator in void, frozen, no commands, no chat.
-    // Released FIFO-by-priority with staggered delay (1 player per 3-5s) to smooth load.
-    // Controlled by config: queue.enabled (default false), queue.capacity_threshold (default 45),
-    // queue.admit_interval_ticks (default 60 = 3s)
-
-    private final java.util.concurrent.ConcurrentLinkedDeque<QueuedPlayer> joinQueue = new java.util.concurrent.ConcurrentLinkedDeque<>();
-    private final Object joinQueueLock = new Object();
-    private final Set<UUID> queuedPlayers = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, Location> queueReturnLocations = new ConcurrentHashMap<>();
-    private final Map<UUID, GameMode> queueReturnGamemodes = new ConcurrentHashMap<>();
-    private static final Location VOID_LOCATION = new Location(null, 0, -64, 0);
-
-    private static final class QueuedPlayer implements Comparable<QueuedPlayer> {
-        final UUID uuid;
-        final int priority;
-        final long joinedAt;
-        QueuedPlayer(UUID uuid, int priority) { this.uuid = uuid; this.priority = priority; this.joinedAt = System.currentTimeMillis(); }
-        @Override public int compareTo(QueuedPlayer o) { int c = Integer.compare(this.priority, o.priority); return c != 0 ? c : Long.compare(this.joinedAt, o.joinedAt); }
-    }
-
-    private boolean isQueueEnabled() {
-        return this.settings.getBoolean("queue.enabled", true);
-    }
-
-    private int getQueueCapacityThreshold() {
-        return this.settings.getInt("queue.capacity_threshold", 45);
-    }
-
-    private int getQueueAdmitIntervalTicks() {
-        return this.settings.getInt("queue.admit_interval_ticks", 60);
-    }
-
-    int getQueuePriority(Player p) {
+    // Rank order used by full-server joins, staff checks and per-player view distance (1 = highest).
+    int getPlayerPriority(Player p) {
         if (p.hasPermission("group.dev")) return 1;
         if (p.hasPermission("group.owner")) return 2;
         if (p.hasPermission("group.sradmin")) return 3;
@@ -17745,147 +17679,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.isPizzaPlusPlus(p)) return 8;
         if (p.hasPermission("group.pizza+") || p.hasPermission("group.pizzaplus")) return 9;
         return 10;
-    }
-
-    private boolean shouldQueue(Player p) {
-        if (!this.isQueueEnabled()) return false;
-        int online = (int) Bukkit.getOnlinePlayers().stream().filter(pl -> !this.queuedPlayers.contains(pl.getUniqueId())).count();
-        return online >= this.getQueueCapacityThreshold();
-    }
-
-    void enqueuePlayer(Player p) {
-        UUID uuid = p.getUniqueId();
-        QueuedPlayer qp = new QueuedPlayer(uuid, this.getQueuePriority(p));
-        synchronized (this.joinQueueLock) {
-            this.queueReturnLocations.put(uuid, p.getLocation().clone());
-            this.queueReturnGamemodes.put(uuid, p.getGameMode());
-            this.queuedPlayers.add(uuid);
-            this.joinQueue.add(qp);
-            this.resortQueueLocked();
-        }
-        p.setGameMode(GameMode.SPECTATOR);
-        p.setAllowFlight(true);
-        p.setFlying(true);
-        PlatformScheduler.globalNow(this, () -> {
-            World endWorld = Bukkit.getWorld("world_the_end");
-            if (endWorld == null && !Bukkit.getWorlds().isEmpty()) endWorld = Bukkit.getWorlds().getFirst();
-            if (endWorld == null) return;
-            World queueWorld = endWorld;
-            Location queueLocation = new Location(queueWorld, 0, 320, 0);
-            PlatformScheduler.entityNow(this, p, () -> {
-                if (p.isOnline() && this.queuedPlayers.contains(uuid)) p.teleportAsync(queueLocation);
-            }, null);
-        });
-        this.tickQueueDisplay(p);
-    }
-
-    private void resortQueue() {
-        synchronized (this.joinQueueLock) {
-            this.resortQueueLocked();
-        }
-    }
-
-    private void resortQueueLocked() {
-        java.util.List<QueuedPlayer> sorted = new java.util.ArrayList<>(this.joinQueue);
-        java.util.Collections.sort(sorted);
-        this.joinQueue.clear();
-        this.joinQueue.addAll(sorted);
-    }
-
-    private void admitNextPlayer() {
-        double[] tps = Bukkit.getTPS();
-        double tps1m = tps.length > 0 ? tps[0] : 20.0;
-        // Hold if TPS is struggling — wait for a better moment
-        if (tps1m < 17.0) return;
-        QueuedPlayer next;
-        Location returnLoc;
-        GameMode returnGm;
-        synchronized (this.joinQueueLock) {
-            next = this.joinQueue.peek();
-            if (next == null) return;
-            // Test-hold: /queuetest keeps the player in the queue for a fixed window.
-            Long holdUntil = this.queueTestHoldUntil.get(next.uuid);
-            if (holdUntil != null && System.currentTimeMillis() < holdUntil) return;
-            // Slower admission under moderate load
-            int activeCount = Math.max(0, Bukkit.getOnlinePlayers().size() - this.queuedPlayers.size());
-            if (tps1m < 19.0 && activeCount >= this.getQueueCapacityThreshold()) return;
-            this.joinQueue.poll();
-            this.queuedPlayers.remove(next.uuid);
-            this.queueTestHoldUntil.remove(next.uuid);
-            returnLoc = this.queueReturnLocations.remove(next.uuid);
-            returnGm = this.queueReturnGamemodes.remove(next.uuid);
-        }
-        Player p = Bukkit.getPlayer(next.uuid);
-        if (p == null) return;
-        PlatformScheduler.entityNow(this, p, () -> {
-            if (!p.isOnline()) return;
-            Runnable release = () -> {
-                if (!p.isOnline()) return;
-                p.setGameMode(returnGm != null ? returnGm : GameMode.SURVIVAL);
-                p.resetTitle();
-            };
-            if (returnLoc == null) {
-                release.run();
-            } else {
-                p.teleportAsync(returnLoc).whenComplete((teleported, failure) -> this.runOnPlayerThread(p, () -> {
-                    if (failure == null && Boolean.TRUE.equals(teleported)) p.setFallDistance(0.0f);
-                    release.run();
-                }));
-            }
-        }, null);
-    }
-
-    private void tickQueueDisplay(Player p) {
-        UUID uuid = p.getUniqueId();
-        if (!this.queuedPlayers.contains(uuid)) return;
-        if (!p.isOnline()) {
-            synchronized (this.joinQueueLock) {
-                this.queuedPlayers.remove(uuid);
-                this.joinQueue.removeIf(q -> q.uuid.equals(uuid));
-                this.queueReturnLocations.remove(uuid);
-                this.queueReturnGamemodes.remove(uuid);
-            }
-            return;
-        }
-        int pos = 1;
-        synchronized (this.joinQueueLock) {
-            for (QueuedPlayer qp : this.joinQueue) {
-                if (qp.uuid.equals(uuid)) break;
-                pos++;
-            }
-        }
-        int admitInterval = Math.max(1, this.getQueueAdmitIntervalTicks()) * 50;
-        int etaSeconds = (pos * admitInterval) / 1000;
-        String etaStr = etaSeconds >= 60 ? (etaSeconds / 60) + "m " + (etaSeconds % 60) + "s" : etaSeconds + "s";
-        p.sendTitle("§7Position in queue §f#" + pos, "§7ETA: §f" + etaStr, 0, 40, 10);
-        PlatformScheduler.globalNow(this, () -> {
-            World endWorld = Bukkit.getWorld("world_the_end");
-            if (endWorld == null && !Bukkit.getWorlds().isEmpty()) endWorld = Bukkit.getWorlds().getFirst();
-            if (endWorld == null) return;
-            World queueWorld = endWorld;
-            Location queueLocation = new Location(queueWorld, 0, 320, 0);
-            PlatformScheduler.entityNow(this, p, () -> {
-                if (!p.isOnline() || !this.queuedPlayers.contains(uuid)) return;
-                if (p.getLocation().getY() < 310 || !p.getWorld().equals(queueWorld)) p.teleportAsync(queueLocation);
-            }, null);
-        });
-        this.runPlayerTaskLater(p, () -> this.tickQueueDisplay(p), 20L);
-    }
-
-    @EventHandler(priority=EventPriority.LOWEST)
-    public void onQueuedPlayerChat(AsyncChatEvent e) {
-        if (this.queuedPlayers.contains(e.getPlayer().getUniqueId())) {
-            e.setCancelled(true);
-        }
-    }
-
-    @EventHandler(priority=EventPriority.LOWEST)
-    public void onQueuedPlayerMove(PlayerMoveEvent e) {
-        if (this.queuedPlayers.contains(e.getPlayer().getUniqueId())) {
-            if (e.getTo() != null && (e.getFrom().getX() != e.getTo().getX() || e.getFrom().getZ() != e.getTo().getZ())) {
-                e.setTo(e.getFrom());
-            }
-        }
     }
 
     // ---- Per-player VD throttle (beta, not applied yet) ----
@@ -17910,7 +17703,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             long lastRtp = this.rtpCooldowns.getOrDefault(p.getUniqueId(), 0L);
             if (lastRtp > 0L && System.currentTimeMillis() - lastRtp < 20_000L) baseVd = Math.max(VD_MIN, baseVd - 1);
         }
-        int priority = this.getQueuePriority(p);
+        int priority = this.getPlayerPriority(p);
         int bonus = priority <= 3 ? 2 : priority <= 7 ? 1 : 0;
         return Math.min(VD_MAX, Math.max(VD_MIN, baseVd + bonus));
     }
@@ -17952,7 +17745,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         for (Player p : Bukkit.getOnlinePlayers()) {
             PlatformScheduler.entityNow(this, p, () -> {
                 UUID id = p.getUniqueId();
-                if (!p.isOnline() || this.queuedPlayers.contains(id) || this.joinRamping.contains(id)
+                if (!p.isOnline() || this.joinRamping.contains(id)
                         || this.vdThrottleOverrides.containsKey(id)) return;
                 p.setViewDistance(this.calcPerPlayerVd(p, tps1m, online));
             }, null);
@@ -21345,6 +21138,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void finalizeAhListing(Player player) {
+        this.finalizeAhListing(player, true);
+    }
+
+    // openAuctionAfter: the sell GUI returns to the Auction House; /ah sell <price> only confirms in chat.
+    private void finalizeAhListing(Player player, boolean openAuctionAfter) {
         AhSellState state = this.ahSellState.get(player.getUniqueId());
         if (state == null || state.item == null || state.price <= 0.0) {
             this.openAhSellInsert(player);
@@ -21400,7 +21198,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST", listingItem.getType().name(), listingItem.getAmount(), ahPrice, ahPrice, null);
             this.runOnPlayerThread(player, () -> {
                 player.sendMessage("\u00a7aListing created.");
-                this.openAuctionHouseMenu(player);
+                if (openAuctionAfter) this.openAuctionHouseMenu(player);
             });
         });
     }
@@ -21458,7 +21256,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         AhSellState state = this.ahSellState.computeIfAbsent(player.getUniqueId(), k -> new AhSellState());
         state.item = listing;
         state.price = parsed.value;
-        this.finalizeAhListing(player);
+        this.finalizeAhListing(player, false);
     }
 
     private double worthFloorFor(ItemStack stack) {
@@ -22166,6 +21964,144 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
+    // ---- Staff auction management and the item mailbox ----
+    // Staff can view any player's active listings and take one down; the item always goes back to its owner,
+    // through the mailbox when they are offline (or their inventory is full), never to the staff member.
+
+    private final Map<UUID, UUID> adminAhTarget = new ConcurrentHashMap<>();
+
+    private void openAdminAhListingsByName(Player admin, String name) {
+        Player online = Bukkit.getPlayerExact(name);
+        if (online != null) { this.openAdminAhListings(admin, online.getUniqueId(), online.getName()); return; }
+        this.runAsyncTask(() -> {
+            OfflinePlayer off = Bukkit.getOfflinePlayer(name);
+            this.runOnPlayerThread(admin, () -> {
+                if (!off.hasPlayedBefore()) { admin.sendActionBar(Component.text("§cUnknown player: " + name)); return; }
+                this.openAdminAhListings(admin, off.getUniqueId(), off.getName() != null ? off.getName() : name);
+            });
+        });
+    }
+
+    private void openAdminAhListings(Player admin, UUID target, String targetName) {
+        if (!admin.hasPermission(PERM_ADMIN_AUCTION)) { admin.sendActionBar(Component.text("§cNo permission.")); return; }
+        this.adminAhTarget.put(admin.getUniqueId(), target);
+        this.runAsyncTask(() -> {
+            List<AhListingEntry> listings = this.queryAhMyListings(target, 1);
+            this.runOnPlayerThread(admin, () -> {
+                Inventory inv = Bukkit.createInventory(null, 54, TITLE_AH_ADMIN);
+                int slot = 0;
+                for (AhListingEntry entry : listings) {
+                    if (slot >= 45) break;
+                    ItemStack item = entry.item.clone();
+                    ItemMeta meta = item.getItemMeta();
+                    meta.setLore(List.of("§7Seller: §f" + targetName, "§7Price: §f$" + this.fmtMoney(entry.price),
+                        "§7Listed: §f" + this.shortAge(entry.createdAtMs), "§cClick to remove (returns to the seller)"));
+                    if (this.uiActionKey != null) meta.getPersistentDataContainer().set(this.uiActionKey, PersistentDataType.STRING, "ah_admin_remove:" + entry.id);
+                    item.setItemMeta(meta);
+                    inv.setItem(slot++, item);
+                }
+                inv.setItem(49, this.namedWithLore(Material.PAPER, "§f" + targetName + " §7(" + listings.size() + " active)", null, List.of()));
+                admin.openInventory(inv);
+            });
+        });
+    }
+
+    private void handleAdminAhClick(Player admin, ItemStack item) {
+        String id = item == null ? null : this.uiActionId(item);
+        UUID target = this.adminAhTarget.get(admin.getUniqueId());
+        if (id == null || target == null || !id.startsWith("ah_admin_remove:") || !admin.hasPermission(PERM_ADMIN_AUCTION)) return;
+        long listingId;
+        try { listingId = Long.parseLong(id.substring("ah_admin_remove:".length())); } catch (NumberFormatException ex) { return; }
+        this.runAsyncTask(() -> {
+            byte[] blob = null;
+            boolean removed = false;
+            try (Connection conn = this.openSyncConnection();
+                 PreparedStatement sel = conn.prepareStatement("SELECT item_blob FROM auction_listings WHERE id=? AND seller_uuid=? AND status='ACTIVE'");
+                 PreparedStatement upd = conn.prepareStatement("UPDATE auction_listings SET status='REMOVED', updated_at=CURRENT_TIMESTAMP WHERE id=? AND seller_uuid=? AND status='ACTIVE'")) {
+                sel.setLong(1, listingId); sel.setString(2, target.toString());
+                try (ResultSet rs = sel.executeQuery()) { if (rs.next()) blob = rs.getBytes(1); }
+                upd.setLong(1, listingId); upd.setString(2, target.toString());
+                removed = blob != null && upd.executeUpdate() > 0;
+            } catch (SQLException ex) {
+                this.getLogger().warning("[ah] staff removal of listing " + listingId + " failed: " + ex.getMessage());
+            }
+            if (!removed) {
+                this.runOnPlayerThread(admin, () -> admin.sendActionBar(Component.text("§cThat listing is no longer active.")));
+                return;
+            }
+            ItemStack back = this.deserializeItem(blob);
+            if (back != null) this.mailItem(target, back, "auction listing removed by staff");
+            this.getLogger().info("[ah] " + admin.getName() + " removed listing " + listingId + " of " + target + "; item returned to the seller");
+            this.broadcastAhListingSold(listingId, admin.getUniqueId());
+            String name = Bukkit.getOfflinePlayer(target).getName();
+            this.runOnPlayerThread(admin, () -> {
+                admin.sendActionBar(Component.text("§7Listing removed; the item was returned to the seller."));
+                this.openAdminAhListings(admin, target, name != null ? name : target.toString());
+            });
+        });
+    }
+
+    // Queue an item for a player and deliver it right away when they are online. Call off the main thread.
+    private void mailItem(UUID owner, ItemStack item, String reason) {
+        byte[] blob = this.serializeItem(item);
+        if (blob == null) { this.getLogger().warning("[mailbox] could not serialize an item for " + owner); return; }
+        try (Connection conn = this.openSyncConnection();
+             PreparedStatement ins = conn.prepareStatement("INSERT INTO player_mailbox (uuid, item_blob, reason) VALUES (?, ?, ?)")) {
+            ins.setString(1, owner.toString()); ins.setBytes(2, blob); ins.setString(3, reason);
+            ins.executeUpdate();
+        } catch (SQLException ex) {
+            this.getLogger().severe("[mailbox] could not store an item for " + owner + ": " + ex.getMessage());
+            return;
+        }
+        Player online = Bukkit.getPlayer(owner);
+        if (online != null) this.runOnPlayerThread(online, () -> this.deliverMailbox(online));
+    }
+
+    // Hand over queued items that fit; the rest stays queued for the next join. A row is deleted only after its
+    // item is in the player's inventory.
+    private void deliverMailbox(Player player) {
+        if (player == null || !player.isOnline()) return;
+        UUID uuid = player.getUniqueId();
+        this.runAsyncTask(() -> {
+            List<Long> ids = new java.util.ArrayList<>();
+            List<byte[]> blobs = new java.util.ArrayList<>();
+            try (Connection conn = this.openSyncConnection();
+                 PreparedStatement sel = conn.prepareStatement("SELECT id, item_blob FROM player_mailbox WHERE uuid=? ORDER BY id LIMIT 36")) {
+                sel.setString(1, uuid.toString());
+                try (ResultSet rs = sel.executeQuery()) { while (rs.next()) { ids.add(rs.getLong(1)); blobs.add(rs.getBytes(2)); } }
+            } catch (SQLException ex) {
+                return;
+            }
+            if (ids.isEmpty()) return;
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                List<Long> delivered = new java.util.ArrayList<>();
+                for (int i = 0; i < ids.size(); i++) {
+                    ItemStack item = this.deserializeItem(blobs.get(i));
+                    if (item == null) { delivered.add(ids.get(i)); continue; }
+                    if (player.getInventory().firstEmpty() == -1) break;   // no room; keep the rest queued
+                    player.getInventory().addItem(item);
+                    delivered.add(ids.get(i));
+                }
+                if (delivered.isEmpty()) {
+                    player.sendActionBar(Component.text("§7You have returned items waiting. Free some inventory space and rejoin."));
+                    return;
+                }
+                int count = delivered.size();
+                player.sendMessage(this.legacyColorize("§7You received §f" + count + " §7returned item" + (count == 1 ? "" : "s") + "."));
+                this.runAsyncTask(() -> {
+                    try (Connection conn = this.openSyncConnection();
+                         PreparedStatement del = conn.prepareStatement("DELETE FROM player_mailbox WHERE id=?")) {
+                        for (long id : delivered) { del.setLong(1, id); del.addBatch(); }
+                        del.executeBatch();
+                    } catch (SQLException ex) {
+                        this.getLogger().severe("[mailbox] delivered items but could not clear rows for " + uuid + ": " + ex.getMessage());
+                    }
+                });
+            });
+        });
+    }
+
     // D15: claim EVERY pending delivery across all the player's orders in one action.
     private void claimAllOrderDeliveries(Player player) {
         this.runAsyncTask(() -> {
@@ -22807,8 +22743,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 UUID viewerId = viewer.getUniqueId();
                 PacketContainer packet = event.getPacket();
                 if (event.getPacketType() == PacketType.Play.Server.ENTITY_STATUS) {
-                    if (PizzaNetworkCore.this.shouldSuppressTotemPacket(viewerId, packet)) {
+                    if (PizzaNetworkCore.this.shouldSuppressTotemPacket(viewer, packet)) {
+                        // The client draws the particles, plays the sound and shows the floating totem from this
+                        // one status, so it can't be trimmed; drop it and put the sound back.
                         event.setCancelled(true);
+                        Integer poppedId = packet.getIntegers().readSafely(0);
+                        PlatformScheduler.entityNow(PizzaNetworkCore.this, viewer, () -> {
+                            if (poppedId == null || !viewer.isOnline()) return;
+                            for (org.bukkit.entity.Entity nearby : viewer.getNearbyEntities(64, 64, 64)) {
+                                if (nearby.getEntityId() != poppedId) continue;
+                                viewer.playSound(nearby.getLocation(), Sound.ITEM_TOTEM_USE, org.bukkit.SoundCategory.PLAYERS, 1.0f, 1.0f);
+                                break;
+                            }
+                        }, null);
                     }
                     return;
                 }
@@ -22874,12 +22821,17 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
-    private boolean shouldSuppressTotemPacket(UUID viewerId, PacketContainer packet) {
-        if (this.isSettingEnabledCached(viewerId, "totem_particles")) {
+    // "Totem Particles" off hides the particles of other players' totem pops. The viewer's own pop always passes:
+    // its floating-totem animation and sound come from the same client event as the particles, and the setting
+    // must never take those away.
+    private boolean shouldSuppressTotemPacket(Player viewer, PacketContainer packet) {
+        if (this.isSettingEnabledCached(viewer.getUniqueId(), "totem_particles")) {
             return false;
         }
         Byte status = packet.getBytes().size() > 0 ? (Byte)packet.getBytes().readSafely(0) : null;
-        return status != null && status.byteValue() == 35;
+        if (status == null || status.byteValue() != 35) return false;
+        Integer entityId = packet.getIntegers().size() > 0 ? packet.getIntegers().readSafely(0) : null;
+        return entityId == null || entityId.intValue() != viewer.getEntityId();
     }
 
     private boolean shouldSuppressParticle(UUID viewerId, Particle particle) {
@@ -26317,7 +26269,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         for (int slot = 0; slot < inventory.getSize(); slot++) inventory.setItem(slot, filler);
         inventory.setItem(10, this.namedWithLore(Material.REDSTONE_BLOCK, "§cMaintenance ON", "adm_maint_on", List.of()));
         inventory.setItem(11, this.namedWithLore(Material.EMERALD_BLOCK, "§aMaintenance OFF", "adm_maint_off", List.of()));
-        inventory.setItem(12, this.namedWithLore(Material.HOPPER, "§fJoin Queue", "adm_queue", List.of("§7Toggle queue admission")));
         inventory.setItem(13, this.namedWithLore(Material.END_PORTAL_FRAME, "§fEnd RTP", "adm_end", List.of("§7Toggle End access")));
         inventory.setItem(14, this.namedWithLore(Material.EMERALD, "§fEcoBot", "adm_eco", List.of("§7Pause or resume")));
         inventory.setItem(15, this.namedWithLore(Material.LIME_DYE, "§aView Distance +1", "adm_vd_up", List.of()));
@@ -26333,11 +26284,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // ===== Legacy (inventory) server console for Bedrock / pre-1.21.6 clients =====
     private void openAdminLegacy(Player p) {
-        boolean queueOn = this.settings.getBoolean("queue.enabled", true);
         Inventory inv = Bukkit.createInventory(null, 54, TITLE_ADMIN);
         inv.setItem(10, this.namedWithLore(Material.REDSTONE_BLOCK, "§cMaintenance ON", "adm_maint_on", List.of("§7Close the server")));
         inv.setItem(11, this.namedWithLore(Material.EMERALD_BLOCK, "§aMaintenance OFF", "adm_maint_off", List.of("§7Reopen the server")));
-        inv.setItem(12, this.namedWithLore(Material.HOPPER, "§fJoin Queue: " + (queueOn ? "§aON" : "§7OFF"), "adm_queue", List.of("§7Click to toggle")));
         inv.setItem(13, this.namedWithLore(Material.END_PORTAL_FRAME, "§fThe End: " + (this.endRtpClosed ? "§cCLOSED" : "§aOPEN"), "adm_end", List.of("§7Click to toggle")));
         inv.setItem(14, this.namedWithLore(Material.EMERALD, "§fEcoBot: " + (this.autoEcoPaused ? "§cPaused" : "§aRunning"), "adm_eco", List.of("§7Click to toggle")));
         inv.setItem(15, this.namedWithLore(Material.SPYGLASS, "§fView Distance: §f" + this.currentThrottledVd, "adm_vd_info", List.of("§7Use the dye buttons")));
@@ -26477,8 +26426,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private static final String[][] ADMIN_TUNE_KEYS = {
         {"combat.tag_seconds", "Combat tag (s)", "15"}, {"autosave.online_interval_seconds", "Autosave online (s)", "180"},
-        {"autosave.empty_interval_seconds", "Autosave empty (s)", "600"}, {"queue.capacity_threshold", "Queue threshold", "45"},
-        {"queue.admit_interval_ticks", "Queue admit (ticks)", "40"}, {"sell.enchant_level_multiplier", "Sell enchant mult", "1.0"}};
+        {"autosave.empty_interval_seconds", "Autosave empty (s)", "600"},
+        {"sell.enchant_level_multiplier", "Sell enchant mult", "1.0"}};
 
     private void openAdminLegacyTuning(Player p) {
         Inventory inv = Bukkit.createInventory(null, 27, TITLE_ADMIN);
@@ -26570,7 +26519,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             case "adm_back" -> this.openAdminLegacy(p);
             case "adm_maint_on" -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "maintenance on"); p.sendMessage("§7Maintenance ON."); }
             case "adm_maint_off" -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "maintenance off"); p.sendMessage("§7Maintenance OFF."); this.openAdminLegacy(p); }
-            case "adm_queue" -> { this.settings.set("queue.enabled", !this.settings.getBoolean("queue.enabled", true)); this.saveConfig(); this.openAdminLegacy(p); }
             case "adm_end" -> { this.endRtpClosed = !this.endRtpClosed; this.saveWorldAccess(); this.openAdminLegacy(p); }
             case "adm_eco" -> { this.autoEcoPaused = !this.autoEcoPaused; this.openAdminLegacy(p); }
             case "adm_vd_up" -> { this.currentThrottledVd = Math.min(VD_MAX, this.currentThrottledVd + 1); this.applyServerVd(this.currentThrottledVd); this.openAdminLegacy(p); }
@@ -26689,10 +26637,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void openAdminMaintenance(Player p) {
         boolean underMaint = this.maintenanceQueueManager != null && this.maintenanceQueueManager.isServerUnderMaintenance("survival");
-        boolean queueOn = this.settings.getBoolean("queue.enabled", true);
         java.util.List<DialogBody> body = List.of(
-            this.kv("Maintenance:", underMaint ? "ON" : "OFF", underMaint ? NamedTextColor.RED : NamedTextColor.GREEN),
-            this.kv("Join queue:", queueOn ? "Enabled" : "Disabled", queueOn ? NamedTextColor.GREEN : NamedTextColor.GRAY));
+            this.kv("Maintenance:", underMaint ? "ON" : "OFF", underMaint ? NamedTextColor.RED : NamedTextColor.GREEN));
         java.util.List<ActionButton> buttons = List.of(
             this.dialogButton(Component.text("Maintenance ON", NamedTextColor.RED), "Kick non-exempt players and close the server", 150, q -> {
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "maintenance on");
@@ -26702,11 +26648,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.dialogButton(Component.text("Maintenance OFF", NamedTextColor.GREEN), "Reopen the server", 150, q -> {
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "maintenance off");
                 q.sendActionBar(Component.text("§7Maintenance turned OFF."));
-                this.openAdminMaintenance(q);
-            }),
-            this.dialogButton(Component.text(queueOn ? "Disable Queue" : "Enable Queue", DIALOG_BRAND), null, 150, q -> {
-                this.settings.set("queue.enabled", !queueOn);
-                this.saveConfig();
                 this.openAdminMaintenance(q);
             }),
             this.dialogButton(Component.text("Frozen Maint: Start", NamedTextColor.YELLOW), "Freeze players in place (servermaint)", 150, q -> {
@@ -26971,7 +26912,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.dialogButton(Component.text("Mute 30m", NamedTextColor.YELLOW), null, 150, q -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mute " + name + " 30m"); q.sendActionBar(Component.text("§7Muted " + name + " 30m.")); }),
             this.dialogButton(Component.text("Kick", NamedTextColor.RED), null, 150, q -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "kick " + name); q.sendActionBar(Component.text("§7Kicked " + name + ".")); this.openAdminPlayers(q); }),
             this.dialogButton(Component.text("Punish", NamedTextColor.RED), "Open the punish menu", 150, q -> { DialogCloseCompat.close(q); q.performCommand("punish " + name); }),
-            this.dialogButton(Component.text("History", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("history " + name); }));
+            this.dialogButton(Component.text("History", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("history " + name); }),
+            this.dialogButton(Component.text("Auction Listings", DIALOG_BRAND), "View or remove this player's listings", 150, q -> { DialogCloseCompat.close(q); this.openAdminAhListings(q, id, name); }),
+            this.dialogButton(Component.text("Inventory", DIALOG_BRAND), "Open this player's inventory (online only)", 150, q -> { Player tt = Bukkit.getPlayer(id); DialogCloseCompat.close(q); if (tt != null && q.hasPermission(PERM_ADMIN_INVSEE)) q.openInventory(tt.getInventory()); else q.sendActionBar(Component.text("§cPlayer is offline or you lack permission.")); }));
         Dialog dialog = this.buildDialog(Component.text(name + " · Actions", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openAdminPlayers)).build());
@@ -27276,10 +27219,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // ----- Feature Flags panel -----
     private void openAdminFeatureFlags(Player p) {
-        boolean queueOn = this.settings.getBoolean("queue.enabled", true);
         java.util.List<DialogBody> body = List.of(
             this.kv("End RTP/portal:", this.endRtpClosed ? "CLOSED" : "OPEN", this.endRtpClosed ? NamedTextColor.RED : NamedTextColor.GREEN),
-            this.kv("Join queue:", queueOn ? "Enabled" : "Disabled", queueOn ? NamedTextColor.GREEN : NamedTextColor.GRAY),
             this.kv("Teams:", TEAMS_DISABLED ? "Disabled (friends system)" : "Enabled", NamedTextColor.GRAY));
         java.util.List<ActionButton> buttons = List.of(
             this.dialogButton(Component.text(this.endRtpClosed ? "Open The End" : "Close The End", this.endRtpClosed ? NamedTextColor.GREEN : NamedTextColor.RED),
@@ -27289,11 +27230,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     q.sendActionBar(Component.text(this.endRtpClosed ? "§7The End is now CLOSED." : "§7The End is now OPEN."));
                     this.openAdminFeatureFlags(q);
                 }),
-            this.dialogButton(Component.text(queueOn ? "Disable Queue" : "Enable Queue", DIALOG_BRAND), null, 150, q -> {
-                this.settings.set("queue.enabled", !queueOn);
-                this.saveConfig();
-                this.openAdminFeatureFlags(q);
-            }),
             this.dialogButton(Component.text("Set Lock Message", DIALOG_BRAND), "Region-down message (shared with World Access)", 150, this::openAdminLockMessageInput),
             this.dialogButton(Component.text("Maintenance MOTD", DIALOG_BRAND), "Set the maintenance server-list message", 150, this::openAdminMaintenanceMotdInput));
         Dialog dialog = this.buildDialog(Component.text("Feature Flags", DIALOG_BRAND), body, List.of(),
@@ -27569,8 +27505,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             {"rtpq.timeout-seconds", "RTP queue timeout (s)", "30"},
             {"autosave.online_interval_seconds", "Autosave online (s)", "180"},
             {"autosave.empty_interval_seconds", "Autosave empty (s)", "600"},
-            {"queue.capacity_threshold", "Queue threshold", "45"},
-            {"queue.admit_interval_ticks", "Queue admit (ticks)", "40"},
             {"sell.enchant_level_multiplier", "Sell enchant mult", "1.0"}};
         java.util.List<DialogBody> body = new java.util.ArrayList<>();
         body.add(DialogBody.plainMessage(Component.text("Edit tunable config values. Some apply on next reload.", NamedTextColor.GRAY)));
@@ -27923,10 +27857,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     @EventHandler(priority=EventPriority.LOW)
     public void onCommandThrottleAndAudit(org.bukkit.event.player.PlayerCommandPreprocessEvent e) {
         if (e.isCancelled()) return;
-        if (this.queuedPlayers.contains(e.getPlayer().getUniqueId())) {
-            e.setCancelled(true);
-            return;
-        }
         if (this.isCommandThrottled(e.getPlayer(), e.getMessage())) {
             e.setCancelled(true);
             return;

@@ -1,7 +1,7 @@
 # Running SMP-Core as a proxy network
 
 This directory is **optional**. SMP-Core still runs as a single Paper server exactly as it
-always has — see [`../setup/`](../setup) for that path, which is unchanged and remains the
+always has; see [`../setup/`](../setup) for that path, which is unchanged and remains the
 simpler choice. Nothing here is required to use the plugins.
 
 What this adds is the multi-server layout the plugins were actually built for: a Velocity
@@ -61,7 +61,7 @@ This matters more than it looks. EssentialsX Economy stores balances in **per-se
 so if it wins the Vault hook a player's money differs on every backend and never reconciles.
 PizzaNetworkCore registers its own `balances`-backed provider at `ServicePriority.Highest`
 so the database is the single source of truth. If you run EssentialsX, leave its economy
-alone — do not "fix" the ordering.
+alone; do not "fix" the ordering.
 
 ### Two clock rules worth knowing
 
@@ -69,11 +69,11 @@ alone — do not "fix" the ordering.
    `DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)` rather than a Java-side `Timestamp`.
    A JDBC `Timestamp` is sent in the JVM's local zone; against a UTC database on a non-UTC
    host every row lands hours in the past and `expires_at > CURRENT_TIMESTAMP` never
-   matches. Nothing errors — the network just behaves as though nobody is online anywhere.
+   matches. Nothing errors: the network just behaves as though nobody is online anywhere.
 2. **Cap the RTP radius.** `rtp.max-radius` (default 5000) bounds random teleports
    independently of the world border. A world whose border was never set carries vanilla's
    ~60,000,000-wide default, and RTP derived from that drops players into ungenerated
-   terrain where nothing streams in — an empty void.
+   terrain where nothing streams in, an empty void.
 
 Rule 1 is handled in code, so the network is correct whatever your zones are. Give the
 database container the same zone as the host anyway (`configs/database-docker-compose.yml`
@@ -82,12 +82,12 @@ read them side by side.
 
 ### A death-screen quirk you would otherwise hit
 
-A player who dies on one backend and leaves before clicking Respawn — by switching servers
-or by quitting — leaves that backend holding them dead, because it never received the
+A player who dies on one backend and leaves before clicking Respawn (by switching servers
+or by quitting) leaves that backend holding them dead, because it never received the
 respawn packet. Return later and vanilla restores exactly that: the death screen they
 walked away from, on a server they just joined. PizzaNetworkCore respawns a player who
 arrives dead. Worth knowing about if you write your own join handling, because restoring
-health does not clear it — the client is already showing the screen and needs a real
+health does not clear it: the client is already showing the screen and needs a real
 respawn.
 
 ## Requirements
@@ -102,8 +102,11 @@ respawn.
 **1. Database.** Create the schema:
 
 ```bash
-mysql -u root -p < network/configs/schema.sql
+mysql -u root -p < PizzaNetworkCore/resources/schema.sql
 ```
+PizzaNetworkCore also applies this schema automatically on every start (every statement is idempotent), so
+this manual step only matters if you want the tables before the first server start.
+
 
 **2. Directory layout.** One directory per service, alongside `scripts/`:
 
@@ -123,7 +126,7 @@ openssl rand -base64 32 > velocity/forwarding.secret
 
 Modern forwarding requires the proxy to be `online-mode = true` and every backend to be
 `online-mode=false` with `enforce-secure-profile=true`. Getting this backwards either
-breaks chat signing or leaves the backends joinable directly — check both.
+breaks chat signing or leaves the backends joinable directly. Check both.
 
 **4. Backends.** Copy
 `network/configs/backend/plugins/PizzaNetworkCore/config.yml.example` into each backend's
@@ -131,7 +134,7 @@ breaks chat signing or leaves the backends joinable directly — check both.
 `sync.server-name` (or leave it `auto` to derive from the port).
 
 **5. Topology.** Edit `scripts/targets.env`. It is the single source of truth for which
-backends exist and what heap each gets — the ops scripts read it rather than hardcoding
+backends exist and what heap each gets; the ops scripts read it rather than hardcoding
 lists, so adding a backend there is enough to make every script aware of it.
 
 **6. Start.**
@@ -148,7 +151,7 @@ lists, so adding a backend there is enough to make every script aware of it.
 | `./scripts/build_from_repo.sh` | Compile every plugin from source |
 | `./scripts/deploy_plugins.sh --check` | Report jar drift, missing third-party plugins, and orphaned config folders |
 | `./scripts/deploy_plugins.sh` | Deploy jars, platform-routed (Paper vs Velocity) |
-| `./scripts/deploy_plugins.sh --to dev` | Deploy to one backend — the promotion step |
+| `./scripts/deploy_plugins.sh --to dev` | Deploy to one backend (the promotion step) |
 | `./scripts/backend_maint.sh plan <backend>` | Print the rolling-restart plan without doing it |
 | `./scripts/backend_maint.sh apply <backend>` | Execute it, readmitting only once TPS is stable |
 | `./scripts/smoke_test.sh` | Post-restart sanity check |
@@ -156,7 +159,7 @@ lists, so adding a backend there is enough to make every script aware of it.
 `deploy_plugins.sh` routes by platform and knows which plugins are hub-only. PizzaSpawnRules
 is the example worth understanding: it grants creative flight inside its protected zone to
 power the lobby double jump, and its `lockAllWorld` option makes the *whole world* that
-zone — so on survival it hands every player flight. It installs on lobby and maintenance
+zone, so on survival it hands every player flight. It installs on lobby and maintenance
 only, and is actively removed elsewhere so an older all-servers deploy cannot leave a copy
 behind.
 
@@ -171,7 +174,7 @@ place, so they cannot quietly drift; hand-installed third-party jars are exactly
 that go missing on a single backend and stay missing. The failure that motivated it: the
 amethyst-tools plugin was absent from survival while PizzaNetworkCore still sold its tools
 for $1.5M and delivered them by dispatching a command that plugin owns. With the plugin
-gone the command did nothing, so the purchase took the money and handed over nothing — and
+gone the command did nothing, so the purchase took the money and handed over nothing, and
 no error was logged anywhere, because dispatching a non-existent command is not an error.
 
 ## Maintenance model
