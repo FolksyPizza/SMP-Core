@@ -21,7 +21,7 @@ public final class PizzaPlaceholders extends PlaceholderExpansion {
 
     @Override public String getIdentifier() { return "pizzasmp"; }
     @Override public String getAuthor() { return "FolksyPizza"; }
-    @Override public String getVersion() { return "1.0.0"; }
+    @Override public String getVersion() { return "1.0.0-beta"; }
     @Override public boolean persist() { return true; }   // survive PAPI reloads
 
     @Override

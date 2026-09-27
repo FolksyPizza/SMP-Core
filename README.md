@@ -3,7 +3,7 @@
 A plugin suite for survival servers on Paper: a player-driven economy, quality-of-life commands, duels, and staff
 tooling, for a single server or a Velocity network. MIT licensed.
 
-Current version: **1.0.0-beta**. See [CHANGELOG.md](CHANGELOG.md).
+Current version: **1.0.0-beta**, shared by every plugin. See [CHANGELOG.md](CHANGELOG.md).
 
 - 10 plugins and a shared library, about 49,000 lines of Java, plus two datapacks
 - More than 100 commands ([COMMANDS.md](COMMANDS.md))
@@ -11,19 +11,19 @@ Current version: **1.0.0-beta**. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Plugins
 
-| Plugin | Version | Purpose |
-| --- | --- | --- |
-| PizzaNetworkCore | 1.0.0 | Core gameplay: auction house, buy orders, shop, homes, random teleport, teleport requests, friends and follows, `/ignore` and `/block`, duels and the duel queue, spawn and AFK hubs, chat item icons, per-player settings, leaderboards and the scoreboard |
-| PizzaAdminTools | 1.1.0 | Staff tooling: admin menus, home administration, staff mode with an audit log, `/atrack`, maintenance freeze, transfers, `/stash`, `/nuke`, subscription tiers |
-| PizzaPunishment | 1.0.0 | Bans, mutes, strikes and death-drop penalties |
-| PizzaChatGuard | 2.0.0 | Chat rate limits, duplicate detection and word lists |
-| PizzaRuleGuard | 1.0.0 | Rule enforcement and abuse detection |
-| EnderchestExpander | 1.0.0 | 54-slot ender chests with persistent storage and staff inspection (`/endersee`) |
-| PizzaTune | 1.0.0 | Live view-distance and chunk-rate tuning |
-| PizzaSpawnRules | 1.0.0 | Hub protections and double jump. Hub servers only: its zone grants flight |
-| PizzaLimbo | 0.2.0 | Limbo backend that holds players during maintenance (proxy networks) |
-| PizzaProxyGuard | 1.0.0 | Velocity plugin: holds new joins while the backend is down and turns moderation kicks into clean disconnects |
-| PizzaCommon | 1.0.0 | Shared library compiled into the plugins that use it: storage and a scheduler facade |
+| Plugin | Purpose |
+| --- | --- |
+| PizzaNetworkCore | Core gameplay: auction house, buy orders, shop, homes, random teleport, teleport requests, friends and follows, `/ignore` and `/block`, duels and the duel queue, spawn and AFK hubs, chat item icons, per-player settings, leaderboards and the scoreboard |
+| PizzaAdminTools | Staff tooling: admin menus, home administration, staff mode with an audit log, `/atrack`, maintenance freeze, transfers, `/stash`, `/nuke`, subscription tiers |
+| PizzaPunishment | Bans, mutes, strikes and death-drop penalties |
+| PizzaChatGuard | Chat rate limits, duplicate detection and word lists |
+| PizzaRuleGuard | Rule enforcement and abuse detection |
+| EnderchestExpander | 54-slot ender chests with persistent storage and staff inspection (`/endersee`) |
+| PizzaTune | Live view-distance and chunk-rate tuning |
+| PizzaSpawnRules | Hub protections and double jump. Hub servers only: its zone grants flight |
+| PizzaLimbo | Limbo backend that holds players during maintenance (proxy networks) |
+| PizzaProxyGuard | Velocity plugin: holds new joins while the backend is down and turns moderation kicks into clean disconnects |
+| PizzaCommon | Shared library compiled into the plugins that use it: storage and a scheduler facade |
 
 ## Requirements
 

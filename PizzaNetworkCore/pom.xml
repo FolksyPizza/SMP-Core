@@ -7,7 +7,7 @@
 
     <groupId>dev.pizzasmp</groupId>
     <artifactId>pizzanetworkcore</artifactId>
-    <version>1.0</version>
+    <version>1.0.0-beta</version>
     <packaging>jar</packaging>
 
     <repositories>

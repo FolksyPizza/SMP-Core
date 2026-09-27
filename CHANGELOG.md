@@ -14,6 +14,7 @@ Changes since 1.0.0-beta, toward the 1.0.0 release.
 - The database schema is applied on every start, so a fresh database needs no manual import.
 
 ### Changed
+- Every plugin carries the suite version (`1.0.0-beta`) instead of its own version number.
 - RTP arrival animations are off by default (`rtp.animation.enabled`).
 - `/ah sell <price>` lists the item without opening the auction menu.
 - The Totem Particles setting hides only other players' totem particles; totem sounds and your own pop

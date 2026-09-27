@@ -1,5 +1,5 @@
 name: PizzaNetworkCore
-version: 1.0.0
+version: 1.0.0-beta
 main: dev.pizzasmp.networkcore.PizzaNetworkCore
 api-version: '1.21.6'
 authors: [FolksyPizza]

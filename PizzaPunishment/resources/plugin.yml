@@ -1,6 +1,6 @@
 name: PizzaPunishment
 main: me.pizzasmp.punishdrop.PunishDropPlugin
-version: 1.0.0
+version: 1.0.0-beta
 api-version: "1.21"
 author: FolksyPizza
 description: Punishment stack with presets, Ban IDs, history, and admin GUIs.

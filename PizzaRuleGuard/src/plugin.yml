@@ -1,6 +1,6 @@
 name: PizzaRuleGuard
 main: dev.pizzasmp.ruleguard.PizzaRuleGuardPlugin
-version: 1.0.0
+version: 1.0.0-beta
 api-version: "1.21.6"
 author: FolksyPizza
 description: Lightweight heuristic checks for survival-only rule enforcement gaps.

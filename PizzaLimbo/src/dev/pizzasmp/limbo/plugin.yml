@@ -1,5 +1,5 @@
 name: PizzaLimbo
-version: 0.2.0
+version: 1.0.0-beta
 main: dev.pizzasmp.limbo.PizzaLimbo
 api-version: '1.21'
 author: FolksyPizza
