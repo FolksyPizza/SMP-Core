@@ -120,9 +120,9 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/setmoneyboard` | Place the spawn money leaderboard at your location. |
 | `/nuke [radius]` | Staff-only demolition item. |
 
-## Staff: network and maintenance (Alpha, off by default)
+## Staff: network and maintenance (beta)
 
-These belong to the cross-server layer, which is off unless you enable `sync.enabled`. See the Status section of the README.
+These need a Velocity network. See [network/README.md](network/README.md).
 
 | Command | What it does |
 | --- | --- |

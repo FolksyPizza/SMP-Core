@@ -180,7 +180,7 @@ no error was logged anywhere, because dispatching a non-existent command is not 
 ## Maintenance model
 
 Four tiers, gated at the proxy so a player is stopped before they reach a backend that
-cannot serve them. See [`docs/MAINTENANCE-MODEL.md`](docs/MAINTENANCE-MODEL.md).
+cannot serve them. `scripts/backend_maint.sh` plans and runs rolling restarts.
 
 | Tier | Scope | Player experience |
 | --- | --- | --- |

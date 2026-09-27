@@ -12,20 +12,8 @@ libraries:
   - org.mariadb.jdbc:mariadb-java-client:3.5.4
   - com.zaxxer:HikariCP:5.1.0
 commands:
-  # DELIBERATELY UNREGISTERED (2026-08-07) — maintenance moved to CLI (scripts/).
-  #   admin, manage  - the in-game consoles. Removed to bound the blast radius of a
-  #                    LuckPerms permission leak: they put maintenance, world access,
-  #                    economy and feature flags behind one node. Handler code
-  #                    (openManageConsole / openAdmin*) is intentionally LEFT IN PLACE
-  #                    but unreachable; unregistering is the security win, and deleting
-  #                    it would be a large churn pass through a 20k-line class.
-  #   region         - HIDDEN, not removed. It is ~60 call sites (world-access engine,
-  #                    closed_worlds channel, limbo hold), and a Folia-era variant will
-  #                    reuse it. The machinery stays; only the command is gone.
-  #   maintenancemotd- removed. It wrote into kennytv Maintenance's config.yml, which we
-  #                    no longer run. MOTD control now lives in PizzaProxyGuard, driven
-  #                    from the CLI.
-  # See docs/notes/MAINTENANCE-MODEL.md.
+  # admin, manage and region are not registered in public builds; network maintenance runs from
+  # network/scripts/backend_maint.sh. MOTD control lives in PizzaProxyGuard.
   settings:
     usage: /settings
   stats:

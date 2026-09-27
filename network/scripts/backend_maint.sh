@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Rolling backend maintenance — the CLI control surface for the network.
-#
-# This replaces the in-game /admin and /manage consoles. See
-# SMP/docs/notes/MAINTENANCE-MODEL.md for the full model.
+# Rolling backend maintenance: the command-line control surface for the network.
+# network/README.md (Maintenance model) describes the tiers and the readmission gate.
 #
 #   backend_maint.sh plan [backend...]             emit a plan; NO args = ALL backends
 #   backend_maint.sh apply <plan-file>             execute a previously emitted plan
