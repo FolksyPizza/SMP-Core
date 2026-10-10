@@ -111,6 +111,7 @@ Changes since 1.0.0-beta.
   PizzaAdminTools.
 
 ### Fixed
+- PizzaSpawnRules no longer declares Folia support: it schedules through the Bukkit scheduler, which fails on Folia.
 - Server switches no longer race the final save. The server a player is on holds their state row and releases it
   in the same write as the final save; the next server waits for that release (or for the hold to expire after a
   crash) before loading.

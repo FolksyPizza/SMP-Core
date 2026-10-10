@@ -72,7 +72,7 @@ There is no single readiness barrier joining all schema work before every comman
 
 PNC uses scheduler adapters including `runAsyncTask`, `runOnPlayerThread`, `runPlayerTaskLater`, `runRegionTask`, and `runOnMainThread`. On ordinary Paper, player/world changes are generally scheduled through Bukkit's synchronous scheduler. Folia branches use entity, region, global-region, or asynchronous schedulers.
 
-This abstraction is incomplete across the suite. Direct Bukkit scheduler calls remain, some event paths perform synchronous SQL, and some asynchronous tasks access Bukkit objects. A `ConcurrentHashMap` protects map operations, not arbitrary mutable values or player/world API access. The `folia-supported` descriptor field is not proof of complete region-thread safety.
+This abstraction is incomplete across the suite. Direct Bukkit scheduler calls remain, some event paths perform synchronous SQL, and some asynchronous tasks access Bukkit objects. A `ConcurrentHashMap` protects map operations, not arbitrary mutable values or player/world API access. No plugin declares `folia-supported` until it is region-thread safe.
 
 SQL calls also occur synchronously through Vault, placeholder requests, GUI helpers, and maintenance join handling. Database latency can consequently affect interactive server work even where a nearby flow uses asynchronous queries.
 
