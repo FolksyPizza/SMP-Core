@@ -55,6 +55,20 @@ that have no lobby.
 | Who is online where | `session_leases`, heartbeated per backend |
 | Cross-server RTP | `pizzasmp:bridge` handshake; the destination resolves the spot before the player moves |
 
+### Tab list across servers
+
+Each backend only knows its own players, so the network-wide tab list comes from
+[TAB](https://github.com/NEZNAMY/TAB) on the proxy:
+
+1. Put TAB in the proxy's `plugins/` and start the proxy once.
+2. In `plugins/tab/config.yml`, set `global-playerlist.enabled: true` (and
+   `tablist-name-formatting.enabled: true` for rank prefixes).
+3. Copy [`configs/proxy/plugins/TAB/groups.yml`](configs/proxy/plugins/TAB/groups.yml) over TAB's `groups.yml` and
+   restart the proxy.
+
+Backends can keep their own TAB for the above-head nametag. With TAB-Bridge on each backend, the proxy can also show
+PlaceholderAPI values.
+
 ### Register PizzaNetworkCore as the Vault economy provider
 
 This matters more than it looks. EssentialsX Economy stores balances in **per-server YAML**,
@@ -192,6 +206,47 @@ cannot serve them. `scripts/backend_maint.sh` plans and runs rolling restarts.
 A rolling restart refuses to stop a backend whose start script or jar is missing, and will
 not readmit players until the backend has answered on its port, logged `Done (`, settled for
 20 seconds, reported no plugin errors, and held TPS ≥ 18 across three samples.
+
+### Admission control
+
+PizzaProxyGuard decides when a player may enter the gameplay backend. A login (or a switch onto the backend) waits
+while the backend is down or still booting, the database is unreachable, the player's data is still held by the
+server they just left, or `admission.max-concurrent` players (default 3) are already joining. The player is not
+moved anywhere: the login simply takes longer. Checks rerun four times a second and waiting players are admitted in
+arrival order. A login waits at most `admission.login-wait-seconds` (20, capped at 25 to stay inside the client's
+timeout) and then ends on a screen naming the reason; a switch waits up to `admission.switch-wait-seconds` (60) on
+the current server. Settings live in `plugins/pizzaproxyguard/config.properties`.
+
+### Disconnect screens
+
+The proxy's own disconnects (busy, starting up, player data unavailable, maintenance, connection lost) share one
+layout: brand, title, what happened, what to do, and a UTC reference time for matching the logs. Set `screen.brand`,
+`screen.color` and `screen.support` in the same file. Velocity's built-in errors get the same style from
+`configs/proxy/lang/messages-overrides.properties`; merge it with `scripts/apply-proxy-messages.sh <proxy dir>`.
+
+### Canopy Session Gateway
+
+The network runs behind stock Velocity or the [Canopy Session Gateway](https://github.com/folksypizza/canopy), a
+Velocity fork. With `-Dcanopy.seamless=true -Dcanopy.noRespawn=true` a server switch shows neither the
+reconfiguring nor the loading-terrain screen: the client keeps its world, and the new server's chunks and entities
+stream in. PizzaProxyGuard runs unchanged on either proxy.
+
+A switch that skips the configuration phase leaves the client with the first server's registries, so every backend
+must match:
+
+- the same server build and enabled feature packs;
+- the same datapacks: dialogs and their tags are synced registries. Merge the game-menu and limbo packs into one with
+  `scripts/build-network-dialogs.sh` and install it on every backend in place of both (the pause menu then shows
+  the game menu everywhere; the limbo announces maintenance by title, chat and hotbar). Dialogs register at
+  startup, so restart each backend after changing them;
+- the same view and simulation distance.
+
+`scripts/check-backend-parity.sh <server dir>...` compares these and exits non-zero on any difference.
+
+A respawn-free switch is only correct between identical worlds (same world name and dimension type). The gateway
+needs to fall back to a respawn otherwise, and to clear what the previous server created on the client (scoreboard
+objectives and teams, effects, boss bars) and apply what the skipped join packet carried (game mode, view and
+simulation distance).
 
 ## Bedrock
 

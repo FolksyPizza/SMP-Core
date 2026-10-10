@@ -73,10 +73,19 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
     private final ConcurrentMap<UUID, InspectionRequest> inspectionRequests = new ConcurrentHashMap<>();
     private final AtomicLong inspectionTokens = new AtomicLong();
     private Path enderchestFolder;
+    // Database mode (shared by every backend) when a database is configured; null in File mode (.dat files).
+    private dev.pizzasmp.common.SuiteStorage store;
+    private final String instanceId = UUID.randomUUID().toString();
+    // Database mode: the server that loaded a chest holds it until its final save, so another backend cannot read a
+    // stale copy during a fast server switch. The hold is refreshed by autosave and expires if a server dies.
+    private static final long HOLD_MILLIS = 180_000L;
+    private static final long DATABASE_AUTOSAVE_PERIOD_TICKS = 1200L;
     private volatile boolean acceptingInspections = true;
     private volatile boolean acceptingIo = true;
     // Prevents a submission racing disable/re-enable from becoming an orphaned lane head.
     private volatile long ioEpoch;
+    // Set while onDisable runs queued saves inline: a disabling plugin cannot schedule tasks.
+    private volatile boolean drainingIo;
 
     @Override
     public void onEnable() {
@@ -90,6 +99,13 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
             this.getServer().getPluginManager().disablePlugin(this);
             return;
         }
+        dev.pizzasmp.common.SuiteStorage storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "enderchest");
+        if (storage.isMysql()) {
+            this.store = storage;
+            this.getLogger().info("[storage] expanded enderchests: database (shared across servers)");
+        } else {
+            this.getLogger().info("[storage] expanded enderchests: files (plugins/EnderchestExpander/enderchests)");
+        }
         this.getServer().getPluginManager().registerEvents(this, this);
         this.getLogger().info("EnderchestExpander enabled - enderchests now 9x6!");
     }
@@ -97,9 +113,15 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
     @Override
     public void onDisable() {
         this.acceptingInspections = false;
+        // Server shutdown kicks players first, which queues their final saves; run them before stopping the lanes.
+        this.drainIoForShutdown(10_000L);
+        this.saveOpenChestsForShutdown();
         this.acceptingIo = false;
         this.ioEpoch++;
         this.stopIoForShutdown();
+        if (this.store != null) {
+            this.store.close();
+        }
         int activeInspections = this.inspectionRequests.size();
         int queuedIo = this.pendingIoCount();
         int cachedStates = this.chests.size();
@@ -722,9 +744,10 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
         if (state.autosave != null) {
             state.autosave.cancel();
         }
+        long period = this.store != null ? DATABASE_AUTOSAVE_PERIOD_TICKS : AUTOSAVE_PERIOD_TICKS;
         state.autosave = PlatformScheduler.entityRepeating(this, player,
                 () -> this.autosaveOwner(player, uuid, state), () -> { },
-                AUTOSAVE_INITIAL_DELAY_TICKS, AUTOSAVE_PERIOD_TICKS);
+                Math.min(AUTOSAVE_INITIAL_DELAY_TICKS, period), period);
     }
 
     private CompletableFuture<Void> captureOwnerInventory(UUID uuid, ChestState state, Inventory inventory) {
@@ -824,6 +847,14 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
             return;
         }
 
+        if (this.drainingIo) {
+            // onDisable runs the queued work inline; leave it queued.
+            synchronized (lane) {
+                lane.running = false;
+                lane.activeJob = null;
+            }
+            return;
+        }
         IoJob<?> selected = job;
         try {
             ScheduledTask submission = Bukkit.getAsyncScheduler().runNow(this, task -> {
@@ -891,6 +922,77 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
             this.failIoAttempt(uuid, lane, job, attempt,
                     new RejectedExecutionException("An accepted enderchest file operation was cancelled before execution."));
         }
+    }
+
+    /**
+     * Runs every queued enderchest operation inline, after any job already running on the async pool finishes.
+     * Plugin tasks cannot be scheduled while the plugin disables, so without this the saves queued by the shutdown
+     * kicks would be failed and the latest changes lost.
+     */
+    private void drainIoForShutdown(long timeoutMillis) {
+        this.drainingIo = true;
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        int drained = 0;
+        for (IoLane lane : this.ioLanes.values()) {
+            while (System.currentTimeMillis() < deadline) {
+                IoJob<?> next = null;
+                boolean busy;
+                synchronized (lane) {
+                    busy = lane.running;
+                    if (!busy) {
+                        next = lane.jobs.pollFirst();
+                        if (next == null) break;
+                        lane.running = true;
+                        lane.activeJob = next;
+                    }
+                }
+                if (busy) {
+                    try { Thread.sleep(10L); } catch (InterruptedException ex) { Thread.currentThread().interrupt(); return; }
+                    continue;
+                }
+                try {
+                    next.execute();
+                    drained++;
+                } catch (Throwable ex) {
+                    next.fail(ex);
+                } finally {
+                    synchronized (lane) {
+                        lane.running = false;
+                        lane.activeJob = null;
+                        lane.activeTask = null;
+                    }
+                }
+            }
+        }
+        if (drained > 0) this.getLogger().info("Saved " + drained + " queued enderchest operation(s) during shutdown.");
+    }
+
+    /**
+     * Paper disables plugins before it kicks players at shutdown, so no quit save is queued for players still online.
+     * On Paper's main thread their chests can be read directly: write each one, releasing any database hold. Runs
+     * after the drain, so it is the last and newest write for each player.
+     */
+    private void saveOpenChestsForShutdown() {
+        if (!Bukkit.isPrimaryThread()) {
+            this.getLogger().warning("Disabling off the main thread; open enderchests are saved by autosave only.");
+            return;
+        }
+        int saved = 0;
+        for (var entry : this.chests.entrySet()) {
+            ChestState state = entry.getValue();
+            Inventory inventory = state.inventory;
+            if (inventory == null || state.activeLease.get() != null) continue;
+            byte[] bytes = this.serializeContents(inventory.getContents());
+            if (bytes == null) continue;
+            try {
+                if (this.store != null) this.writeChestToDatabase(entry.getKey(), bytes, true);
+                else this.writeChestFile(entry.getKey(), bytes);
+                saved++;
+            } catch (IOException ex) {
+                this.logSaveFailure(ex);
+            }
+        }
+        if (saved > 0) this.getLogger().info("Saved " + saved + " open enderchest(s) during shutdown.");
     }
 
     private void stopIoForShutdown() {
@@ -1008,6 +1110,72 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
     }
 
     private LoadResult readChestContents(UUID uuid) {
+        return this.store != null ? this.readChestFromDatabase(uuid) : this.readChestFile(uuid);
+    }
+
+    /**
+     * Database mode read. Refuses a chest another server still holds; claims the hold otherwise. A player with no
+     * row yet is imported from this server's .dat file, if there is one.
+     */
+    private LoadResult readChestFromDatabase(UUID uuid) {
+        dev.pizzasmp.common.SuiteStorage.PlayerDocResult result = this.store.loadPlayerResult(uuid);
+        if (result.status() == dev.pizzasmp.common.SuiteStorage.PlayerDocStatus.FAILED) {
+            return new LoadResult(null, new IOException("database read failed"));
+        }
+        byte[] data;
+        if (result.status() == dev.pizzasmp.common.SuiteStorage.PlayerDocStatus.MISSING) {
+            LoadResult legacy = this.readChestFile(uuid);
+            if (legacy.error() != null) return legacy;
+            data = legacy.serializedData();
+        } else {
+            org.bukkit.configuration.file.YamlConfiguration doc = result.document();
+            String holder = doc.getString("holder");
+            if (holder != null && !holder.equals(this.instanceId) && doc.getLong("held-until") > System.currentTimeMillis()) {
+                return new LoadResult(null, new IOException("still held by another server"));
+            }
+            try {
+                data = doc.contains("data") ? gunzip(java.util.Base64.getDecoder().decode(doc.getString("data"))) : null;
+            } catch (IOException | IllegalArgumentException ex) {
+                return new LoadResult(null, new IOException("unreadable enderchest row", ex));
+            }
+        }
+        try {
+            this.writeChestToDatabase(uuid, data, false);
+        } catch (IOException ex) {
+            return new LoadResult(null, ex);
+        }
+        return new LoadResult(data, null);
+    }
+
+    /** Database mode write. Keeps the hold while the owner is online here; the final save after quit releases it. */
+    private void writeChestToDatabase(UUID uuid, byte[] serialized, boolean release) throws IOException {
+        org.bukkit.configuration.file.YamlConfiguration doc = new org.bukkit.configuration.file.YamlConfiguration();
+        if (serialized != null) doc.set("data", java.util.Base64.getEncoder().encodeToString(gzip(serialized)));
+        if (!release) {
+            doc.set("holder", this.instanceId);
+            doc.set("held-until", System.currentTimeMillis() + HOLD_MILLIS);
+        }
+        if (!this.store.savePlayerResult(uuid, doc)) {
+            throw new IOException("database write failed");
+        }
+    }
+
+    private static byte[] gzip(byte[] raw) throws IOException {
+        var out = new ByteArrayOutputStream();
+        try (var gz = new GZIPOutputStream(out)) {
+            gz.write(raw);
+        }
+        return out.toByteArray();
+    }
+
+    private static byte[] gunzip(byte[] compressed) throws IOException {
+        try (var in = new GZIPInputStream(new ByteArrayInputStream(compressed)); var out = new ByteArrayOutputStream()) {
+            in.transferTo(out);
+            return out.toByteArray();
+        }
+    }
+
+    private LoadResult readChestFile(UUID uuid) {
         Path file = this.enderchestFolder.resolve(uuid + ".dat");
         if (!Files.isRegularFile(file)) {
             return new LoadResult(null, null);
@@ -1070,6 +1238,16 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
     }
 
     private void writeChestContents(UUID uuid, byte[] serialized) throws IOException {
+        if (this.store != null) {
+            // The quit handler clears onlinePlayer before queuing the final save, which is the release point.
+            ChestState state = this.chests.get(uuid);
+            this.writeChestToDatabase(uuid, serialized, state == null || state.onlinePlayer.get() == null);
+            return;
+        }
+        this.writeChestFile(uuid, serialized);
+    }
+
+    private void writeChestFile(UUID uuid, byte[] serialized) throws IOException {
         Path target = this.enderchestFolder.resolve(uuid + ".dat");
         Path temporary = this.enderchestFolder.resolve(uuid + ".dat.tmp-" + UUID.randomUUID());
         try {

@@ -6,12 +6,14 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 
 | Command | What it does |
 | --- | --- |
-| `/shop` | Open the server shop. |
+| `/shop` | Open the server shop. `/shop reload` reloads the catalogue (staff). |
 | `/sell [all]` | Sell the item in your hand, or your whole inventory with `all`. |
-| `/ah` (`/auction`) | Open the auction house. `/ah <item>` filters to that item. |
-| `/orders` (`/order`) | Open buy orders. `/orders <item>` filters to that item. |
+| `/ah` (`/auction`) | Open the auction house. `/ah <item> [enchantments]` searches, `/ah <player>` shows a seller's listings, `/ah sell <price>` lists the item in your hand. |
+| `/orders` (`/order`) | Open buy orders. `/orders <item>` filters to that item, `/orders <player>` to a player's orders. |
 | `/worth [item]` | Show what an item sells for. |
 | `/sellmulti` | Open the sell multiplier progression. |
+| `/bal [player]` (`/balance`, `/money`) | Show your balance or another player's. |
+| `/shards` | Show your shards. |
 | `/baltop` | Money leaderboard. |
 | `/leaderboard [category]` (`/leaderboards`) | Top players by money, kills, deaths, playtime, and more. |
 | `/bounty [player] [amount]` (`/bounties`) | View or place a bounty. |
@@ -20,16 +22,16 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 
 | Command | What it does |
 | --- | --- |
-| `/home [name]` | Teleport to a home, or open the homes menu. |
+| `/home [name]` | Teleport to a home, or open the homes menu. Names can contain spaces. |
 | `/homes` | Open the homes menu. |
 | `/sethome [name]` | Set a home at your location. |
-| `/delhome [name]` | Delete a home. |
-| `/rtp [east\|nether\|end]` | Random teleport. |
+| `/delhome <name\|number>` | Delete a home (a backup is kept). |
+| `/rtp [east\|nether\|end]` (`/wild`, `/randomtp`) | Random teleport. `/wild` goes to the overworld. |
 | `/rtpq [cancel]` (`/rtpqueue`) | Queue for a gear-matched RTP duel: get teleported to a random spot with a matched opponent. |
 | `/spawn`, `/warp <spawn\|afk>`, `/afk` | Teleport to the spawn hub or the AFK area. |
 | `/tpa <player>` | Ask to teleport to a player. |
 | `/tpahere <player>` | Ask a player to teleport to you. |
-| `/tpaaccept [player]` (`/tpaccept`) | Accept a teleport request. |
+| `/tpaaccept [player]` (`/tpaccept`, `/tpacept`) | Accept a teleport request. |
 | `/tpadeny [player]` (`/tpdeny`) | Deny a teleport request. |
 | `/tpacancel` | Cancel your outgoing request. |
 | `/tpauto` | Toggle auto-accepting teleport requests. |
@@ -38,12 +40,17 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 
 | Command | What it does |
 | --- | --- |
+| `/msg <player> <message>` (`/tell`, `/w`) | Send a private message. |
+| `/reply <message>` (`/r`) | Reply to your last private message. |
 | `/friend [add\|accept\|deny\|remove\|list\|requests]` (`/friends`) | Manage friends, or open the friends menu. |
 | `/follow <player>` | Follow a player. A mutual follow is a friendship. |
 | `/unfollow <player>` | Stop following a player. |
 | `/ignore [player\|list]` (`/block`), `/unignore <player>` (`/unblock`) | Ignore a player: their messages, teleport requests, payments and activity no longer reach you. With no player, lists who you ignore. |
 
 ## Duels
+
+Duels are in preview: playable, but rules and arenas are still changing. In standard duels the loser's items drop
+at the end of the match, and the winner has five minutes to collect them (`/leave` returns early).
 
 | Command | What it does |
 | --- | --- |
@@ -63,6 +70,7 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/perks` | Show the subscription tier perks. |
 | `/nv` (`/nightvision`) | Toggle night vision (same as the settings toggle). |
 | `/kill` | Take your own life. |
+| `/wherepos` (`/coords`) | Show your exact position. |
 
 ## Staff: moderation
 
@@ -97,7 +105,7 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 
 | Command | What it does |
 | --- | --- |
-| `/sus` (`/suspicious`) | Open the anti-cheat review panel. |
+| `/sus` (`/suspicious`), `/sus <player>` | Open the anti-cheat inventory panel or look up a player's retained flags. |
 | `/pizzasusflag <player> <check> <vl>` | Raise a manual anti-cheat flag. |
 | `/diagnostics` | Server diagnostics. |
 | `/txlog [player] [page]` | Economy transaction log. |
@@ -111,13 +119,16 @@ Every command in the suite, grouped by what it is for. Aliases are shown in pare
 | `/viewdistance <n>`, `/vdthrottle [...]` | View distance controls. |
 | `/shards give <player> <amount>` | Grant shards. |
 | `/reset <deaths\|kills\|playtime\|money> <player>` | Reset a player stat. |
-| `/admindelhome <player> <home>` | Delete another player's home. |
+| `/homes <player>` | Open another player's homes, online or offline: left-click teleports, right-click deletes. |
+| `/admindelhome <player> <home>` | Delete another player's home (a backup is kept). |
+| `/ah admin <player>` | View, return or remove a player's auction listings. |
+| `/invsee <player>` | View a player's inventory. |
 | `/pizzaplus <give\|revoke\|check\|extend> ...` | Manage subscription tiers. |
 | `/sfmode` | Toggle staff mode (hide and disable staff commands for yourself). |
 | `/gmcbypass <player>` | Console only. Grant a one-time creative-mode bypass. |
-| `/queuetest` | Force-enqueue yourself to test the join queue. |
-| `/pizzaplugins` | Show the plugin stack. |
 | `/setmoneyboard` | Place the spawn money leaderboard at your location. |
+| `/hubbypass` (`/hubedit`) | Toggle hub edit bypass. |
+| `/sethubspawn`, `/addafkspot`, `/clearafkspots` | Set the hub spawn point or manage AFK spots at your location. |
 | `/nuke [radius]` | Staff-only demolition item. |
 
 ## Staff: network and maintenance (beta)

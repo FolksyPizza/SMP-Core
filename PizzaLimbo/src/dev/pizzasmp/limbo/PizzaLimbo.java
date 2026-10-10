@@ -532,11 +532,28 @@ public final class PizzaLimbo extends JavaPlugin implements Listener {
         }
     }
 
+    private long lastHeartbeatMs;
+
+    /** Tell the SMP this limbo is up (limbo_control.limbo_seen_at); full-stop maintenance refuses to start without it. */
+    private void heartbeat() {
+        long now = System.currentTimeMillis();
+        if (now - lastHeartbeatMs < 5000L) return;
+        lastHeartbeatMs = now;
+        try (Connection c = DriverManager.getConnection(dbUrl, dbUser, dbPass);
+             PreparedStatement ps = c.prepareStatement(
+                 "INSERT INTO limbo_control (id, limbo_seen_at) VALUES (1, NOW()) ON DUPLICATE KEY UPDATE limbo_seen_at=NOW()")) {
+            ps.executeUpdate();
+        } catch (Exception ignored) {
+            // Older schema without the column: the SMP adds it on its next start.
+        }
+    }
+
     private void probeAndMaybeReturn() {
         long generation = lifecycleGeneration.get();
         if (!isActive(generation) || !probeInProgress.compareAndSet(false, true)) return;
         try {
             LimboControlSnapshot control = pollControl(generation);
+            heartbeat();
             boolean up = tcpOpen(probeHost, probePort, 1500);
             if (!isActive(generation)) {
                 probeInProgress.set(false);

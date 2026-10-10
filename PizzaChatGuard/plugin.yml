@@ -1,6 +1,6 @@
 name: PizzaChatGuard
 main: dev.pizzasmp.chat.PizzaChatGuard
-version: 1.0.0-beta
+version: 1.0.0
 authors:
   - FolksyPizza
 api-version: 1.21.6
@@ -27,7 +27,16 @@ commands:
     usage: "/pizzachatguard [reload]"
     aliases:
       - pcg
+  chatguard:
+    description: "Chat filter panel: status, level, word lists and exempt players."
+    usage: "/chatguard"
+    aliases:
+      - cg
+    permission: pizzasmp.chatguard.manage
 permissions:
+  pizzasmp.chatguard.manage:
+    description: "Open the ChatGuard panel and change the filter."
+    default: op
   pizzasmp.chatguard.clearwarnings:
     description: "Clear PizzaChatGuard warnings and reload config."
     default: op

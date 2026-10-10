@@ -40,7 +40,9 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -75,12 +77,17 @@ final class PlayerSyncManager {
     private final int locationTeleportDelayTicks;
     private final boolean debugStateLogging;
     private final boolean debugPendingActions;
+    private final boolean denyLoginWhenDatabaseDown;
+    private final long handoffWaitMillis;
+    private final long retryIntervalTicks;
     private static final int LOBBY_SPAWN_MIN_X = -60;
     private static final int LOBBY_SPAWN_MAX_X = 60;
     private static final int LOBBY_SPAWN_MIN_Z = -60;
     private static final int LOBBY_SPAWN_MAX_Z = 60;
     private final Map<UUID, String> activeLeases = new ConcurrentHashMap<UUID, String>();
     private final Map<UUID, JoinAttempt> joinAttempts = new ConcurrentHashMap<UUID, JoinAttempt>();
+    // Final saves still in flight, so a quick rejoin on this server waits for them before loading.
+    private final Map<UUID, CompletableFuture<Void>> pendingQuitSaves = new ConcurrentHashMap<UUID, CompletableFuture<Void>>();
     // Keep lease writes for one player ordered without making unrelated player writes wait together.
     private final Object[] leaseWriteLocks = new Object[64];
     private volatile boolean driverLoaded;
@@ -114,6 +121,9 @@ final class PlayerSyncManager {
         this.locationTeleportDelayTicks = Math.max(1, cfg.getInt("sync.location.teleport-delay-ticks", 5));
         this.debugStateLogging = cfg.getBoolean("sync.debug.log-join-state", false);
         this.debugPendingActions = cfg.getBoolean("sync.debug.log-pending-actions", false);
+        this.denyLoginWhenDatabaseDown = cfg.getBoolean("sync.failsafe.deny-login-when-database-down", true);
+        this.handoffWaitMillis = 1000L * Math.max(1, cfg.getInt("sync.failsafe.handoff-wait-seconds", 10));
+        this.retryIntervalTicks = 20L * Math.max(1, cfg.getInt("sync.failsafe.retry-interval-seconds", 5));
     }
     void start() {
         if (!this.enabled) {
@@ -121,7 +131,10 @@ final class PlayerSyncManager {
             return;
         }
         this.plugin.getServer().getMessenger().registerOutgoingPluginChannel((Plugin)this.plugin, "BungeeCord");
-        this.runAsync(this::ensureSchema);
+        this.plugin.getServer().getPluginManager().registerEvents(new ArrivalGuard(this), this.plugin);
+        // On enable, before the async startup tasks: H2 (file storage) times out a column migration that races
+        // other connections for its schema lock, and a missing hold column keeps every joining player held.
+        this.ensureSchema();
         this.heartbeatTask = this.runAsyncRepeating(this::heartbeatActiveLeases, this.heartbeatTicks, this.heartbeatTicks);
         this.plugin.getLogger().info("Cross-server sync enabled for server-name=" + this.serverName);
     }
@@ -134,12 +147,32 @@ final class PlayerSyncManager {
             this.heartbeatTask.cancel();
             this.heartbeatTask = null;
         }
+        // The plugin is disabling, so runAsync runs each final save inline.
         for (Player player : Bukkit.getOnlinePlayers()) {
-            this.saveSnapshotAsync(player);
-            String leaseToken = this.activeLeases.get(player.getUniqueId());
-            this.clearLeaseAsync(player.getUniqueId(), leaseToken);
+            JoinAttempt attempt = this.joinAttempts.remove(player.getUniqueId());
+            if (attempt != null) {
+                this.finishSession(attempt, player);
+            }
         }
         this.activeLeases.clear();
+    }
+
+    /**
+     * Refuse a login while the database cannot be reached. Letting the player in would put them on
+     * whatever this server last saved locally, and on a network that is usually stale.
+     */
+    String preLoginDenyReason() {
+        if (!this.enabled || !this.denyLoginWhenDatabaseDown) {
+            return null;
+        }
+        try (Connection connection = this.getConnection()) {
+            if (connection.isValid(3)) {
+                return null;
+            }
+        } catch (SQLException e) {
+            this.plugin.getLogger().warning("[sync] database unreachable at login: " + e.getMessage());
+        }
+        return "Player data is temporarily unavailable. Please try again in a minute.";
     }
 
     void handleJoin(Player player) {
@@ -147,7 +180,6 @@ final class PlayerSyncManager {
             return;
         }
         UUID uuid = player.getUniqueId();
-        String username = player.getName();
         String leaseToken = UUID.randomUUID().toString();
         JoinAttempt attempt = new JoinAttempt(uuid, player, leaseToken);
         JoinAttempt replacedAttempt = this.joinAttempts.put(uuid, attempt);
@@ -156,54 +188,142 @@ final class PlayerSyncManager {
             this.finishJoinApply(replacedAttempt);
             this.clearStaleLease(uuid, replacedAttempt.leaseToken);
         }
+        this.prepareJoin(attempt);
+    }
+
+    /**
+     * Load the player's synced state, holding them until it is safely in hand.
+     *
+     * Two things can make the stored state unusable at join: the database is unreachable, or the
+     * server the player just left has not finished saving them. The row's holder marks the second
+     * case: a server claims the row when it loads a player and releases it in the same write as
+     * the final save. Until the claim succeeds the player is held (ArrivalGuard) and nothing is
+     * saved for them, so a stale local inventory can never overwrite the real one.
+     */
+    private void prepareJoin(JoinAttempt attempt) {
+        String username = attempt.player.getName();
+        UUID uuid = attempt.uuid;
         this.runAsync(() -> {
             boolean callbackScheduled = false;
-            boolean leaseUpserted = false;
             try {
                 if (!this.isCurrentJoinAttempt(attempt)) {
                     return;
                 }
-                LogoutMeta logoutMeta = this.loadLogoutMeta(uuid);
-                if (!this.isCurrentJoinAttempt(attempt)) {
-                    return;
-                }
-                this.upsertPlayerRow(uuid, username);
-                if (!this.isCurrentJoinAttempt(attempt)) {
-                    return;
-                }
-                synchronized (this.leaseWriteLock(uuid)) {
-                    if (!this.isCurrentJoinAttempt(attempt)) {
-                        return;
+                if (!attempt.prepared) {
+                    attempt.logoutMeta = this.loadLogoutMeta(uuid);
+                    this.upsertPlayerRow(uuid, username);
+                    synchronized (this.leaseWriteLock(uuid)) {
+                        if (!this.isCurrentJoinAttempt(attempt)) {
+                            return;
+                        }
+                        this.upsertLease(uuid, attempt.leaseToken);
+                        attempt.leaseUpserted = true;
                     }
-                    this.upsertLease(uuid, leaseToken);
-                    leaseUpserted = true;
+                    attempt.prepared = true;
                 }
+                this.awaitPendingQuitSave(uuid);
                 if (!this.isCurrentJoinAttempt(attempt)) {
                     return;
                 }
-                SyncSnapshot snapshot = this.loadSnapshot(uuid);
-                if (!this.isCurrentJoinAttempt(attempt)) {
+                ClaimResult claim;
+                try {
+                    claim = this.claimAndLoad(uuid);
+                } catch (SQLException e) {
+                    if (attempt.tries++ % 12 == 0) {
+                        this.plugin.getLogger().warning("[sync] could not load " + username + "'s state (" + e.getMessage()
+                            + "); holding them until it loads.");
+                    }
+                    this.notifyHeld(attempt, "Your saved data could not be loaded yet. You are held here until it loads.");
+                    this.retryJoin(attempt);
                     return;
                 }
-                PendingAction pendingAction = this.loadOneTimeAction(uuid);
-                if (!this.isCurrentJoinAttempt(attempt)) {
+                if (!claim.claimed) {
+                    attempt.tries++;
+                    if (System.currentTimeMillis() - attempt.startedAt > 3000L) {
+                        this.notifyHeld(attempt, "Waiting for your last server to save your data...");
+                    }
+                    this.retryJoin(attempt);
                     return;
                 }
-                this.runOnJoinPlayerNow(attempt, () -> this.applyJoinState(attempt, snapshot, pendingAction, logoutMeta));
+                if (claim.snapshot == null) {
+                    // No row yet: create it, held by this server, so a server this player moves to
+                    // waits for our save instead of starting them from its own empty copy.
+                    this.runOnJoinPlayerNow(attempt, () -> {
+                        SyncSnapshot initial = SyncSnapshot.capture(attempt.player, this.serverName, null);
+                        this.runAsync(() -> {
+                            if (this.createRow(uuid, initial)) {
+                                attempt.claimedRow = true;
+                                this.continueJoin(attempt, null);
+                            } else {
+                                this.retryJoin(attempt);
+                            }
+                        });
+                    });
+                    callbackScheduled = true;
+                    return;
+                }
+                attempt.claimedRow = true;
+                this.continueJoin(attempt, claim.snapshot);
                 callbackScheduled = true;
             }
             catch (Exception e) {
                 this.plugin.getLogger().warning("Failed preparing join sync state for " + username + ": " + e.getMessage());
+                this.retryJoin(attempt);
+                callbackScheduled = true;
             }
             finally {
-                if (!callbackScheduled) {
-                    if (leaseUpserted && !this.isCurrentJoinAttempt(attempt)) {
+                if (!callbackScheduled && !this.isCurrentJoinAttempt(attempt)) {
+                    if (attempt.leaseUpserted) {
                         this.clearStaleJoinLease(attempt);
                     }
                     this.finishJoinApply(attempt);
                 }
             }
         });
+    }
+
+    private void continueJoin(JoinAttempt attempt, SyncSnapshot snapshot) {
+        PendingAction pendingAction = this.loadOneTimeAction(attempt.uuid);
+        if (!this.isCurrentJoinAttempt(attempt)) {
+            this.releaseRow(attempt.uuid);
+            this.finishJoinApply(attempt);
+            return;
+        }
+        this.runOnJoinPlayerNow(attempt, () -> this.applyJoinState(attempt, snapshot, pendingAction, attempt.logoutMeta));
+    }
+
+    // Poll quickly while a server switch is settling, then back off.
+    private void retryJoin(JoinAttempt attempt) {
+        if (!this.plugin.isEnabled() || !this.isCurrentJoinAttempt(attempt)) {
+            return;
+        }
+        long elapsed = System.currentTimeMillis() - attempt.startedAt;
+        long delay = elapsed < this.handoffWaitMillis ? 5L : this.retryIntervalTicks;
+        PlatformScheduler.asyncLater(this.plugin, () -> this.prepareJoin(attempt), delay);
+    }
+
+    private void notifyHeld(JoinAttempt attempt, String message) {
+        if (attempt.heldMessage != null && attempt.heldMessage.equals(message)) {
+            return;
+        }
+        attempt.heldMessage = message;
+        this.runOnPlayerLater(attempt.player, () -> {
+            if (attempt.player.isOnline() && !attempt.synced) {
+                attempt.player.sendMessage(net.kyori.adventure.text.Component.text(message, net.kyori.adventure.text.format.NamedTextColor.GRAY));
+            }
+        }, 1L);
+    }
+
+    private void awaitPendingQuitSave(UUID uuid) {
+        CompletableFuture<Void> pending = this.pendingQuitSaves.get(uuid);
+        if (pending == null) {
+            return;
+        }
+        try {
+            pending.get(10L, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            this.plugin.getLogger().warning("[sync] previous save for " + uuid + " did not finish: " + e.getMessage());
+        }
     }
 
     void handleQuit(Player player) {
@@ -216,19 +336,46 @@ final class PlayerSyncManager {
             return;
         }
         this.finishJoinApply(attempt);
-        String leaseToken = attempt.leaseToken;
-        this.activeLeases.remove(uuid, leaseToken);
-        this.saveSnapshotAsync(player);
-        this.saveLogoutMetaAsync(uuid, leaseToken);
-        this.clearLeaseAsync(uuid, leaseToken);
+        this.activeLeases.remove(uuid, attempt.leaseToken);
+        this.finishSession(attempt, player);
+    }
+
+    /**
+     * Final save, in order: the snapshot (releasing the row in the same write), then the logout
+     * record, then the lease. A player who was never synced has nothing trustworthy to save, so only
+     * the row is released.
+     */
+    private void finishSession(JoinAttempt attempt, Player player) {
+        UUID uuid = attempt.uuid;
+        SyncSnapshot snapshot = attempt.synced ? SyncSnapshot.capture(player, this.serverName, null) : null;
+        String username = player.getName();
+        CompletableFuture<Void> done = new CompletableFuture<Void>();
+        this.pendingQuitSaves.put(uuid, done);
+        this.runAsync(() -> {
+            try {
+                if (snapshot != null) {
+                    this.upsertPlayerRow(uuid, username);
+                    for (int i = 0; i < 3 && !this.saveSnapshot(uuid, snapshot, true); i++) {
+                        try { Thread.sleep(500L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                    }
+                } else if (attempt.claimedRow) {
+                    this.releaseRow(uuid);
+                }
+                this.saveLogoutMeta(uuid, attempt.leaseToken);
+                this.clearLease(uuid, attempt.leaseToken);
+            } finally {
+                this.pendingQuitSaves.remove(uuid, done);
+                done.complete(null);
+            }
+        });
     }
 
     void handleGameModeChange(Player player, GameMode newGameMode) {
-        if (!this.enabled || player == null || !player.isOnline()) {
+        if (!this.enabled || player == null || !player.isOnline() || !this.isSynced(player.getUniqueId())) {
             return;
         }
         this.runOnPlayerLater(player, () -> {
-            if (!player.isOnline()) {
+            if (!player.isOnline() || !this.isSynced(player.getUniqueId())) {
                 return;
             }
             this.saveSnapshotAsync(player, newGameMode);
@@ -238,6 +385,17 @@ final class PlayerSyncManager {
     boolean isApplyingJoinState(UUID uuid) {
         JoinAttempt attempt = uuid == null ? null : this.joinAttempts.get(uuid);
         return attempt != null && attempt.applyingState;
+    }
+
+    /** True while the player's synced state is not loaded yet; ArrivalGuard freezes item changes. */
+    boolean isHeld(UUID uuid) {
+        JoinAttempt attempt = uuid == null ? null : this.joinAttempts.get(uuid);
+        return attempt != null && !attempt.synced;
+    }
+
+    private boolean isSynced(UUID uuid) {
+        JoinAttempt attempt = uuid == null ? null : this.joinAttempts.get(uuid);
+        return attempt != null && attempt.synced;
     }
 
     /**
@@ -278,6 +436,9 @@ final class PlayerSyncManager {
     private void applyJoinState(JoinAttempt attempt, SyncSnapshot snapshot, PendingAction pendingAction, LogoutMeta logoutMeta) {
         Player player = attempt.player;
         if (!this.isCurrentJoinAttempt(attempt) || !player.isOnline()) {
+            if (attempt.claimedRow) {
+                this.runAsync(() -> this.releaseRow(attempt.uuid));
+            }
             this.clearStaleJoinLease(attempt);
             this.finishJoinApply(attempt);
             return;
@@ -286,11 +447,27 @@ final class PlayerSyncManager {
         try {
             World world;
             if (snapshot != null) {
-                if (this.shouldReconnectFromLobby(player, snapshot.lastServer, logoutMeta)) {
+                if (!attempt.skipReconnect && this.shouldReconnectFromLobby(player, snapshot.lastServer, logoutMeta)) {
+                    // The player is only passing through: leave their state unapplied and the row free
+                    // for the server they are headed to. If the move fails, load them here instead.
+                    this.runAsync(() -> this.releaseRow(attempt.uuid));
+                    attempt.claimedRow = false;
                     this.runOnJoinPlayerLater(attempt, () -> this.connectToServer(player, snapshot.lastServer), this.reconnectDelayTicks);
+                    this.runOnJoinPlayerLater(attempt, () -> {
+                        attempt.skipReconnect = true;
+                        this.prepareJoin(attempt);
+                    }, this.reconnectDelayTicks + 100L);
                     return;
                 }
-                this.applyInventoryAndState(player, snapshot);
+                try {
+                    this.applyInventoryAndState(player, snapshot);
+                } catch (RuntimeException e) {
+                    // Unreadable stored state (for example a corrupt inventory blob). Keep the player held
+                    // so their local copy never replaces it; staff restore it from a backup.
+                    this.plugin.getLogger().severe("[sync] could not apply " + player.getName() + "'s stored state: " + e);
+                    this.notifyHeld(attempt, "Your saved data could not be applied. Please contact staff.");
+                    return;
+                }
                 this.debugAppliedState(player, "join_apply");
                 // A queued RTP means the player explicitly asked to be moved somewhere random.
                 // Restoring their old position first also raced the RTP (restore is scheduled at
@@ -303,6 +480,7 @@ final class PlayerSyncManager {
                     this.runOnJoinPlayerLater(attempt, () -> player.teleport(location), this.locationTeleportDelayTicks);
                 }
             }
+            this.markSynced(attempt);
             if ("maintenance".equalsIgnoreCase(this.serverName)) {
                 World world2 = world = Bukkit.getWorlds().isEmpty() ? null : (World)Bukkit.getWorlds().getFirst();
                 if (world != null) {
@@ -314,6 +492,13 @@ final class PlayerSyncManager {
         }
         finally {
             this.finishJoinApply(attempt);
+        }
+    }
+
+    private void markSynced(JoinAttempt attempt) {
+        attempt.synced = true;
+        if (attempt.heldMessage != null && attempt.player.isOnline()) {
+            attempt.player.sendMessage(net.kyori.adventure.text.Component.text("Your data has loaded.", net.kyori.adventure.text.format.NamedTextColor.GRAY));
         }
     }
 
@@ -406,7 +591,7 @@ final class PlayerSyncManager {
             // Expiry is computed by the database — see upsertLease for why a Java-side
             // Timestamp here made every queued action arrive already expired.
             String sql = "INSERT INTO player_transfer_actions (uuid, action, expires_at) "
-                       + "VALUES (?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND)) "
+                       + "VALUES (?, ?, TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP)) "
                        + "ON DUPLICATE KEY UPDATE action=VALUES(action), expires_at=VALUES(expires_at)";
             try (Connection connection = this.getConnection();
                  PreparedStatement ps = connection.prepareStatement(sql);){
@@ -466,22 +651,20 @@ final class PlayerSyncManager {
         });
     }
 
-    private void saveLogoutMetaAsync(UUID uuid, String previousLeaseToken) {
-        this.runAsync(() -> {
-            if (this.isLeasedByAnotherServer(uuid, previousLeaseToken)) {
-                return;
-            }
-            String sql = "INSERT INTO player_logout_meta (uuid, last_logout_server, last_logout_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE last_logout_server=VALUES(last_logout_server), last_logout_at=CURRENT_TIMESTAMP";
-            try (Connection connection = this.getConnection();
-                 PreparedStatement ps = connection.prepareStatement(sql);){
-                ps.setString(1, uuid.toString());
-                ps.setString(2, this.serverName);
-                ps.executeUpdate();
-            }
-            catch (SQLException e) {
-                this.plugin.getLogger().warning("Failed saving logout meta for " + String.valueOf(uuid) + ": " + e.getMessage());
-            }
-        });
+    private void saveLogoutMeta(UUID uuid, String previousLeaseToken) {
+        if (this.isLeasedByAnotherServer(uuid, previousLeaseToken)) {
+            return;
+        }
+        String sql = "INSERT INTO player_logout_meta (uuid, last_logout_server, last_logout_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE last_logout_server=VALUES(last_logout_server), last_logout_at=CURRENT_TIMESTAMP";
+        try (Connection connection = this.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql);){
+            ps.setString(1, uuid.toString());
+            ps.setString(2, this.serverName);
+            ps.executeUpdate();
+        }
+        catch (SQLException e) {
+            this.plugin.getLogger().warning("Failed saving logout meta for " + String.valueOf(uuid) + ": " + e.getMessage());
+        }
     }
 
     private boolean isLeasedByAnotherServer(UUID uuid, String previousLeaseToken) {
@@ -588,12 +771,12 @@ final class PlayerSyncManager {
         SyncSnapshot snapshot = SyncSnapshot.capture(player, this.serverName, forcedGameMode);
         this.runAsync(() -> {
             this.upsertPlayerRow(uuid, username);
-            this.saveSnapshot(uuid, snapshot);
+            this.saveSnapshot(uuid, snapshot, false);
         });
     }
 
     private void ensureSchema() {
-        String sql = "CREATE TABLE IF NOT EXISTS player_sync_state (uuid CHAR(36) PRIMARY KEY,last_server VARCHAR(32) NOT NULL,world_name VARCHAR(64) NULL,x DOUBLE NULL,y DOUBLE NULL,z DOUBLE NULL,yaw FLOAT NULL,pitch FLOAT NULL,game_mode VARCHAR(16) NOT NULL DEFAULT 'SURVIVAL',inventory_blob LONGBLOB NOT NULL,enderchest_blob LONGBLOB NOT NULL,stats_blob LONGBLOB NULL,health DOUBLE NOT NULL DEFAULT 20,food_level INT NOT NULL DEFAULT 20,saturation FLOAT NOT NULL DEFAULT 20,exhaustion FLOAT NOT NULL DEFAULT 0,exp FLOAT NOT NULL DEFAULT 0,level INT NOT NULL DEFAULT 0,total_experience INT NOT NULL DEFAULT 0,allow_flight TINYINT(1) NOT NULL DEFAULT 0,is_flying TINYINT(1) NOT NULL DEFAULT 0,fly_speed FLOAT NOT NULL DEFAULT 0.1,walk_speed FLOAT NOT NULL DEFAULT 0.2,fire_ticks INT NOT NULL DEFAULT 0,remaining_air INT NOT NULL DEFAULT 300,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)";
+        String sql = "CREATE TABLE IF NOT EXISTS player_sync_state (uuid CHAR(36) PRIMARY KEY,last_server VARCHAR(32) NOT NULL,world_name VARCHAR(64) NULL,x DOUBLE NULL,y DOUBLE NULL,z DOUBLE NULL,yaw FLOAT NULL,pitch FLOAT NULL,game_mode VARCHAR(16) NOT NULL DEFAULT 'SURVIVAL',inventory_blob LONGBLOB NOT NULL,enderchest_blob LONGBLOB NOT NULL,stats_blob LONGBLOB NULL,health DOUBLE NOT NULL DEFAULT 20,food_level INT NOT NULL DEFAULT 20,saturation FLOAT NOT NULL DEFAULT 20,exhaustion FLOAT NOT NULL DEFAULT 0,exp FLOAT NOT NULL DEFAULT 0,level INT NOT NULL DEFAULT 0,total_experience INT NOT NULL DEFAULT 0,allow_flight TINYINT(1) NOT NULL DEFAULT 0,is_flying TINYINT(1) NOT NULL DEFAULT 0,fly_speed FLOAT NOT NULL DEFAULT 0.1,walk_speed FLOAT NOT NULL DEFAULT 0.2,fire_ticks INT NOT NULL DEFAULT 0,remaining_air INT NOT NULL DEFAULT 300,holder_server VARCHAR(32) NULL,held_until TIMESTAMP NULL DEFAULT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)";
         String actionSql = "CREATE TABLE IF NOT EXISTS player_transfer_actions (uuid CHAR(36) PRIMARY KEY,action VARCHAR(255) NOT NULL,expires_at TIMESTAMP NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)";
         String logoutSql = "CREATE TABLE IF NOT EXISTS player_logout_meta (uuid CHAR(36) PRIMARY KEY,last_logout_server VARCHAR(32) NOT NULL,last_logout_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)";
         try (Connection connection = this.getConnection();
@@ -619,17 +802,13 @@ final class PlayerSyncManager {
         this.ensureColumnExists(connection, "is_flying", "ALTER TABLE player_sync_state ADD COLUMN is_flying TINYINT(1) NOT NULL DEFAULT 0");
         this.ensureColumnExists(connection, "fly_speed", "ALTER TABLE player_sync_state ADD COLUMN fly_speed FLOAT NOT NULL DEFAULT 0.1");
         this.ensureColumnExists(connection, "walk_speed", "ALTER TABLE player_sync_state ADD COLUMN walk_speed FLOAT NOT NULL DEFAULT 0.2");
+        this.ensureColumnExists(connection, "holder_server", "ALTER TABLE player_sync_state ADD COLUMN holder_server VARCHAR(32) NULL");
+        this.ensureColumnExists(connection, "held_until", "ALTER TABLE player_sync_state ADD COLUMN held_until TIMESTAMP NULL DEFAULT NULL");
     }
 
     private void ensureColumnExists(Connection connection, String columnName, String alterSql) throws SQLException {
-        String checkSql = "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'player_sync_state' AND COLUMN_NAME = ? LIMIT 1";
-        try (PreparedStatement check = connection.prepareStatement(checkSql);){
-            check.setString(1, columnName);
-            try (ResultSet rs = check.executeQuery();){
-                if (rs.next()) {
-                    return;
-                }
-            }
+        if (PizzaNetworkCore.columnExists(connection, "player_sync_state", columnName)) {
+            return;
         }
         try (PreparedStatement alter = connection.prepareStatement(alterSql);){
             alter.executeUpdate();
@@ -637,15 +816,12 @@ final class PlayerSyncManager {
     }
 
     private void ensureTransferActionColumnLength(Connection connection) throws SQLException {
-        block18: {
-            String checkSql = "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'player_transfer_actions' AND COLUMN_NAME = 'action' LIMIT 1";
-            try (PreparedStatement check = connection.prepareStatement(checkSql);
-                 ResultSet rs = check.executeQuery();){
-                if (!rs.next() || rs.getInt(1) >= 255) break block18;
-                try (PreparedStatement alter = connection.prepareStatement("ALTER TABLE player_transfer_actions MODIFY action VARCHAR(255) NOT NULL");){
-                    alter.executeUpdate();
-                }
-            }
+        int size = PizzaNetworkCore.columnSize(connection, "player_transfer_actions", "action");
+        if (size < 0 || size >= 255) {
+            return;
+        }
+        try (PreparedStatement alter = connection.prepareStatement("ALTER TABLE player_transfer_actions MODIFY action VARCHAR(255) NOT NULL");){
+            alter.executeUpdate();
         }
     }
 
@@ -678,7 +854,7 @@ final class PlayerSyncManager {
      */
     private void upsertLease(UUID uuid, String leaseToken) {
         String sql = "INSERT INTO session_leases (uuid, lease_token, server_name, expires_at, heartbeat_at) "
-                   + "VALUES (?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND), CURRENT_TIMESTAMP) "
+                   + "VALUES (?, ?, ?, TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP) "
                    + "ON DUPLICATE KEY UPDATE lease_token=VALUES(lease_token), server_name=VALUES(server_name), "
                    + "expires_at=VALUES(expires_at), heartbeat_at=VALUES(heartbeat_at)";
         try (Connection connection = this.getConnection();
@@ -709,6 +885,9 @@ final class PlayerSyncManager {
                     this.clearStaleLease(uuid, leaseToken);
                 }
             }
+            if (this.isSynced(uuid)) {
+                this.extendHold(uuid);
+            }
         }
     }
 
@@ -717,23 +896,25 @@ final class PlayerSyncManager {
     }
 
     private void clearLeaseAsync(UUID uuid, String leaseToken) {
-        this.runAsync(() -> {
-            String sql = leaseToken == null || leaseToken.isBlank() ? "DELETE FROM session_leases WHERE uuid = ? AND server_name = ?" : "DELETE FROM session_leases WHERE uuid = ? AND lease_token = ? AND server_name = ?";
-            try (Connection connection = this.getConnection();
-                 PreparedStatement ps = connection.prepareStatement(sql);){
-                ps.setString(1, uuid.toString());
-                if (leaseToken == null || leaseToken.isBlank()) {
-                    ps.setString(2, this.serverName);
-                } else {
-                    ps.setString(2, leaseToken);
-                    ps.setString(3, this.serverName);
-                }
-                ps.executeUpdate();
+        this.runAsync(() -> this.clearLease(uuid, leaseToken));
+    }
+
+    private void clearLease(UUID uuid, String leaseToken) {
+        String sql = leaseToken == null || leaseToken.isBlank() ? "DELETE FROM session_leases WHERE uuid = ? AND server_name = ?" : "DELETE FROM session_leases WHERE uuid = ? AND lease_token = ? AND server_name = ?";
+        try (Connection connection = this.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql);){
+            ps.setString(1, uuid.toString());
+            if (leaseToken == null || leaseToken.isBlank()) {
+                ps.setString(2, this.serverName);
+            } else {
+                ps.setString(2, leaseToken);
+                ps.setString(3, this.serverName);
             }
-            catch (SQLException e) {
-                this.plugin.getLogger().warning("Failed clearing session lease for " + String.valueOf(uuid) + ": " + e.getMessage());
-            }
-        });
+            ps.executeUpdate();
+        }
+        catch (SQLException e) {
+            this.plugin.getLogger().warning("Failed clearing session lease for " + String.valueOf(uuid) + ": " + e.getMessage());
+        }
     }
 
     private void runAsync(Runnable task) {
@@ -795,68 +976,175 @@ final class PlayerSyncManager {
         PlatformScheduler.entityLater(this.plugin, player, task, null, delayTicks);
     }
 
-    private void saveSnapshot(UUID uuid, SyncSnapshot snapshot) {
-        String sql = "INSERT INTO player_sync_state (uuid, last_server, world_name, x, y, z, yaw, pitch, game_mode, inventory_blob, enderchest_blob, stats_blob, health, food_level, saturation, exhaustion, exp, level, total_experience, allow_flight, is_flying, fly_speed, walk_speed, fire_ticks, remaining_air) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE last_server=VALUES(last_server), world_name=VALUES(world_name), x=VALUES(x), y=VALUES(y), z=VALUES(z), yaw=VALUES(yaw), pitch=VALUES(pitch), game_mode=VALUES(game_mode), inventory_blob=VALUES(inventory_blob), enderchest_blob=VALUES(enderchest_blob), stats_blob=VALUES(stats_blob), health=VALUES(health), food_level=VALUES(food_level), saturation=VALUES(saturation), exhaustion=VALUES(exhaustion), exp=VALUES(exp), level=VALUES(level), total_experience=VALUES(total_experience), allow_flight=VALUES(allow_flight), is_flying=VALUES(is_flying), fly_speed=VALUES(fly_speed), walk_speed=VALUES(walk_speed), fire_ticks=VALUES(fire_ticks), remaining_air=VALUES(remaining_air)";
-        try (Connection connection = this.getConnection();
-             PreparedStatement ps = connection.prepareStatement(sql);){
-            ps.setString(1, uuid.toString());
-            ps.setString(2, snapshot.lastServer);
-            ps.setString(3, snapshot.worldName);
-            if (snapshot.worldName == null) {
-                ps.setNull(4, 8);
-                ps.setNull(5, 8);
-                ps.setNull(6, 8);
-                ps.setNull(7, 6);
-                ps.setNull(8, 6);
-            } else {
-                ps.setDouble(4, snapshot.x);
-                ps.setDouble(5, snapshot.y);
-                ps.setDouble(6, snapshot.z);
-                ps.setFloat(7, snapshot.yaw);
-                ps.setFloat(8, snapshot.pitch);
+    private static final String SNAPSHOT_COLUMNS = "last_server, world_name, x, y, z, yaw, pitch, game_mode, inventory_blob, "
+        + "enderchest_blob, stats_blob, health, food_level, saturation, exhaustion, exp, level, total_experience, allow_flight, "
+        + "is_flying, fly_speed, walk_speed, fire_ticks, remaining_air";
+    // The row is ours to write when no live server holds it, or when we do.
+    private static final String CLAIMABLE = "(holder_server IS NULL OR holder_server=? OR held_until IS NULL OR held_until <= CURRENT_TIMESTAMP)";
+
+    /**
+     * Write a snapshot only while this server holds the row (or nobody does). Release clears the hold
+     * in the same statement, so the next server can never read the row between save and release.
+     * Returns false when the write failed or another server now holds the row.
+     */
+    private boolean saveSnapshot(UUID uuid, SyncSnapshot snapshot, boolean release) {
+        String assignments = java.util.Arrays.stream(SNAPSHOT_COLUMNS.split(", ")).map(c -> c + "=?")
+            .collect(java.util.stream.Collectors.joining(", "));
+        String hold = release ? "holder_server=NULL, held_until=NULL" : "holder_server=?, held_until=TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP)";
+        String update = "UPDATE player_sync_state SET " + assignments + ", " + hold + " WHERE uuid=? AND " + CLAIMABLE;
+        String insert = "INSERT INTO player_sync_state (uuid, " + SNAPSHOT_COLUMNS + ", holder_server, held_until) VALUES (?, "
+            + "?, ".repeat(24) + (release ? "NULL, NULL)" : "?, TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP))");
+        try (Connection connection = this.getConnection()) {
+            try (PreparedStatement ps = connection.prepareStatement(update)) {
+                int i = this.bindSnapshot(ps, 1, snapshot);
+                if (!release) {
+                    ps.setString(i++, this.serverName);
+                    ps.setLong(i++, this.leaseSeconds);
+                }
+                ps.setString(i++, uuid.toString());
+                ps.setString(i, this.serverName);
+                if (ps.executeUpdate() > 0) {
+                    return true;
+                }
             }
-            ps.setString(9, snapshot.gameMode);
-            ps.setBytes(10, snapshot.inventoryBlob);
-            ps.setBytes(11, snapshot.enderChestBlob);
-            ps.setBytes(12, snapshot.statsBlob);
-            ps.setDouble(13, snapshot.health);
-            ps.setInt(14, snapshot.foodLevel);
-            ps.setFloat(15, snapshot.saturation);
-            ps.setFloat(16, snapshot.exhaustion);
-            ps.setFloat(17, snapshot.exp);
-            ps.setInt(18, snapshot.level);
-            ps.setInt(19, snapshot.totalExperience);
-            ps.setBoolean(20, snapshot.allowFlight);
-            ps.setBoolean(21, snapshot.isFlying);
-            ps.setFloat(22, snapshot.flySpeed);
-            ps.setFloat(23, snapshot.walkSpeed);
-            ps.setInt(24, snapshot.fireTicks);
-            ps.setInt(25, snapshot.remainingAir);
-            ps.executeUpdate();
+            if (this.rowExists(connection, uuid)) {
+                this.plugin.getLogger().warning("[sync] not saving " + uuid + ": another server holds their state");
+                return true;   // not retryable: the newer state belongs to the other server
+            }
+            try (PreparedStatement ps = connection.prepareStatement(insert)) {
+                ps.setString(1, uuid.toString());
+                int i = this.bindSnapshot(ps, 2, snapshot);
+                if (!release) {
+                    ps.setString(i++, this.serverName);
+                    ps.setLong(i, this.leaseSeconds);
+                }
+                ps.executeUpdate();
+                return true;
+            }
+        }
+        catch (java.sql.SQLIntegrityConstraintViolationException e) {
+            this.plugin.getLogger().warning("[sync] not saving " + uuid + ": another server created their state first");
+            return true;
         }
         catch (SQLException e) {
             this.plugin.getLogger().warning("Failed saving sync snapshot for " + String.valueOf(uuid) + ": " + e.getMessage());
+            return false;
         }
     }
 
-    private SyncSnapshot loadSnapshot(UUID uuid) {
-        if (uuid == null) {
-            return null;
+    private int bindSnapshot(PreparedStatement ps, int i, SyncSnapshot snapshot) throws SQLException {
+        ps.setString(i++, snapshot.lastServer);
+        ps.setString(i++, snapshot.worldName);
+        if (snapshot.worldName == null) {
+            ps.setNull(i++, java.sql.Types.DOUBLE);
+            ps.setNull(i++, java.sql.Types.DOUBLE);
+            ps.setNull(i++, java.sql.Types.DOUBLE);
+            ps.setNull(i++, java.sql.Types.REAL);
+            ps.setNull(i++, java.sql.Types.REAL);
+        } else {
+            ps.setDouble(i++, snapshot.x);
+            ps.setDouble(i++, snapshot.y);
+            ps.setDouble(i++, snapshot.z);
+            ps.setFloat(i++, snapshot.yaw);
+            ps.setFloat(i++, snapshot.pitch);
         }
-        String sql = "SELECT * FROM player_sync_state WHERE uuid=? LIMIT 1";
-        try (Connection connection = this.getConnection();
-             PreparedStatement ps = connection.prepareStatement(sql);){
+        ps.setString(i++, snapshot.gameMode);
+        ps.setBytes(i++, snapshot.inventoryBlob);
+        ps.setBytes(i++, snapshot.enderChestBlob);
+        ps.setBytes(i++, snapshot.statsBlob);
+        ps.setDouble(i++, snapshot.health);
+        ps.setInt(i++, snapshot.foodLevel);
+        ps.setFloat(i++, snapshot.saturation);
+        ps.setFloat(i++, snapshot.exhaustion);
+        ps.setFloat(i++, snapshot.exp);
+        ps.setInt(i++, snapshot.level);
+        ps.setInt(i++, snapshot.totalExperience);
+        ps.setBoolean(i++, snapshot.allowFlight);
+        ps.setBoolean(i++, snapshot.isFlying);
+        ps.setFloat(i++, snapshot.flySpeed);
+        ps.setFloat(i++, snapshot.walkSpeed);
+        ps.setInt(i++, snapshot.fireTicks);
+        ps.setInt(i++, snapshot.remainingAir);
+        return i;
+    }
+
+    private boolean rowExists(Connection connection, UUID uuid) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement("SELECT 1 FROM player_sync_state WHERE uuid=?")) {
             ps.setString(1, uuid.toString());
-            try (ResultSet rs = ps.executeQuery();){
-                if (!rs.next()) {
-                    return null;
-                }
-                return SyncSnapshot.fromResultSet(rs);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
             }
         }
+    }
+
+    /**
+     * Claim the player's row for this server and read it. Throws when the database cannot be read;
+     * reports not-claimed while another live server still holds the row. A player with no row yet
+     * has nothing to wait for.
+     */
+    private ClaimResult claimAndLoad(UUID uuid) throws SQLException {
+        String claim = "UPDATE player_sync_state SET holder_server=?, held_until=TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP) "
+            + "WHERE uuid=? AND " + CLAIMABLE;
+        try (Connection connection = this.getConnection()) {
+            int claimed;
+            try (PreparedStatement ps = connection.prepareStatement(claim)) {
+                ps.setString(1, this.serverName);
+                ps.setLong(2, this.leaseSeconds);
+                ps.setString(3, uuid.toString());
+                ps.setString(4, this.serverName);
+                claimed = ps.executeUpdate();
+            }
+            try (PreparedStatement ps = connection.prepareStatement("SELECT * FROM player_sync_state WHERE uuid=? LIMIT 1")) {
+                ps.setString(1, uuid.toString());
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        return new ClaimResult(true, null);
+                    }
+                    return claimed > 0 ? new ClaimResult(true, SyncSnapshot.fromResultSet(rs)) : new ClaimResult(false, null);
+                }
+            }
+        }
+    }
+
+    /** Insert the first row for a player, held by this server. False if another server created it first. */
+    private boolean createRow(UUID uuid, SyncSnapshot snapshot) {
+        String insert = "INSERT INTO player_sync_state (uuid, " + SNAPSHOT_COLUMNS + ", holder_server, held_until) VALUES (?, "
+            + "?, ".repeat(24) + "?, TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP))";
+        try (Connection connection = this.getConnection();
+             PreparedStatement ps = connection.prepareStatement(insert)) {
+            ps.setString(1, uuid.toString());
+            int i = this.bindSnapshot(ps, 2, snapshot);
+            ps.setString(i++, this.serverName);
+            ps.setLong(i, this.leaseSeconds);
+            ps.executeUpdate();
+            return true;
+        }
         catch (SQLException e) {
-            this.plugin.getLogger().warning("Failed loading sync snapshot for " + String.valueOf(uuid) + ": " + e.getMessage());
-            return null;
+            if (!(e instanceof java.sql.SQLIntegrityConstraintViolationException)) {
+                this.plugin.getLogger().warning("[sync] could not create the state row for " + uuid + ": " + e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    private void releaseRow(UUID uuid) {
+        this.updateHold(uuid, "UPDATE player_sync_state SET holder_server=NULL, held_until=NULL WHERE uuid=? AND holder_server=?");
+    }
+
+    private void extendHold(UUID uuid) {
+        this.updateHold(uuid, "UPDATE player_sync_state SET held_until=TIMESTAMPADD(SECOND, " + this.leaseSeconds
+            + ", CURRENT_TIMESTAMP) WHERE uuid=? AND holder_server=?");
+    }
+
+    private void updateHold(UUID uuid, String sql) {
+        try (Connection connection = this.getConnection();
+             PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, this.serverName);
+            ps.executeUpdate();
+        }
+        catch (SQLException e) {
+            this.plugin.getLogger().warning("[sync] failed updating the hold on " + uuid + ": " + e.getMessage());
         }
     }
 
@@ -1171,12 +1459,32 @@ final class PlayerSyncManager {
         private final UUID uuid;
         private final Player player;
         private final String leaseToken;
+        private final long startedAt = System.currentTimeMillis();
         private volatile boolean applyingState = true;
+        // Set once the synced state is applied; until then the player is held and never saved.
+        private volatile boolean synced;
+        private volatile boolean claimedRow;
+        private volatile boolean skipReconnect;
+        private volatile boolean prepared;
+        private volatile boolean leaseUpserted;
+        private volatile String heldMessage;
+        private volatile LogoutMeta logoutMeta;
+        private int tries;
 
         private JoinAttempt(UUID uuid, Player player, String leaseToken) {
             this.uuid = uuid;
             this.player = player;
             this.leaseToken = leaseToken;
+        }
+    }
+
+    private static final class ClaimResult {
+        private final boolean claimed;
+        private final SyncSnapshot snapshot;
+
+        private ClaimResult(boolean claimed, SyncSnapshot snapshot) {
+            this.claimed = claimed;
+            this.snapshot = snapshot;
         }
     }
 

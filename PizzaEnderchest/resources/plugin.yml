@@ -1,6 +1,10 @@
 name: EnderchestExpander
-version: 1.0.0-beta
+version: 1.0.0
 main: dev.pizzasmp.plugins.EnderchestExpander
 api-version: '1.21'
 authors: [FolksyPizza]
 description: Expands enderchests from 9x3 (27 slots) to 9x6 (54 slots) with persistent storage
+# Database mode (shared across servers) uses these; File mode needs neither.
+libraries:
+  - org.mariadb.jdbc:mariadb-java-client:3.5.4
+  - com.zaxxer:HikariCP:5.1.0

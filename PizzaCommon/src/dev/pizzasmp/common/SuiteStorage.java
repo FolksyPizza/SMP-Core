@@ -27,16 +27,19 @@ import java.util.UUID;
 
 /**
  * Unified, backend-agnostic persistence for the SMP-Core suite. Each plugin creates ONE instance
- * with a namespace ("admintools", "chatguard", ...). Two storage backends, chosen by config:
+ * with a namespace ("admintools", "chatguard", ...). Two storage backends, Database and File:
  *
  *   storage:
- *     backend: yaml         # or 'mysql'
- *     database:             # only read when backend: mysql
+ *     backend: auto         # auto (default), mysql or yaml
+ *     database:             # optional; auto falls back to PizzaNetworkCore's sync.database
  *       host: 127.0.0.1
  *       port: 3306
  *       name: pizzasmp
  *       user: pizzasmp
  *       password: ""
+ *
+ * auto uses the database when one is configured and reachable, and files otherwise. With no database block of
+ * its own, a plugin shares PizzaNetworkCore's connection settings, so one database serves the whole suite.
  *
  * The data MODEL stays YAML everywhere — plugins keep working with YamlConfiguration objects. In
  * mysql mode the serialized YAML text is just stored as a row instead of a file, so wiring an
@@ -71,12 +74,18 @@ public final class SuiteStorage {
     private final File yamlDir;         // yaml mode: base data folder
     private final File playerDir;       // yaml mode: per-player subfolder
     private final HikariDataSource ds;  // mysql mode only
+    private final boolean ownsPool;     // false for namespace views, which share their parent's pool
 
     private SuiteStorage(Plugin plugin, String ns, boolean mysql, HikariDataSource ds) {
+        this(plugin, ns, mysql, ds, true);
+    }
+
+    private SuiteStorage(Plugin plugin, String ns, boolean mysql, HikariDataSource ds, boolean ownsPool) {
         this.plugin = plugin;
         this.ns = ns;
         this.mysql = mysql;
         this.ds = ds;
+        this.ownsPool = ownsPool;
         this.yamlDir = plugin.getDataFolder();
         this.playerDir = new File(this.yamlDir, "data");
         if (!mysql && !this.playerDir.isDirectory()) this.playerDir.mkdirs();
@@ -85,13 +94,20 @@ public final class SuiteStorage {
     /** Build from the plugin's config `storage:` section. Falls back to yaml on any DB error. */
     public static SuiteStorage fromConfig(Plugin plugin, String namespace) {
         org.bukkit.configuration.ConfigurationSection cfg = plugin.getConfig().getConfigurationSection("storage");
-        String backend = cfg != null ? cfg.getString("backend", "yaml") : "yaml";
-        if (!"mysql".equalsIgnoreCase(backend)) {
-            plugin.getLogger().info("[storage] namespace '" + namespace + "' -> YAML (files)");
+        String backend = cfg != null ? cfg.getString("backend", "auto") : "auto";
+        if ("yaml".equalsIgnoreCase(backend) || "file".equalsIgnoreCase(backend)) {
+            plugin.getLogger().info("[storage] namespace '" + namespace + "' -> files");
+            return new SuiteStorage(plugin, namespace, false, null);
+        }
+        boolean explicit = "mysql".equalsIgnoreCase(backend) || "database".equalsIgnoreCase(backend);
+        org.bukkit.configuration.ConfigurationSection db = cfg != null ? cfg.getConfigurationSection("database") : null;
+        if (db == null) db = networkDatabaseSettings(plugin);
+        if (db == null) {
+            if (explicit) plugin.getLogger().warning("[storage] backend mysql but no database settings; using files for '" + namespace + "'.");
+            else plugin.getLogger().info("[storage] namespace '" + namespace + "' -> files (no database configured)");
             return new SuiteStorage(plugin, namespace, false, null);
         }
         try {
-            org.bukkit.configuration.ConfigurationSection db = cfg.getConfigurationSection("database");
             String host = db.getString("host", "127.0.0.1");
             int port = db.getInt("port", 3306);
             String name = db.getString("name", "pizzasmp");
@@ -112,22 +128,43 @@ public final class SuiteStorage {
             hc.setMinimumIdle(db.getInt("pool.min", 1));
             hc.setMaxLifetime(db.getLong("pool.max-lifetime-ms", 1_800_000L));
             hc.setPoolName("PizzaCommon-" + namespace);
-            hc.setConnectionTimeout(10_000L);
+            // Short: storage calls are synchronous, so an outage should fail fast rather than stall the caller.
+            hc.setConnectionTimeout(3_000L);
             HikariDataSource ds = new HikariDataSource(hc);
             SuiteStorage st = new SuiteStorage(plugin, namespace, true, ds);
             st.ensureSchema();
-            plugin.getLogger().info("[storage] namespace '" + namespace + "' -> MySQL");
+            plugin.getLogger().info("[storage] namespace '" + namespace + "' -> database");
             return st;
         } catch (Throwable t) {
-            plugin.getLogger().warning("[storage] MySQL init failed for '" + namespace
-                + "' (cause=" + t.getClass().getSimpleName() + "); falling back to YAML.");
+            plugin.getLogger().warning("[storage] database init failed for '" + namespace
+                + "' (cause=" + t.getClass().getSimpleName() + "); using files.");
             return new SuiteStorage(plugin, namespace, false, null);
         }
     }
 
+    /**
+     * PizzaNetworkCore's database block (sync.database), when it is configured with real credentials. Lets every suite
+     * plugin share the network database without repeating the settings.
+     */
+    private static org.bukkit.configuration.ConfigurationSection networkDatabaseSettings(Plugin plugin) {
+        File pnc = new File(plugin.getDataFolder().getParentFile(), "PizzaNetworkCore/config.yml");
+        if (!pnc.isFile()) return null;
+        YamlConfiguration y = YamlConfiguration.loadConfiguration(pnc);
+        org.bukkit.configuration.ConfigurationSection db = y.getConfigurationSection("sync.database");
+        if (db == null) return null;
+        String pass = db.getString("password", "");
+        if (pass == null || pass.isBlank() || "CHANGE_ME".equals(pass)) return null;
+        return db;
+    }
+
     public boolean isMysql() { return this.mysql; }
 
-    public void close() { if (this.ds != null && !this.ds.isClosed()) this.ds.close(); }
+    public void close() { if (this.ownsPool && this.ds != null && !this.ds.isClosed()) this.ds.close(); }
+
+    /** The same backend under another namespace, sharing this instance's connection pool. */
+    public SuiteStorage withNamespace(String namespace) {
+        return new SuiteStorage(this.plugin, namespace, this.mysql, this.ds, false);
+    }
 
     private void ensureSchema() throws Exception {
         try (Connection c = this.ds.getConnection(); Statement st = c.createStatement()) {
@@ -247,6 +284,60 @@ public final class SuiteStorage {
 
     // ---- per-player documents (homes-style) ----
 
+    public enum PlayerDocStatus { LOADED, MISSING, FAILED }
+
+    public record PlayerDocResult(PlayerDocStatus status, YamlConfiguration document) {}
+
+    /**
+     * Loads a player document and says whether it was found, absent, or unreadable. Callers that write back must stop
+     * on FAILED: treating an unreadable document as empty and saving it would erase the stored data.
+     */
+    public PlayerDocResult loadPlayerResult(UUID uuid) {
+        if (!this.mysql) {
+            File f = new File(this.playerDir, uuid + ".yml");
+            if (!f.isFile()) return new PlayerDocResult(PlayerDocStatus.MISSING, new YamlConfiguration());
+            try {
+                YamlConfiguration y = new YamlConfiguration();
+                y.load(f);
+                return new PlayerDocResult(PlayerDocStatus.LOADED, y);
+            } catch (Exception ex) {
+                return new PlayerDocResult(PlayerDocStatus.FAILED, new YamlConfiguration());
+            }
+        }
+        try (Connection c = this.ds.getConnection();
+             PreparedStatement ps = c.prepareStatement("SELECT data FROM suite_player WHERE namespace=? AND uuid=?")) {
+            ps.setString(1, this.ns); ps.setString(2, uuid.toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return new PlayerDocResult(PlayerDocStatus.MISSING, new YamlConfiguration());
+                String text = rs.getString(1);
+                YamlConfiguration y = new YamlConfiguration();
+                if (text != null && !text.isEmpty()) y.loadFromString(text);
+                return new PlayerDocResult(PlayerDocStatus.LOADED, y);
+            }
+        } catch (Exception ex) {
+            this.plugin.getLogger().warning("[storage] load player document failed (cause=" + ex.getClass().getSimpleName() + ").");
+            return new PlayerDocResult(PlayerDocStatus.FAILED, new YamlConfiguration());
+        }
+    }
+
+    /** Saves a player document; false when the write failed. */
+    public boolean savePlayerResult(UUID uuid, YamlConfiguration cfg) {
+        if (!this.mysql) {
+            try { cfg.save(new File(this.playerDir, uuid + ".yml")); return true; }
+            catch (Exception ex) { return false; }
+        }
+        try (Connection c = this.ds.getConnection();
+             PreparedStatement ps = c.prepareStatement("INSERT INTO suite_player (namespace,uuid,data) VALUES (?,?,?) "
+                 + "ON DUPLICATE KEY UPDATE data=VALUES(data)")) {
+            ps.setString(1, this.ns); ps.setString(2, uuid.toString()); ps.setString(3, cfg.saveToString());
+            ps.executeUpdate();
+            return true;
+        } catch (Exception ex) {
+            this.plugin.getLogger().warning("[storage] save player document failed (cause=" + ex.getClass().getSimpleName() + ").");
+            return false;
+        }
+    }
+
     public YamlConfiguration loadPlayer(UUID uuid) {
         if (!this.mysql) {
             return YamlConfiguration.loadConfiguration(new File(this.playerDir, uuid + ".yml"));
@@ -295,7 +386,46 @@ public final class SuiteStorage {
         return out;
     }
 
+    /** A player known to the network (the shared players table), for names this server has never seen. */
+    public record NetworkPlayer(UUID uuid, String name) {}
+
+    /** Look a player up by name in the shared players table; null in File mode, when unknown, or on error. */
+    public NetworkPlayer findNetworkPlayer(String name) {
+        if (!this.mysql || name == null || name.isBlank()) return null;
+        try (Connection c = this.ds.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                 "SELECT uuid, username FROM players WHERE LOWER(username)=LOWER(?) ORDER BY last_seen DESC LIMIT 1")) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return new NetworkPlayer(UUID.fromString(rs.getString(1)), rs.getString(2));
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
     // ---- append-only events (RuleGuard/Punishment offense logs) ----
+
+    /** Appends an event row (Database mode) or a line to kind.log (File mode); false when the write failed. */
+    public boolean appendEventResult(String kind, String data) {
+        if (!this.mysql) {
+            try {
+                File log = new File(this.yamlDir, kind + ".log");
+                java.nio.file.Files.writeString(log.toPath(), data + System.lineSeparator(),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                return true;
+            } catch (Exception ex) {
+                return false;
+            }
+        }
+        try (Connection c = this.ds.getConnection();
+             PreparedStatement ps = c.prepareStatement("INSERT INTO suite_events (namespace,kind,data) VALUES (?,?,?)")) {
+            ps.setString(1, this.ns); ps.setString(2, kind); ps.setString(3, data);
+            ps.executeUpdate();
+            return true;
+        } catch (Exception ex) {
+            return false;
+        }
+    }
 
     public void appendEvent(String kind, String data) {
         if (!this.mysql) {

@@ -1,9 +1,11 @@
 name: PizzaPunishment
 main: me.pizzasmp.punishdrop.PunishDropPlugin
-version: 1.0.0-beta
+version: 1.0.0
 api-version: "1.21"
 author: FolksyPizza
 description: Punishment stack with presets, Ban IDs, history, and admin GUIs.
+# Loads after Simple Voice Chat when it is installed, so mutes also silence voice chat.
+softdepend: [voicechat]
 # SuiteStorage needs a JDBC driver and a pool to put shared state in the database.
 # Paper's runtime library loader fetches these; without the block the plugin loads and
 # then silently falls back to per-server YAML files.
@@ -158,3 +160,6 @@ permissions:
   pizzasmp.staff.offenses:
     description: View cheating offense counts and history (/offenses).
     default: op
+  pizzasmp.flight:
+    description: Keep survival flight granted by other plugins (besides flight-owner-whitelist).
+    default: false

@@ -1,5 +1,5 @@
 name: PizzaNetworkCore
-version: 1.0.0-beta
+version: 1.0.0
 main: dev.pizzasmp.networkcore.PizzaNetworkCore
 api-version: '1.21.6'
 authors: [FolksyPizza]
@@ -11,6 +11,7 @@ description: Core plugin for the SMP-Core suite (economy, homes, teleports, soci
 libraries:
   - org.mariadb.jdbc:mariadb-java-client:3.5.4
   - com.zaxxer:HikariCP:5.1.0
+  - com.h2database:h2:2.3.232
 commands:
   # admin, manage and region are not registered in public builds; network maintenance runs from
   # network/scripts/backend_maint.sh. MOTD control lives in PizzaProxyGuard.
@@ -59,8 +60,6 @@ commands:
     description: Toggle auto-accepting incoming TPA requests (same state as /settings).
   discord:
     usage: /discord
-  homes:
-    usage: /homes
   kill:
     usage: /kill
   limbomaint:
@@ -86,16 +85,10 @@ commands:
     usage: /follow <player>
   unfollow:
     usage: /unfollow <player>
-  sethome:
-    usage: /sethome [name]
-  delhome:
-    usage: /delhome [name]
-  home:
-    usage: /home [name]
-    description: Open the homes GUI or teleport to a named home.
   rtp:
     usage: /rtp [east|nether|end]
     description: Random teleport.
+    aliases: [wild, randomtp]
   spawn:
     usage: /spawn
     description: Teleport to the server spawn.
@@ -131,7 +124,7 @@ commands:
     usage: /tpacancel
   tpaaccept:
     usage: /tpaaccept [player]
-    aliases: [tpaccept]
+    aliases: [tpaccept, tpacept]
   tpadeny:
     usage: /tpadeny [player]
     aliases: [tpdeny]
@@ -150,8 +143,43 @@ commands:
     usage: /pizzasusflag <player> <checkName> <vl>
   txlog:
     usage: /txlog [player] [page]
-  admindelhome:
-    usage: /admindelhome <player> <home>
+  bal:
+    usage: /bal [player]
+    description: Show a balance.
+    aliases: [balance, money]
+  msg:
+    usage: /msg <player> <message>
+    description: Send a private message.
+    aliases: [tell, w]
+  reply:
+    usage: /reply <message>
+    description: Reply to your last private message.
+    aliases: [r]
+  invsee:
+    usage: /invsee <player>
+    description: View a player's inventory (staff).
+    permission: pizzasmp.admin.invsee
+  hubbypass:
+    usage: /hubbypass
+    description: Toggle hub edit bypass (staff).
+    permission: pizzasmp.hub.bypass
+    aliases: [hubedit]
+  sethubspawn:
+    usage: /sethubspawn
+    description: Set the hub spawn point here (staff).
+    permission: pizzasmp.hub.bypass
+  addafkspot:
+    usage: /addafkspot
+    description: Add an AFK spot here (staff).
+    permission: pizzasmp.hub.bypass
+  clearafkspots:
+    usage: /clearafkspots
+    description: Clear all AFK spots (staff).
+    permission: pizzasmp.hub.bypass
+  wherepos:
+    usage: /wherepos
+    description: Show your exact position.
+    aliases: [coords]
 permissions:
   pizzasmp.manage:
     description: Access the backend management console (/manage). Dev + granted admins.
@@ -261,4 +289,5 @@ permissions:
 # runs in registration order).
 # ProtocolLib is required: the main class uses its packet API, and the plugin can't load without it.
 depend: [ProtocolLib]
-softdepend: [Essentials, EssentialsChat]
+# Vault carries the economy (balances, /pay, /sell, auctions, orders); it must load first.
+softdepend: [Vault, Essentials, EssentialsChat]

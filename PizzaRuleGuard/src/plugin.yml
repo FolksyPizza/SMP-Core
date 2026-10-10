@@ -1,9 +1,13 @@
 name: PizzaRuleGuard
 main: dev.pizzasmp.ruleguard.PizzaRuleGuardPlugin
-version: 1.0.0-beta
+version: 1.0.0
 api-version: "1.21.6"
 author: FolksyPizza
 description: Lightweight heuristic checks for survival-only rule enforcement gaps.
+# Database mode (offense log shared across servers) uses these; File mode needs neither.
+libraries:
+  - org.mariadb.jdbc:mariadb-java-client:3.5.4
+  - com.zaxxer:HikariCP:5.1.0
 permissions:
   pizzaruleguard.alerts:
     description: Receive PizzaRuleGuard alerts.

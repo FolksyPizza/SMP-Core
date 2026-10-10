@@ -231,13 +231,15 @@ sequenceDiagram
 
 ### Snapshot lifecycle
 
-[PlayerSyncManager.handleJoin()][sync] creates a local lease token, marks the player as applying state, and asynchronously reads logout metadata, upserts identity/presence, loads a snapshot, and consumes an arrival action. Its player-thread continuation applies the snapshot or reconnect policy and clears applying-state tracking.
+[PlayerSyncManager.handleJoin()][sync] creates a local lease token, marks the player as applying state, and asynchronously reads logout metadata and upserts identity/presence. It then claims the player's `player_sync_state` row (`holder_server`, `held_until`) and reads it in one step; a player with no row gets one created from their current state, held by this server. Its player-thread continuation applies the snapshot or reconnect policy and clears applying-state tracking.
+
+Until the claim and apply succeed the player is held: `ArrivalGuard` refuses item pickup, drops, inventory and container use, block changes, damage and typed commands, and no snapshot is saved for them. A claim fails while another live server holds the row (a server switch still saving) or when the database cannot be read; both retry in the background, quickly for `sync.failsafe.handoff-wait-seconds` and then every `retry-interval-seconds`. Logins are refused outright while the database is unreachable.
 
 A snapshot includes serialized player inventory and vanilla ender chest, health/food/experience and related state, game mode, movement fields, server, and location. Location restoration is conditional on backend/world compatibility and pending RTP intent. Game-mode restoration is reinforced by delayed tasks; survival flight is not restored blindly from an old hub snapshot.
 
-Quit captures state and schedules persistence, logout metadata updates, and token-guarded lease deletion. Advancement synchronization is a separate PNC path that reads/writes the world's advancement JSON files around login and saves; it is not part of the inventory blob.
+Quit captures state and runs one ordered task: the snapshot write, which releases the row in the same statement, then logout metadata, then token-guarded lease deletion. A rejoin on the same server waits for that task. Heartbeats extend the hold for synced players; a crashed server's hold lapses after `sync.session.lease-seconds`. Advancement synchronization is a separate PNC path that reads/writes the world's advancement JSON files around login and saves; it is not part of the inventory blob.
 
-Both the proxy relay and backend sync manager write `session_leases`. Their expiry timestamps are computed in SQL. Upsert replaces the current token/server, while deletion guards against deleting another token. This is presence and routing coordination, not exclusive lock acquisition: snapshot upserts themselves are not fenced by a lease token, and a late writer can overwrite a newer snapshot.
+Both the proxy relay and backend sync manager write `session_leases`. Their expiry timestamps are computed in SQL. Upsert replaces the current token/server, while deletion guards against deleting another token. This is presence and routing coordination only. Snapshot ownership is the row hold above: snapshot writes succeed only while the writer holds the row or nobody does.
 
 ### Arrival actions and transfers
 
@@ -373,7 +375,7 @@ No conventional Java unit/integration test suite was found in this checkout. Thi
 
 1. **A command is not owned solely by its executor.** Inspect preprocessing listeners and redispatch before changing authorization or behavior.
 2. **A database transaction is not an inventory transaction.** Identify separate connections, scheduled delivery, refund paths, and crash windows in market work.
-3. **Presence is not exclusive ownership.** Session leases have multiple writers and do not fence every snapshot write.
+3. **Presence is not ownership.** Session leases have multiple writers; the `player_sync_state` hold is what fences snapshot writes.
 4. **Shared SQL does not share every feature.** Expanded chests, local homes, document caches, world files, and in-memory state have different boundaries.
 5. **Maintenance has two implementations.** Do not combine queue-based holding and visual limbo assumptions without tracing their callers and return paths.
 6. **Player state has multiple writers.** Flight, invulnerability, teleport grace, effects, inventory, and commands can be controlled by different plugins.

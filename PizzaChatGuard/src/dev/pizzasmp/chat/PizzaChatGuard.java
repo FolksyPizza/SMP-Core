@@ -67,7 +67,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         "group.mod", "group.srmod", "group.admin", "group.sradmin", "group.co-owner", "group.owner", "group.dev", "group.staff"
     };
 
-    private record FilterPolicy(
+    record FilterPolicy(
             boolean enabled,
             long rateLimitMs,
             long duplicateWindowMs,
@@ -76,20 +76,43 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
             Set<String> slurWords,
             Set<String> blockedWords,
             Set<String> safeWords,
-            List<Pattern> advertPatterns) {
+            List<Pattern> advertPatterns,
+            Level level,
+            Set<String> lightWords,
+            Set<String> strongWords,
+            List<String> phrases,
+            Set<UUID> exempt,
+            boolean listedOnly,
+            Set<UUID> watched) {
 
-        private FilterPolicy {
+        FilterPolicy {
             slurWords = Set.copyOf(slurWords);
             blockedWords = Set.copyOf(blockedWords);
             safeWords = Set.copyOf(safeWords);
             advertPatterns = List.copyOf(advertPatterns);
+            lightWords = Set.copyOf(lightWords);
+            strongWords = Set.copyOf(strongWords);
+            phrases = List.copyOf(phrases);
+            exempt = Set.copyOf(exempt);
+            watched = Set.copyOf(watched);
+        }
+
+        /**
+         * Whether the filter leaves this player alone. In listed mode it applies only to the watched players;
+         * otherwise to everyone except exempt players and (unless owner-guard is on) owner, co-owner and dev.
+         */
+        boolean skips(UUID player, boolean fullyExempt) {
+            return listedOnly ? !watched.contains(player) : fullyExempt || exempt.contains(player);
         }
 
         private static FilterPolicy defaults() {
             return new FilterPolicy(true, 750L, 3000L, 8, 0.7,
-                Set.of(), Set.of(), Set.of(), List.of());
+                Set.of(), Set.of(), Set.of(), List.of(), Level.NORMAL, Set.of(), Set.of(), List.of(), Set.of(), false, Set.of());
         }
     }
+
+    /** Word-filter strength. Each level includes the ones below it; OFF leaves spam, caps and advert checks on. */
+    enum Level { OFF, LIGHT, NORMAL, STRONG }
 
     private record ModerationPolicyState(boolean guardOwner, Set<UUID> linkWhitelist,
                                          Map<UUID, String> linkWhitelistNames) {
@@ -185,15 +208,20 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     // from /admin (or /pcg owner on) to also guard owner/dev. Staff always keep link permission.
     private volatile ModerationPolicyState moderationPolicy = ModerationPolicyState.defaults(false);
 
+    private ChatLog chatLog;
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        if (getConfig().getBoolean("chat-log.enabled", true)) {
+            chatLog = new ChatLog(getDataFolder(), getConfig().getInt("chat-log.retention-days", 90), getLogger());
+        }
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "chatguard");
         this.storage.importFromYamlOnce(java.util.List.of("strikes"), false);
         if (!this.storage.isMysql()) {
             getLogger().warning("[storage] running on local files: chat strikes will NOT be shared "
                 + "between backends, so a player can shed them by changing server. "
-                + "Set storage.backend: mysql to share them.");
+                + "Configure a database (PizzaNetworkCore sync.database or storage.database) to share them.");
         }
         loadPolicy();
         initLeet();
@@ -213,6 +241,10 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        if (chatLog != null) {
+            chatLog.close();
+            chatLog = null;
+        }
         permissionSnapshotsClosing = true;
         storageClosing = true;
         if (permissionSnapshotTask != null) {
@@ -408,8 +440,41 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
             advertPatterns.add(Pattern.compile("\\b(?:\\d{1,3}\\.){3}\\d{1,3}(?::\\d{1,5})?\\b"));
             advertPatterns.add(Pattern.compile("\\b[a-z0-9-]+\\.(?:com|net|org|gg|io|co|me|xyz|fun|club|online|store|us|tk)\\b", Pattern.CASE_INSENSITIVE));
         }
+        Level level;
+        try { level = Level.valueOf(config.getString("level", "normal").trim().toUpperCase(Locale.ROOT)); }
+        catch (IllegalArgumentException e) { level = Level.NORMAL; }
+        Set<String> lightWords = lowerSet(config.getStringList("light-words"));
+        Set<String> strongWords = lowerSet(config.getStringList("strong-words"));
+        List<String> phrases = new ArrayList<>();
+        for (String s : config.getStringList("phrases")) if (!s.isBlank()) phrases.add(s.toLowerCase(Locale.ROOT));
+        Set<UUID> exempt = new HashSet<>();
+        for (String s : config.getStringList("exempt-players")) {
+            try { exempt.add(UUID.fromString(s.trim())); } catch (IllegalArgumentException ignored) { }
+        }
+        Set<UUID> watched = new HashSet<>();
+        for (String s : config.getStringList("only-players")) {
+            try { watched.add(UUID.fromString(s.trim())); } catch (IllegalArgumentException ignored) { }
+        }
+        boolean listedOnly = "listed".equalsIgnoreCase(config.getString("mode", "everyone").trim());
         return new FilterPolicy(enabled, rateLimitMs, duplicateWindowMs,
-            capsMinLength, capsThreshold, slurWords, blockedWords, safeWords, advertPatterns);
+            capsMinLength, capsThreshold, slurWords, blockedWords, safeWords, advertPatterns,
+            level, lightWords, strongWords, phrases, exempt, listedOnly, watched);
+    }
+
+    private static Set<String> lowerSet(List<String> words) {
+        Set<String> out = new HashSet<>();
+        for (String w : words) if (!w.isBlank()) out.add(w.toLowerCase(Locale.ROOT));
+        return out;
+    }
+
+    /** Current filter settings (for the management panel). */
+    FilterPolicy currentPolicy() {
+        return filterPolicy;
+    }
+
+    /** Re-reads config.yml and applies it (used after the management panel saves a change). */
+    void reloadFilter() {
+        loadPolicy();
     }
 
     private String normalizeLeet(String input) {
@@ -435,7 +500,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         // Unknown or expired exemption snapshots fail closed for every filter violation, including spam/caps.
         // Ordinary chat still passes; staff may see a false positive until their next permission refresh.
         // Owner/co-owner/dev are fully exempt unless the owner-guard is toggled on.
-        if (isFullyExempt(permissions)) return;
+        if (policy.skips(playerId, isFullyExempt(permissions))) return;
         String message = PLAIN.serialize(e.message());
         if (message == null || message.isBlank()) return;
 
@@ -446,6 +511,30 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         }
         e.setCancelled(true);
         handleViolation(p, playerId, v, message, permissions);
+    }
+
+    /** Chat log: every message after the filter has decided, blocked ones marked. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void logChat(AsyncChatEvent e) {
+        ChatLog log = chatLog;
+        if (log == null) return;
+        log.chat(e.getPlayer().getName(), e.getPlayer().getUniqueId(), PLAIN.serialize(e.message()), e.isCancelled());
+    }
+
+    private static final java.util.Set<String> LOGGED_COMMANDS = java.util.Set.of(
+        "msg", "tell", "w", "whisper", "dm", "pm", "r", "reply", "me", "teammsg", "tm", "say");
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void logPrivateMessage(PlayerCommandPreprocessEvent e) {
+        ChatLog log = chatLog;
+        if (log == null) return;
+        String msg = e.getMessage();
+        String label = msg.length() > 1 ? msg.substring(1).split("\\s+", 2)[0].toLowerCase(Locale.ROOT) : "";
+        int colon = label.indexOf(':');
+        if (colon >= 0) label = label.substring(colon + 1);
+        if (LOGGED_COMMANDS.contains(label)) {
+            log.privateMessage(e.getPlayer().getName(), e.getPlayer().getUniqueId(), msg, e.isCancelled());
+        }
     }
 
     @EventHandler
@@ -594,7 +683,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         FilterPolicy policy = filterPolicy;
         Player p = e.getPlayer();
         if (!policy.enabled()) return;
-        if (isFullyExempt(p)) return;
+        if (policy.skips(p.getUniqueId(), isFullyExempt(p))) return;
         String msg = e.getMessage();
         String lower = msg.toLowerCase(Locale.ROOT);
         // Only inspect the message body of private-message commands.
@@ -899,43 +988,26 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     }
 
     private Violation inspectContent(String message, FilterPolicy policy) {
-        // Tokenize into words (letters/digits/leet symbols). Punctuation separates words.
-        String[] rawTokens = message.toLowerCase(Locale.ROOT).split("[^a-z0-9@!$]+");
-        // Robustness: rejoin runs of single-character tokens so "n i g g e r" / "f.u.c.k" are caught.
-        StringBuilder spaced = new StringBuilder();
-        for (String t : rawTokens) {
-            if (t.length() == 1) spaced.append(t);
-            else spaced.append(' ');
-        }
-        String joinedSingles = normalizeLeet(spaced.toString().trim());
-        if (joinedSingles.length() >= 3 && !policy.safeWords().contains(joinedSingles)) {
-            if (policy.slurWords().contains(joinedSingles)) return Violation.SLUR;
-            if (policy.blockedWords().contains(joinedSingles)) return Violation.BLOCKED;
-        }
-        for (String token : rawTokens) {
-            if (token.isBlank()) continue;
-            // Whitelist: legitimate words are never flagged.
-            if (policy.safeWords().contains(token)) continue;
-            String norm = normalizeLeet(token);
-            if (policy.safeWords().contains(norm)) continue;
-            // Soft-blocked words: whole-word match (raw OR leet-normalized).
-            if (policy.blockedWords().contains(token) || policy.blockedWords().contains(norm)) {
-                return Violation.BLOCKED;
-            }
-            // Slurs: normalize leet, then whole-word match.
-            if (policy.slurWords().contains(norm)) {
+        // ChatFilter folds lookalike letters, leetspeak, accents, zero-width and full-width characters and stretched
+        // spellings. Slurs also match inside longer words and across spaced-out fragments; other lists match only as
+        // whole words (phrases as whole phrases). Safe words are never flagged. Levels are cumulative.
+        Level level = policy.level();
+        if (level.compareTo(Level.LIGHT) >= 0) {
+            if (ChatFilter.findWord(message, policy.slurWords(), policy.safeWords(), getConfig().getInt("slur-substring-min-length", 5)) != null) {
                 return Violation.SLUR;
             }
-            // Also catch slurs with repeated padding chars removed (e.g. "niiigger" -> "niger"? no —
-            // collapse 3+ repeats to 1 to catch stretched spelling, but require min length 4 to avoid
-            // collapsing short safe words).
-            if (norm.length() >= 4) {
-                String collapsed = norm.replaceAll("(.)\\1{2,}", "$1");
-                if (!collapsed.equals(norm) && policy.slurWords().contains(collapsed)
-                        && !policy.safeWords().contains(collapsed)) {
-                    return Violation.SLUR;
-                }
+            if (ChatFilter.findWord(message, policy.lightWords(), policy.safeWords(), Integer.MAX_VALUE) != null) {
+                return Violation.BLOCKED;
             }
+        }
+        if (level.compareTo(Level.NORMAL) >= 0) {
+            if (ChatFilter.findWord(message, policy.blockedWords(), policy.safeWords(), Integer.MAX_VALUE) != null
+                || ChatFilter.findPhrase(message, policy.phrases()) != null) {
+                return Violation.BLOCKED;
+            }
+        }
+        if (level == Level.STRONG && ChatFilter.findWord(message, policy.strongWords(), policy.safeWords(), Integer.MAX_VALUE) != null) {
+            return Violation.BLOCKED;
         }
         // Advertising / IP / URL
         for (Pattern pat : policy.advertPatterns()) {
@@ -1275,6 +1347,14 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     @Override
     public boolean onCommand(org.bukkit.command.CommandSender sender, org.bukkit.command.Command command,
                              String label, String[] args) {
+        if (command.getName().equalsIgnoreCase("chatguard")) {
+            if (!sender.hasPermission(PERM_MANAGE)) { sender.sendMessage("§cNo permission."); return true; }
+            if (sender instanceof Player viewer) { new ChatGuardPanel(this).open(viewer); return true; }
+            FilterPolicy policy = filterPolicy;
+            sender.sendMessage("ChatGuard " + (policy.enabled() ? "on" : "off") + ", level " + policy.level().name().toLowerCase(Locale.ROOT)
+                + ", " + policy.exempt().size() + " exempt players.");
+            return true;
+        }
         String name = command.getName().toLowerCase(Locale.ROOT);
         if (name.equals("clearwarnings") || name.equals("clearwarn") || name.equals("clearwarns")) {
             if (!sender.hasPermission(PERM_CLEAR)) { sender.sendMessage("§cNo permission."); return true; }

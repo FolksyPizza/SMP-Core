@@ -2,16 +2,12 @@
 
 Planned work for SMP-Core. This is direction, not a commitment or a schedule. Open an issue to argue for an item.
 
-## 1.0.0
+## Next
 
 | Item | Summary |
 | --- | --- |
-| File storage | Every feature gets two storage backends, Database and File, so a single server can run without MySQL. Networks use the database. |
-| Network handoff | A player who arrives before their data is held safe (invulnerable, inventory locked) until it loads. |
-| Cross-server RTP | The destination is found before the player moves, then one transfer and one teleport. |
-| Staff tools | Manage other players' homes and open their menus (homes, auctions) from the admin console. |
-| Version range | Paper 1.21.7 to 26.2 with dialogs, and 1.21.6 through inventory menus. Players can choose menus over dialogs. |
-| Portable build | One build that works from a clean clone. |
+| Portable build | One build that works from a clean clone, with dependencies resolved from public repositories. |
+| Version range | Paper 26.x (built and tested on Java 25), and a player choice of inventory menus over dialogs. 1.0.0 is tested on Paper 1.21.11. |
 
 ## Later
 

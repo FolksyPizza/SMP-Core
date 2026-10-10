@@ -1,3 +1,8 @@
+# Storage: "auto" uses the database below when credentials are set, and an embedded file database
+# (plugins/PizzaNetworkCore/data/smpcore.mv.db) otherwise. File mode is for a single server; a network needs the
+# shared database. Set "file" or "mysql" to force one.
+storage:
+  backend: mysql   # a network shares one database
 sync:
   enabled: true
   server-name: auto
@@ -7,32 +12,36 @@ sync:
     name: pizzasmp
     user: pizzasmp
     password: CHANGE_ME
-    parameters: useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
+    parameters: "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true"
   session:
     lease-seconds: 45
     heartbeat-ticks: 200
   reconnect:
-    # Send a joining player on to the backend they last logged out of.
-    # Velocity's try=["lobby"] lands everyone in lobby; this forwards them onward.
     enabled: true
     lobby-server-name: lobby
     excluded-servers:
-    - maintenance
-    # never auto-return a player into the dev/test backend
-    - dev
-    bypass-permission: ''
+      - maintenance
+    bypass-permission: ""
     delay-ticks: 20
     min-offline-seconds: 4
   location:
     restore-on-join: true
     teleport-delay-ticks: 5
+  failsafe:
+    # Refuse logins while the database is unreachable, so no one plays on stale local data.
+    deny-login-when-database-down: true
+    # A player whose state cannot be loaded yet is held (no item changes, no damage, no commands)
+    # and retried every retry-interval-seconds. After a server switch, polling is quick for the
+    # first handoff-wait-seconds while the previous server finishes saving.
+    handoff-wait-seconds: 10
+    retry-interval-seconds: 5
   debug:
     log-join-state: false
     log-pending-actions: false
 maintenance_music:
-  enabled: false
+  enabled: true
   sound: MUSIC_DISC_MELLOHI
-  interval_seconds: 176
+  interval_seconds: 96
   volume: 0.6
   pitch: 1.0
   debug_log: false
@@ -40,65 +49,64 @@ maintenance_queue:
   debug_log: false
   return_batch_size: 2
   return_drain_interval_ticks: 20
-# Join queue (capacity gate) — disabled 2026-06-10 until reworked as a pre-join layer (task #51)
-queue:
-  enabled: false
+maintenance_hold:
+  # Green hotbar line shown to held players. backend_maint does not set the DB message,
+  # so this is the single source for the hold wording.
+  message: "The Server Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost. You Will Be Put Back After Your Region Restarts."
 router:
-  spawn-server-name: lobby
   debug_log: false
 combat:
-  tag_seconds: 20
-  actionbar_prefix: '§fCombat: &#00BFFF'
-  quit_death: true
   debug_log: false
-rtp:
-  min-radius: 500
-  # Hard cap on how far RTP may land. A world whose border was never set carries
-  # vanilla's ~30,000,000-block default half-width; without this cap RTP picks
-  # ungenerated terrain and the player arrives in an empty void.
-  max-radius: 5000
-  max-radius-border-padding: 64
-  search-attempts: 96
-  unsafe-ground-materials:
-  - WATER
-  - LAVA
-  - KELP
-  - KELP_PLANT
-  - MAGMA_BLOCK
-  - CAMPFIRE
-  - SOUL_CAMPFIRE
-  - CACTUS
-  - SWEET_BERRY_BUSH
-  - POWDER_SNOW
-  - FIRE
-  - SOUL_FIRE
+  # CPVP damage tuning: scale end-crystal / respawn-anchor explosion damage to players.
+  # 1.0 = vanilla (standard crystal PvP). <1.0 nerfs, 0 = no damage. Reloadable via /admin.
+  crystal_damage_multiplier: 1.0
+  anchor_damage_multiplier: 1.0
+duel:
+  # Duels use existing chunks in this private world; matchmaking never generates new arena chunks.
+  world-name: duel_arena
+  source-world: world
+  border-radius: 64.0
+  spacing: 6
+  countdown-seconds: 5
+  round-reset-seconds: 3
+  reconnect-grace-seconds: 10
+  arena-search-timeout-seconds: 20
+  # Search the eight most complete saved region files; adjacent chunks must also exist.
+  pre-generated-region-count: 8
+  pre-generated-search-attempts: 400
+  open-arena-scan-radius: 24
+  open-arena-max-height-difference: 7
+# Performance optimizations. 'profile' sets defaults; uncomment a feature to override it.
+# Profiles: off | conservative | balanced (default) | aggressive. Every optimization can be turned off.
+optimizations:
+  profile: balanced
+  # bandwidth-aware-vd: true
+  # join-send-ramp: false   # opt in only on a slow uplink: each step re-renders the client's chunks
+  # deferred-join-work: true
+
+# Bandwidth-aware view distance: when uplink egress nears the cap, PNC trims per-player view
+# distance (chunk-send volume ~ VD^2) and trims recent RTP/teleport bursts one extra chunk.
+# egress-cap-mbps: 0 disables it. Applies on restart or config reload.
+network:
+  # Route /spawn, /hub and /lobby to the lobby backend (network deployments only).
+  route-spawn-to-lobby: true
+  egress-iface: eth0
+  egress-cap-mbps: 0
+  egress-throttle-percent: 80
+  egress-recover-percent: 55
 chat_debug:
-  log_bridge_payloads: true
-chat:
-  # MUST be true or onChat returns before any routing runs.
-  intercept_async_chat: true
-  global_chat_enabled: true
-  # Only for a backend with NO proxy relay; would double-print here.
-  bridge_local_echo: false
-  cross_server_msg_enabled: true
-  cross_server_team_chat_enabled: true
+  log_bridge_payloads: false
 hud:
   sidebar_enabled: true
   force_ascii_icons: false
-# Adaptive autosave — saves worlds + players every online_interval while anyone is
-# online, every empty_interval when the server is empty (bukkit.yml autosave = 10min net)
-autosave:
-  online_interval_seconds: 180
-  empty_interval_seconds: 600
-world_access:
-  disabled_worlds: []
-  rtp_disabled_worlds: []
-  evac_target: world
-  admin_bypass: false
-  lock_message: '&cThis region is down for maintenance'
-flags:
-  end_closed: false
+chat:
+  intercept_async_chat: true
+  global_chat_enabled: true
+  icon-aliases-enabled: true
+  cross_server_msg_enabled: true
+  cross_server_team_chat_enabled: true
 
-network:
-  # On a proxy network, /spawn, /hub and /lobby go to the lobby backend.
-  route-spawn-to-lobby: true
+rtp:
+  animation:
+    # Arcing arrival effect for /rtp (players can also turn it off in /settings). Off until it is polished.
+    enabled: false

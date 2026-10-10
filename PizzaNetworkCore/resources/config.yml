@@ -1,3 +1,8 @@
+# Storage: "auto" uses the database below when credentials are set, and an embedded file database
+# (plugins/PizzaNetworkCore/data/smpcore.mv.db) otherwise. File mode is for a single server; a network needs the
+# shared database. Set "file" or "mysql" to force one.
+storage:
+  backend: auto
 sync:
   enabled: true
   server-name: auto
@@ -22,6 +27,14 @@ sync:
   location:
     restore-on-join: true
     teleport-delay-ticks: 5
+  failsafe:
+    # Refuse logins while the database is unreachable, so no one plays on stale local data.
+    deny-login-when-database-down: true
+    # A player whose state cannot be loaded yet is held (no item changes, no damage, no commands)
+    # and retried every retry-interval-seconds. After a server switch, polling is quick for the
+    # first handoff-wait-seconds while the previous server finishes saving.
+    handoff-wait-seconds: 10
+    retry-interval-seconds: 5
   debug:
     log-join-state: false
     log-pending-actions: false
@@ -44,7 +57,7 @@ router:
   debug_log: false
 combat:
   debug_log: false
-  # CPVP damage tuning — scale end-crystal / respawn-anchor explosion damage to players.
+  # CPVP damage tuning: scale end-crystal / respawn-anchor explosion damage to players.
   # 1.0 = vanilla (standard crystal PvP). <1.0 nerfs, 0 = no damage. Reloadable via /admin.
   crystal_damage_multiplier: 1.0
   anchor_damage_multiplier: 1.0
@@ -68,7 +81,7 @@ duel:
 optimizations:
   profile: balanced
   # bandwidth-aware-vd: true
-  # join-send-ramp: true
+  # join-send-ramp: false   # opt in only on a slow uplink: each step re-renders the client's chunks
   # deferred-join-work: true
 
 # Bandwidth-aware view distance: when uplink egress nears the cap, PNC trims per-player view

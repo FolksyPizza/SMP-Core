@@ -1,5 +1,5 @@
 name: PizzaAdminTools
-version: 1.0.0-beta
+version: 1.0.0
 main: dev.pizzasmp.admin.PizzaAdminTools
 api-version: '1.21'
 # SuiteStorage needs a JDBC driver and a pool to put shared state in the database.
@@ -14,9 +14,25 @@ commands:
     usage: /gtp <player> [home-name|home-index]
     permission: pizzasmp.gtp
   homes:
-    description: Open the homes GUI.
-    usage: /homes
+    description: Open the homes GUI. Staff can open another player's homes with /homes <player>.
+    usage: /homes [player]
     permission: pizzasmp.homes
+  home:
+    description: Teleport to a home, or open the homes GUI.
+    usage: /home [name]
+    permission: pizzasmp.home.use
+  sethome:
+    description: Set a home at your location.
+    usage: /sethome [name]
+    permission: pizzasmp.home.use
+  delhome:
+    description: Delete one of your homes.
+    usage: /delhome <name|number>
+    permission: pizzasmp.home.use
+  admindelhome:
+    description: Delete another player's home (a backup is kept).
+    usage: /admindelhome <player> <home>
+    permission: pizzasmp.home.admin
   menu:
     description: Open the main menu.
     usage: /menu
@@ -86,6 +102,11 @@ commands:
     description: Spectator-track a player in 3rd person.
     usage: /atrack [player]
     permission: pizzasmp.admin.track
+  nv:
+    description: Toggle night vision (kept through respawns and rejoins).
+    usage: /nv [player]
+    aliases: [nightvision]
+    permission: pizzasmp.nv
   sfmode:
     description: Toggle staff mode (hide and disable staff commands for yourself).
     usage: /sfmode
@@ -99,6 +120,18 @@ permissions:
   pizzasmp.homes:
     description: Use /homes GUI command.
     default: true
+  pizzasmp.home.use:
+    description: Use /home, /sethome and /delhome.
+    default: true
+  pizzasmp.commandfilter.teleport:
+    description: Keep /tp and /teleport visible and usable past the non-staff command filter (the command's own permission still applies).
+    default: false
+  pizzasmp.home.admin:
+    description: Manage other players' homes (/homes <player>, /admindelhome, delete from the homes grid).
+    default: op
+  pizzasmp.homes.5:
+    description: Up to 5 homes.
+    default: false
   pizzasmp.homes.9:
     description: Pizza+ home limit (9 homes).
     default: false
@@ -139,7 +172,10 @@ permissions:
     description: Access plugin/admin utility commands and branded plugin list.
     default: op
   pizzasmp.sus:
-    description: Use /sus to view recent Grim suspects.
+    description: Use /sus to review retained Grim suspects.
+    default: op
+  pizzasmp.sus.manage:
+    description: Dismiss or restore suspect flags without deleting Grim history.
     default: op
   pizzasmp.nv:
     description: Use /nv to toggle night vision.

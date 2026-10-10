@@ -167,3 +167,24 @@ punishment-categories:
     duration: 7d
     reason: Chat Rule Violation
     aliases: [chatviolation, chat, chatrule]
+
+# Ban screen shown on login and when banned online. header (& colour codes) replaces the default
+# "You are banned from <brand>" line; the Discord and appeal lines appear only when a brand Discord is set.
+ban-screen:
+  header: ""
+  show-discord: true
+  show-appeal: true
+
+# Kick screen: header (& colour codes) replaces "You were kicked from <brand>."; footer is shown under the reason.
+kick-screen:
+  header: ""
+  footer: "&7You can reconnect now."
+
+# Death drops: true forces items to drop (unless the keepInventory game rule is on), overriding other plugins;
+# false leaves deaths entirely to the game.
+death:
+  force-drops: true
+
+# true hides the game's join and quit messages (another plugin announces them); false keeps them.
+join-quit-messages:
+  silence: true

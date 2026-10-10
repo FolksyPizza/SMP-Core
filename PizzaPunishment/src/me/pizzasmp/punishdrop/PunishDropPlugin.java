@@ -1,5 +1,6 @@
 package me.pizzasmp.punishdrop;
 
+import java.time.ZoneOffset;
 /*
  * PunishDropPlugin — part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
@@ -34,6 +35,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.TreeMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -63,6 +65,8 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
+import io.papermc.paper.event.player.AsyncChatEvent;
 import org.bukkit.event.player.PlayerGameModeChangeEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -81,6 +85,7 @@ import io.papermc.paper.registry.data.dialog.DialogBase;
 import io.papermc.paper.registry.data.dialog.action.DialogAction;
 import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.input.DialogInput;
+import io.papermc.paper.registry.data.dialog.input.SingleOptionDialogInput;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickCallback;
@@ -96,7 +101,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     private static final long SHORT_LIBERTY_FALLBACK_MS = 60_000L;
     private static final String ID_PREFIX = "#";
     // Brand identity comes from PizzaNetworkCore's branding.yml (see loadBranding); these are neutral defaults.
-    private static String BRAND_DISPLAY = "ExampleSMP";
+    private static String BRAND_DISPLAY = "";
     private static String BRAND_DISCORD = "";
 
     /** Reads the active brand profile's display name and Discord link from PizzaNetworkCore's branding.yml. */
@@ -105,7 +110,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             YamlConfiguration branding = YamlConfiguration.loadConfiguration(
                 new File(getConfig().getString("branding.file", "plugins/PizzaNetworkCore/branding.yml")));
             String active = branding.getString("active", "example");
-            BRAND_DISPLAY = branding.getString("profiles." + active + ".display", "ExampleSMP");
+            BRAND_DISPLAY = branding.getString("profiles." + active + ".display", "");
             BRAND_DISCORD = branding.getString("profiles." + active + ".discord", "");
         } catch (Exception ex) {
             getLogger().warning("[brand] branding.yml could not be read; using defaults: " + ex.getMessage());
@@ -141,6 +146,13 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     private final ConcurrentHashMap<String, ScheduledTask> pendingReleaseTasks = new ConcurrentHashMap<>();
     private final Map<String, Object> pendingReleaseTokens = new HashMap<>();
     private final ConcurrentHashMap<String, PunishmentRecord> records = new ConcurrentHashMap<>();
+    // Database mode: records changed here since the last save. Saves merge them into the latest shared document, so
+    // two backends saving close together never drop each other's records.
+    private final Set<String> dirtyRecordIds = ConcurrentHashMap.newKeySet();
+    private io.papermc.paper.threadedregions.scheduler.ScheduledTask recordsRefreshTask;
+    private static final long RECORDS_REFRESH_SECONDS = 5L;
+    private static final Set<String> MUTED_BLOCKED_COMMANDS = Set.of(
+        "msg", "tell", "w", "whisper", "r", "reply", "me", "mail", "m", "t", "pm", "dm");
     private final Map<String, PunishmentPreset> presetsByKey = new HashMap<>();
     private final List<String> presetSuggestions = new ArrayList<>();
     private final ConcurrentHashMap<String, PendingBulkClear> pendingBulkClearConfirms = new ConcurrentHashMap<>();
@@ -191,7 +203,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         if (!this.storage.isMysql()) {
             getLogger().warning("[storage] running on local files: offence counts and ban records will "
                 + "NOT be shared between backends, so punishment escalation resets on a server hop. "
-                + "Set storage.backend: mysql to share them.");
+                + "Configure a database (PizzaNetworkCore sync.database or storage.database) to share them.");
         }
         loadFlightWhitelist();
         loadPunishmentPresets();
@@ -227,6 +239,17 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         initOffenses();
 
         Bukkit.getPluginManager().registerEvents(this, this);
+        if (Bukkit.getPluginManager().isPluginEnabled("voicechat")) {
+            try {
+                if (VoiceChatMute.register(this)) getLogger().info("Mutes apply to voice chat.");
+            } catch (Throwable t) {
+                getLogger().warning("Voice chat is installed but mutes cannot be applied to it: " + t);
+            }
+        }
+        if (this.storage.isMysql()) {
+            this.recordsRefreshTask = Bukkit.getAsyncScheduler().runAtFixedRate(this, task -> refreshSharedRecords(),
+                RECORDS_REFRESH_SECONDS, RECORDS_REFRESH_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+        }
         Bukkit.getOnlinePlayers().forEach(player -> {
             scheduleFlightEnforcement(player);
             scheduleOnlinePlayerNameSnapshot(player);
@@ -237,6 +260,13 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     @Override
     public synchronized void onDisable() {
+        if (this.recordsRefreshTask != null) {
+            this.recordsRefreshTask.cancel();
+            this.recordsRefreshTask = null;
+        }
+        if (!this.dirtyRecordIds.isEmpty()) {
+            saveRecords();
+        }
         shuttingDown = true;
         for (PendingKickOperation operation : new ArrayList<>(pendingKickOperations.values())) {
             if (operation.finished.compareAndSet(false, true)) {
@@ -351,7 +381,8 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onJoin(PlayerJoinEvent event) {
-        event.setJoinMessage(null);
+        // join-quit-messages.silence: false keeps the game's own join and quit messages.
+        if (getConfig().getBoolean("join-quit-messages.silence", true)) event.setJoinMessage(null);
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
         Location location = getStoredLocation(uuid);
@@ -376,7 +407,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onQuit(PlayerQuitEvent event) {
-        event.setQuitMessage(null);
+        if (getConfig().getBoolean("join-quit-messages.silence", true)) event.setQuitMessage(null);
         onlinePlayerNames.remove(event.getPlayer().getUniqueId());
     }
 
@@ -397,10 +428,13 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerDeath(PlayerDeathEvent event) {
-        // Vanilla drop behavior: items drop at the death spot. The ONLY recovery
-        // path is the player walking back to retrieve them before they despawn —
-        // there is intentionally no /reclaim or other command-based recovery.
-        event.setKeepInventory(false);
+        // Vanilla drop behavior: items drop at the death spot unless the world's keepInventory rule is on. Other
+        // plugins cannot grant keep-inventory; the only recovery path is walking back before the items despawn.
+        // death.force-drops: false leaves death handling entirely to the game and other plugins.
+        if (getConfig().getBoolean("death.force-drops", true)
+            && !Boolean.TRUE.equals(event.getPlayer().getWorld().getGameRuleValue(org.bukkit.GameRule.KEEP_INVENTORY))) {
+            event.setKeepInventory(false);
+        }
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -488,6 +522,10 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
                 return handleSearchIdCommand(sender, args);
             case "bans":
             case "moderation":
+                if (args.length > 0 && sender instanceof Player viewer) {
+                    openPlayerProfile(viewer, args[0]);
+                    return true;
+                }
                 return handleModerationMenuCommand(sender);
             case "listbans":
                 return handleListCommand(sender, args, ViewMode.ACTIVE_BANS);
@@ -568,6 +606,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
                 return filterByPrefix(CHEAT_REASON_PRESETS, args[args.length - 1]);
             case "offenses":
             case "strikes":
+            case "moderation":
                 if (args.length == 1) return completeKnownPlayerTargets(args[0]);
                 return List.of();
             case "unoffend":
@@ -757,6 +796,16 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         boolean changed = false;
         if (activeRecord != null) {
             changed = releaseRecord(activeRecord, sender.getName(), true);
+            if (changed && !banLike && !looksLikeId(lookup)) {
+                // A name/UUID unmute releases every overlapping active mute for that identity.
+                PunishmentRecord additional;
+                while ((additional = findActiveRecordByLookup(lookup, Set.of(PunishmentType.MUTE))) != null) {
+                    if (!releaseRecord(additional, sender.getName(), true)) {
+                        sender.sendMessage(ChatColor.RED + "Another active mute could not be cleared. ID: " + additional.id + ".");
+                        return true;
+                    }
+                }
+            }
             if (changed) {
                 sender.sendMessage(ChatColor.GREEN + activeRecord.type.clearVerb + " " + activeRecord.displayTarget() + ". ID: " + activeRecord.id + ".");
             } else {
@@ -1006,8 +1055,8 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             return false;
         }
         if (!Bukkit.getPluginManager().isPluginEnabled("LibertyBans")) {
-            getLogger().warning("Mute requires LibertyBans to be enabled.");
-            return false;
+            // Enforced natively from the stored record (onMutedChat, onMutedCommand) on every server.
+            return true;
         }
         String libertyDuration = normalizeLibertyDuration(record.getExpiryDate());
         String command = record.expiresAt <= 0L
@@ -1025,7 +1074,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
                 return true;
             }
         }
-        onlineTarget.kickPlayer(ChatColor.RED + record.reason);
+        onlineTarget.kickPlayer(buildKickScreenMessage(record.reason));
         return true;
     }
 
@@ -1231,7 +1280,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         }
 
         try {
-            target.kickPlayer(ChatColor.RED + request.reason);
+            target.kickPlayer(buildKickScreenMessage(request.reason));
             operation.actionApplied.set(true);
         } catch (RuntimeException exception) {
             getLogger().warning("Could not apply a target-owned /kick mutation.");
@@ -1427,6 +1476,8 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private boolean performGenericUnmute(String targetName, UUID targetUuid) {
+        // Native records enforce mutes when LibertyBans is absent; releasing that record is sufficient.
+        if (!Bukkit.getPluginManager().isPluginEnabled("LibertyBans")) return true;
         boolean changed = false;
         if (targetName != null && !targetName.isBlank()) {
             changed = dispatchNativeCommand("unmute " + targetName) || changed;
@@ -1518,6 +1569,11 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private synchronized void persistRecord(PunishmentRecord record) {
+        this.dirtyRecordIds.add(record.id);
+        writeRecordInto(recordsConfig, record);
+    }
+
+    private static void writeRecordInto(FileConfiguration recordsConfig, PunishmentRecord record) {
         String base = "records." + record.id;
         recordsConfig.set(base + ".type", record.type.name());
         recordsConfig.set(base + ".target-kind", record.targetKind.name());
@@ -1814,6 +1870,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             line("Total records: " + records.size(), NamedTextColor.GRAY),
             line("Offense strikes: " + offenders + "    Chat strikes: " + chatStrikes, NamedTextColor.GRAY));
         List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(dialogButton(Component.text("Find Player", NamedTextColor.WHITE), "Open a player's profile: logs and actions", 150, this::openFindPlayerDialog));
         buttons.add(dialogButton(Component.text("Active Bans", NamedTextColor.RED), null, 150, p -> openListDialog(p, ViewMode.ACTIVE_BANS, 0)));
         buttons.add(dialogButton(Component.text("Active Mutes", NamedTextColor.YELLOW), null, 150, p -> openListDialog(p, ViewMode.ACTIVE_MUTES, 0)));
         buttons.add(dialogButton(Component.text("Recent History", NamedTextColor.AQUA), null, 150, p -> openListDialog(p, ViewMode.HISTORY, 0)));
@@ -1823,7 +1880,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         buttons.add(dialogButton(Component.text("Anticheat Flags", DIALOG_BRAND), null, 150, p -> { p.closeDialog(); p.performCommand("sus"); }));
         buttons.add(dialogButton(Component.text("Clear All Bans", NamedTextColor.RED), null, 150, p -> openBulkClearDialog(p, ViewMode.ACTIVE_BANS)));
         buttons.add(dialogButton(Component.text("Clear All Mutes", NamedTextColor.YELLOW), null, 150, p -> openBulkClearDialog(p, ViewMode.ACTIVE_MUTES)));
-        player.showDialog(buildDialog(Component.text(BRAND_DISPLAY + " Moderation", DIALOG_BRAND), body,
+        player.showDialog(buildDialog(Component.text(branded("Moderation"), DIALOG_BRAND), body,
             DialogType.multiAction(buttons).columns(3).exitAction(dialogButton(Component.text("Close"), null, 150, null)).build()));
     }
 
@@ -1836,8 +1893,8 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         for (ModerationPlayerSnapshot target : online) {
             int strikes = currentStrikes(target.uuid().toString());
             buttons.add(dialogButton(Component.text(target.name(), NamedTextColor.GREEN),
-                strikes > 0 ? (strikes + " offense strikes") : "Quick actions", 150,
-                p -> openPlayerActionsDialog(p, target.uuid(), target.name())));
+                strikes > 0 ? (strikes + " offense strikes") : "Profile, logs and actions", 150,
+                p -> openPlayerProfile(p, target.uuid().toString())));
         }
         ensureButtons(buttons);
         List<DialogBody> body = online.isEmpty() ? List.of(line("Nobody online.", NamedTextColor.GRAY)) : List.of();
@@ -1871,6 +1928,252 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         buttons.add(dialogButton(Component.text("History", NamedTextColor.AQUA), null, 150, p -> { p.closeDialog(); handleHistoryCommand(p, new String[] {targetName}); }));
         viewer.showDialog(buildDialog(Component.text("Actions: " + targetName, DIALOG_BRAND), body,
             DialogType.multiAction(buttons).columns(2).exitAction(dialogButton(Component.text("Back"), null, 150, p -> openOnlinePlayersDialog(p))).build()));
+    }
+
+    // ---- Player profile: /moderation <player> ----
+
+    private static final long PROFILE_FLAG_WINDOW_MS = 7L * 24 * 60 * 60 * 1000;
+    private static final DateTimeFormatter PROFILE_TIME = DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneOffset.UTC);
+    private record ProfileTarget(String name, UUID uuid) { }
+    private record GrimFlag(long at, String check, String verbose, int vl) { }
+
+    private void openFindPlayerDialog(Player viewer) {
+        ActionButton open = ActionButton.builder(Component.text("Open profile", NamedTextColor.GREEN)).width(150)
+            .action(DialogAction.customClick((view, audience) -> {
+                String name = view.getText("player");
+                if (audience instanceof Player p && name != null && !name.isBlank()) runOnPlayerScheduler(p, () -> openPlayerProfile(p, name.trim()));
+            }, ClickCallback.Options.builder().build())).build();
+        viewer.showDialog(Dialog.create(factory -> factory.empty()
+            .base(DialogBase.builder(Component.text("Find Player", DIALOG_BRAND)).canCloseWithEscape(true).pause(false)
+                .afterAction(DialogBase.DialogAfterAction.NONE)
+                .body(List.of(line("Name, nickname or UUID. Offline players work too.", NamedTextColor.GRAY)))
+                .inputs(List.of(DialogInput.text("player", Component.text("Player")).maxLength(36).build())).build())
+            .type(DialogType.confirmation(open, dialogButton(Component.text("Back"), null, 150, this::openModerationDialog)))));
+    }
+
+    private ProfileTarget resolveProfileTarget(String input) {
+        Player online = Bukkit.getPlayerExact(input);
+        if (online != null) return new ProfileTarget(online.getName(), online.getUniqueId());
+        try {
+            UUID id = UUID.fromString(input);
+            Player byId = Bukkit.getPlayer(id);
+            if (byId != null) return new ProfileTarget(byId.getName(), id);
+            OfflinePlayer known = Bukkit.getOfflinePlayer(id);
+            return new ProfileTarget(known.getName() == null ? input : known.getName(), id);
+        } catch (IllegalArgumentException ignored) {
+            // not a UUID
+        }
+        OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(input);
+        if (cached != null) return new ProfileTarget(cached.getName() == null ? input : cached.getName(), cached.getUniqueId());
+        return new ProfileTarget(input, null);
+    }
+
+    private void openPlayerProfile(Player viewer, String input) {
+        if (!hasMenuPermission(viewer)) {
+            viewer.sendMessage(ChatColor.RED + "You do not have permission to open the moderation GUI.");
+            return;
+        }
+        ProfileTarget target = resolveProfileTarget(input);
+        Bukkit.getAsyncScheduler().runNow(this, task -> {
+            List<GrimFlag> flags = loadGrimFlags(target.uuid(), PROFILE_FLAG_WINDOW_MS, 200);
+            runOnPlayerScheduler(viewer, () -> showPlayerProfile(viewer, target, flags));
+        });
+    }
+
+    private List<PunishmentRecord> profileRecords(ProfileTarget target) {
+        Map<String, PunishmentRecord> byId = new LinkedHashMap<>();
+        if (target.uuid() != null) findRecordsForLookup(target.uuid().toString()).forEach(r -> byId.put(r.id, r));
+        findRecordsForLookup(target.name()).forEach(r -> byId.put(r.id, r));
+        List<PunishmentRecord> list = new ArrayList<>(byId.values());
+        list.sort(Comparator.comparingLong((PunishmentRecord r) -> r.issuedAt).reversed());
+        return list;
+    }
+
+    private void showPlayerProfile(Player viewer, ProfileTarget target, List<GrimFlag> flags) {
+        List<PunishmentRecord> history = profileRecords(target);
+        Player online = target.uuid() == null ? null : Bukkit.getPlayer(target.uuid());
+        OfflinePlayer offline = target.uuid() == null ? null : Bukkit.getOfflinePlayer(target.uuid());
+        List<DialogBody> body = new ArrayList<>();
+        if (online != null) {
+            Location at = online.getLocation();
+            body.add(line("Online in " + at.getWorld().getName() + " at " + at.getBlockX() + ", " + at.getBlockY() + ", " + at.getBlockZ(), NamedTextColor.GREEN));
+        } else if (offline != null && offline.hasPlayedBefore()) {
+            body.add(line("Offline. Last seen " + formatDate(offline.getLastSeen()) + ", first joined " + formatDate(offline.getFirstPlayed()), NamedTextColor.GRAY));
+        } else {
+            body.add(line("Has never joined this server.", NamedTextColor.GRAY));
+        }
+        PunishmentRecord activeBan = null, activeMute = null;
+        int bans = 0, mutes = 0, kicks = 0;
+        for (PunishmentRecord r : history) {
+            switch (r.type) {
+                case BAN, IP_BAN -> { bans++; if (r.isActiveBanLike() && activeBan == null) activeBan = r; }
+                case MUTE -> { mutes++; if (r.active && activeMute == null) activeMute = r; }
+                case KICK -> kicks++;
+            }
+        }
+        if (activeBan != null) body.add(line("Banned (" + formatDuration(activeBan) + "): " + activeBan.reason + "  [" + activeBan.id + "]", NamedTextColor.RED));
+        if (activeMute != null) body.add(line("Muted (" + formatDuration(activeMute) + "): " + activeMute.reason + "  [" + activeMute.id + "]", NamedTextColor.YELLOW));
+        String key = target.uuid() == null ? target.name() : target.uuid().toString();
+        int strikes = currentStrikes(key);
+        int chatStrikes = 0;
+        for (ChatStrikeEntry e : readChatStrikes()) if (target.uuid() != null && target.uuid().toString().equals(e.uuid)) chatStrikes = e.count;
+        body.add(line("Record: " + bans + " bans, " + mutes + " mutes, " + kicks + " kicks.  Offense strikes: " + strikes + ".  Chat strikes: " + chatStrikes + ".", NamedTextColor.GRAY));
+        Map<String, Integer> byCheck = new TreeMap<>();
+        for (GrimFlag f : flags) byCheck.merge(f.check(), 1, Integer::sum);
+        String top = byCheck.entrySet().stream().sorted(Map.Entry.<String, Integer>comparingByValue().reversed()).limit(3)
+            .map(e -> e.getKey() + " x" + e.getValue()).collect(java.util.stream.Collectors.joining(", "));
+        body.add(line("Anticheat flags, last 7 days: " + flags.size() + (top.isEmpty() ? "" : " (" + top + ")"), flags.isEmpty() ? NamedTextColor.GRAY : NamedTextColor.GOLD));
+
+        String name = target.name();
+        List<ActionButton> buttons = new ArrayList<>();
+        buttons.add(dialogButton(Component.text("Punishments (" + history.size() + ")", NamedTextColor.AQUA), null, 150, p -> showProfileHistory(p, target)));
+        buttons.add(dialogButton(Component.text("Chat Log", NamedTextColor.AQUA), "Recent chat and private messages", 150, p -> showProfileChat(p, target)));
+        buttons.add(dialogButton(Component.text("Anticheat (" + flags.size() + ")", NamedTextColor.AQUA), null, 150, p -> showProfileFlags(p, target, flags)));
+        buttons.add(dialogButton(Component.text("Mute...", NamedTextColor.YELLOW), null, 150, p -> showActionForm(p, target, PunishmentType.MUTE)));
+        buttons.add(dialogButton(Component.text("Kick...", NamedTextColor.GOLD), null, 150, p -> showActionForm(p, target, PunishmentType.KICK)));
+        buttons.add(dialogButton(Component.text("Ban...", NamedTextColor.RED), null, 150, p -> showActionForm(p, target, PunishmentType.BAN)));
+        if (activeMute != null) buttons.add(dialogButton(Component.text("Unmute", NamedTextColor.GREEN), null, 150, p -> { p.closeDialog(); p.performCommand("unmute " + name); }));
+        if (activeBan != null) buttons.add(dialogButton(Component.text("Unban", NamedTextColor.GREEN), null, 150, p -> { p.closeDialog(); p.performCommand("unban " + name); }));
+        if (online != null) {
+            UUID id = target.uuid();
+            buttons.add(dialogButton(Component.text("Teleport", NamedTextColor.WHITE), null, 150, p -> { p.closeDialog(); teleportModeratorToTarget(p, id, name); }));
+            buttons.add(dialogButton(Component.text("Freeze", NamedTextColor.BLUE), null, 150, p -> { p.closeDialog(); p.performCommand("freeze " + name); }));
+            buttons.add(dialogButton(Component.text("Inventory", NamedTextColor.WHITE), null, 150, p -> { p.closeDialog(); p.performCommand("invsee " + name); }));
+            buttons.add(dialogButton(Component.text("Ender Chest", NamedTextColor.WHITE), null, 150, p -> { p.closeDialog(); p.performCommand("endersee " + name); }));
+        }
+        if (chatStrikes > 0) buttons.add(dialogButton(Component.text("Clear Chat Strikes", NamedTextColor.YELLOW), null, 150, p -> {
+            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "clearwarnings " + name); openPlayerProfile(p, key); }));
+        viewer.showDialog(buildDialog(Component.text(name, DIALOG_BRAND), body,
+            DialogType.multiAction(buttons).columns(3).exitAction(dialogButton(Component.text("Back"), null, 150, this::openModerationDialog)).build()));
+    }
+
+    private void showProfileHistory(Player viewer, ProfileTarget target) {
+        List<PunishmentRecord> history = profileRecords(target);
+        List<DialogBody> body = new ArrayList<>();
+        if (history.isEmpty()) body.add(line("No punishments on record.", NamedTextColor.GRAY));
+        List<ActionButton> buttons = new ArrayList<>();
+        for (PunishmentRecord r : history.subList(0, Math.min(24, history.size()))) {
+            String label = PROFILE_TIME.format(Instant.ofEpochMilli(r.issuedAt)) + " " + r.type.name() + (r.active ? " (active)" : "");
+            buttons.add(dialogButton(Component.text(label, r.active ? NamedTextColor.RED : NamedTextColor.GRAY),
+                r.reason + " - by " + r.issuedBy + ", " + formatDuration(r), 300, p -> openRecordDetailDialog(p, r.id, ViewMode.HISTORY, 0)));
+        }
+        ensureButtons(buttons);
+        viewer.showDialog(buildDialog(Component.text("Punishments: " + target.name(), DIALOG_BRAND), body,
+            DialogType.multiAction(buttons).columns(1).exitAction(dialogButton(Component.text("Back"), null, 150, p -> openPlayerProfile(p, profileKey(target)))).build()));
+    }
+
+    private void showProfileChat(Player viewer, ProfileTarget target) {
+        Bukkit.getAsyncScheduler().runNow(this, task -> {
+            List<String> lines = loadChatLines(target, 40);
+            runOnPlayerScheduler(viewer, () -> {
+                List<DialogBody> body = new ArrayList<>();
+                if (lines.isEmpty()) body.add(line("No chat in the retained logs.", NamedTextColor.GRAY));
+                lines.forEach(l -> body.add(line(l, l.contains("[blocked]") ? NamedTextColor.RED : NamedTextColor.WHITE)));
+                viewer.showDialog(buildDialog(Component.text("Chat: " + target.name(), DIALOG_BRAND), body,
+                    DialogType.multiAction(List.of(dialogButton(Component.text("Back"), null, 150, p -> openPlayerProfile(p, profileKey(target))))).columns(1).build()));
+            });
+        });
+    }
+
+    private void showProfileFlags(Player viewer, ProfileTarget target, List<GrimFlag> flags) {
+        List<DialogBody> body = new ArrayList<>();
+        if (flags.isEmpty()) body.add(line("No anticheat flags in the last 7 days.", NamedTextColor.GRAY));
+        for (GrimFlag f : flags.subList(0, Math.min(40, flags.size()))) {
+            body.add(line(PROFILE_TIME.format(Instant.ofEpochMilli(f.at())) + "  " + f.check() + " (vl " + f.vl() + ")"
+                + (f.verbose() == null || f.verbose().isBlank() ? "" : "  " + f.verbose()), NamedTextColor.GRAY));
+        }
+        viewer.showDialog(buildDialog(Component.text("Anticheat: " + target.name(), DIALOG_BRAND), body,
+            DialogType.multiAction(List.of(dialogButton(Component.text("Back"), null, 150, p -> openPlayerProfile(p, profileKey(target))))).columns(1).build()));
+    }
+
+    private void showActionForm(Player viewer, ProfileTarget target, PunishmentType type) {
+        if (!hasPermissionForType(viewer, type)) {
+            viewer.sendMessage(ChatColor.RED + "You do not have permission to use " + commandLabelForType(type) + ".");
+            return;
+        }
+        List<DialogInput> inputs = new ArrayList<>();
+        if (type != PunishmentType.KICK) {
+            List<SingleOptionDialogInput.OptionEntry> options = new ArrayList<>();
+            for (String d : type == PunishmentType.MUTE ? List.of("30m", "1h", "6h", "1d", "7d", "30d") : List.of("1d", "3d", "7d", "30d", "perm")) {
+                options.add(SingleOptionDialogInput.OptionEntry.create(d, Component.text(d.equals("perm") ? "Permanent" : d), d.equals(type == PunishmentType.MUTE ? "1h" : "7d")));
+            }
+            inputs.add(DialogInput.singleOption("duration", Component.text("Duration"), options).build());
+        }
+        inputs.add(DialogInput.text("reason", Component.text("Reason")).maxLength(200).build());
+        String verb = type == PunishmentType.MUTE ? "Mute" : type == PunishmentType.KICK ? "Kick" : "Ban";
+        ActionButton confirm = ActionButton.builder(Component.text(verb + " " + target.name(), NamedTextColor.RED)).width(150)
+            .action(DialogAction.customClick((view, audience) -> {
+                if (!(audience instanceof Player p)) return;
+                String reason = view.getText("reason");
+                if (reason == null || reason.isBlank()) reason = verb + "ed by staff";
+                String duration = type == PunishmentType.KICK ? null : view.getText("duration");
+                List<String> args = new ArrayList<>(List.of(target.name()));
+                boolean permanent = "perm".equals(duration);
+                if (duration != null && !permanent) args.add(duration);
+                args.addAll(Arrays.asList(reason.trim().split("\\s+")));
+                String[] finalArgs = args.toArray(String[]::new);
+                runOnPlayerScheduler(p, () -> { p.closeDialog(); handleExplicitPunishmentCommand(p, finalArgs, type, permanent, true); });
+            }, ClickCallback.Options.builder().build())).build();
+        viewer.showDialog(Dialog.create(factory -> factory.empty()
+            .base(DialogBase.builder(Component.text(verb + ": " + target.name(), DIALOG_BRAND)).canCloseWithEscape(true).pause(false)
+                .afterAction(DialogBase.DialogAfterAction.NONE).body(List.of()).inputs(inputs).build())
+            .type(DialogType.confirmation(confirm, dialogButton(Component.text("Cancel"), null, 150, p -> openPlayerProfile(p, profileKey(target)))))));
+    }
+
+    private static String profileKey(ProfileTarget target) {
+        return target.uuid() == null ? target.name() : target.uuid().toString();
+    }
+
+    /** Recent Grim flags for one player from GrimAC's history database (newest first); empty when unavailable. */
+    private List<GrimFlag> loadGrimFlags(UUID uuid, long windowMs, int limit) {
+        if (uuid == null) return List.of();
+        File db = new File(getServer().getWorldContainer(), getConfig().getString("moderation.grim-database", "plugins/GrimAC/violations.sqlite"));
+        if (!db.isFile()) return List.of();
+        String sql = "SELECT c.check_name_string, v.verbose, v.vl, v.created_at FROM grim_history_violations v "
+            + "JOIN grim_history_check_names c ON c.id = v.check_name_id WHERE hex(v.uuid) = ? AND v.created_at >= ? "
+            + "ORDER BY v.created_at DESC LIMIT ?";
+        List<GrimFlag> out = new ArrayList<>();
+        try (java.sql.Connection connection = java.sql.DriverManager.getConnection("jdbc:sqlite:" + db.getAbsolutePath());
+             java.sql.PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, uuid.toString().replace("-", "").toUpperCase(Locale.ROOT));
+            statement.setLong(2, System.currentTimeMillis() - windowMs);
+            statement.setInt(3, limit);
+            try (java.sql.ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) out.add(new GrimFlag(rs.getLong(4), rs.getString(1), rs.getString(2), rs.getInt(3)));
+            }
+        } catch (Exception e) {
+            getLogger().warning("Could not read Grim flags: " + e.getMessage());
+        }
+        return out;
+    }
+
+    /** The last lines for one player in PizzaChatGuard's daily chat logs (oldest first). */
+    private List<String> loadChatLines(ProfileTarget target, int limit) {
+        if (target.uuid() == null) return List.of();
+        File dir = new File(getServer().getWorldContainer(), getConfig().getString("moderation.chat-log-directory", "plugins/PizzaChatGuard/chat-log"));
+        File[] files = dir.listFiles((d, n) -> n.endsWith(".log"));
+        if (files == null) return List.of();
+        Arrays.sort(files, Comparator.comparing(File::getName).reversed());
+        String marker = "(" + target.uuid() + ")";
+        java.util.Deque<String> lines = new java.util.ArrayDeque<>();
+        for (File file : files) {
+            List<String> matched = new ArrayList<>();
+            try {
+                for (String l : java.nio.file.Files.readAllLines(file.toPath())) if (l.contains(marker)) matched.add(l);
+            } catch (java.io.IOException e) {
+                continue;
+            }
+            for (int i = matched.size() - 1; i >= 0 && lines.size() < limit; i--) {
+                String l = matched.get(i);
+                // "2026-10-01T18:00:00.000Z CHAT Name (uuid): text" -> "10-01 18:00 CHAT: text"
+                String when = l.length() >= 16 ? l.substring(5, 10) + " " + l.substring(11, 16) : "";
+                int colon = l.indexOf("): ");
+                String kind = l.contains(" PM ") ? "PM" : "CHAT";
+                lines.addFirst(when + " " + kind + (l.contains("[blocked]") ? " [blocked]" : "") + ": " + (colon >= 0 ? l.substring(colon + 3) : l));
+            }
+            if (lines.size() >= limit) break;
+        }
+        return new ArrayList<>(lines);
     }
 
     private void openOffensesDialog(Player viewer) {
@@ -2010,7 +2313,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             return;
         }
         ModerationMenuHolder holder = new ModerationMenuHolder();
-        Inventory inventory = Bukkit.createInventory(holder, MENU_GUI_SIZE, ChatColor.DARK_RED + BRAND_DISPLAY + " Moderation");
+        Inventory inventory = Bukkit.createInventory(holder, MENU_GUI_SIZE, ChatColor.DARK_RED + branded("Moderation"));
         holder.inventory = inventory;
 
         fillInventory(inventory, Material.BLACK_STAINED_GLASS_PANE, ChatColor.BLACK.toString());
@@ -2936,10 +3239,17 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         return dispatchNativeCommand("history " + lookup);
     }
 
+    /**
+     * Mirrors a punishment into LibertyBans when it is installed. Never falls back to the plain command: that is this
+     * plugin's own command (/unban, /unmute, /history, /kick), and dispatching it recursed until the server's command
+     * limit stopped it.
+     */
     private boolean dispatchNativeCommand(String command) {
+        if (!Bukkit.getPluginManager().isPluginEnabled("LibertyBans")) {
+            return false;
+        }
         try {
-            return Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "libertybans:" + command)
-                || Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command);
+            return Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "libertybans:" + command);
         } catch (Exception ex) {
             getLogger().warning("Failed to dispatch command '" + command + "': " + ex.getMessage());
             return false;
@@ -3020,6 +3330,13 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             );
         }
         OfflinePlayer offline = Bukkit.getOfflinePlayer(input);
+        if (!requireOnline && !offline.hasPlayedBefore()) {
+            // On a network the player may only have played on another backend.
+            dev.pizzasmp.common.SuiteStorage.NetworkPlayer known = this.storage == null ? null : this.storage.findNetworkPlayer(input);
+            if (known != null) {
+                return new ResolvedTarget(TargetKind.PLAYER, known.name(), known.uuid(), findKnownAddress(known.name()), null);
+            }
+        }
         if (requireOnline || !offline.hasPlayedBefore()) {
             return ResolvedTarget.notFound();
         }
@@ -3100,7 +3417,8 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         if (player.getGameMode() == GameMode.CREATIVE || player.getGameMode() == GameMode.SPECTATOR) {
             return true;
         }
-        return flightOwnerWhitelist.contains(player.getName().toLowerCase(Locale.ROOT));
+        return player.hasPermission("pizzasmp.flight")
+            || flightOwnerWhitelist.contains(player.getName().toLowerCase(Locale.ROOT));
     }
 
     private void enforceFlightRules(Player player) {
@@ -3293,20 +3611,61 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         };
     }
 
+    /**
+     * Ban screen. ban-screen.header (legacy & codes) replaces the default "banned from <brand>" line;
+     * ban-screen.show-discord and ban-screen.show-appeal toggle the Discord lines (both default on).
+     */
     private String buildBanScreenMessage(PunishmentRecord record) {
-        return ChatColor.RED + "You are banned from " + BRAND_DISPLAY + ". If you believe this was a mistake please make a ticket in the " + BRAND_DISPLAY + " Discord"
-            + "\n"
-            + ChatColor.YELLOW + BRAND_DISCORD
-            + "\n\n"
-            + ChatColor.GRAY + "Date: " + ChatColor.WHITE + formatDate(record.issuedAt)
-            + "\n"
-            + ChatColor.GRAY + "Duration: " + ChatColor.WHITE + formatDuration(record)
-            + "\n"
-            + ChatColor.GRAY + "Ban ID: " + ChatColor.WHITE + record.id
-            + "\n"
-            + ChatColor.GRAY + "Reason: " + ChatColor.WHITE + record.reason
-            + "\n"
-            + ChatColor.GRAY + "You may be able to appeal this ban on " + ChatColor.WHITE + BRAND_DISCORD + ChatColor.GRAY + ".";
+        String header = getConfig().getString("ban-screen.header", "");
+        boolean showDiscord = getConfig().getBoolean("ban-screen.show-discord", true) && !BRAND_DISCORD.isBlank();
+        boolean showAppeal = getConfig().getBoolean("ban-screen.show-appeal", true) && !BRAND_DISCORD.isBlank();
+        StringBuilder screen = new StringBuilder();
+        if ((header == null || header.isBlank()) && (BRAND_DISPLAY.isBlank() || BRAND_DISCORD.isBlank())) {
+            screen.append(ChatColor.RED).append("You have been banned from ")
+                .append(BRAND_DISPLAY.isBlank() ? "this server" : BRAND_DISPLAY).append('.');
+        } else if (header == null || header.isBlank()) {
+            screen.append(ChatColor.RED).append("You are banned from ").append(BRAND_DISPLAY)
+                .append(". If you believe this was a mistake please make a ticket in the ").append(BRAND_DISPLAY).append(" Discord");
+        } else {
+            screen.append(ChatColor.translateAlternateColorCodes('&', header));
+        }
+        if (showDiscord) {
+            screen.append("\n").append(ChatColor.YELLOW).append(BRAND_DISCORD);
+        }
+        screen.append("\n\n")
+            .append(ChatColor.GRAY).append("Date: ").append(ChatColor.WHITE).append(formatDate(record.issuedAt)).append("\n")
+            .append(ChatColor.GRAY).append("Duration: ").append(ChatColor.WHITE).append(formatDuration(record)).append("\n")
+            .append(ChatColor.GRAY).append("Ban ID: ").append(ChatColor.WHITE).append(record.id).append("\n")
+            .append(ChatColor.GRAY).append("Reason: ").append(ChatColor.WHITE).append(record.reason);
+        if (showAppeal) {
+            screen.append("\n").append(ChatColor.GRAY).append("You may be able to appeal this ban on ")
+                .append(ChatColor.WHITE).append(BRAND_DISCORD).append(ChatColor.GRAY).append(".");
+        }
+        return screen.toString();
+    }
+
+    /** "<brand> <suffix>", or just the suffix when no brand is configured. */
+    private static String branded(String suffix) {
+        return BRAND_DISPLAY.isBlank() ? suffix : BRAND_DISPLAY + " " + suffix;
+    }
+
+    /** Kick screen: kick-screen.header and kick-screen.footer (legacy & codes) around the reason. */
+    private String buildKickScreenMessage(String reason) {
+        String header = getConfig().getString("kick-screen.header", "");
+        String footer = getConfig().getString("kick-screen.footer", "&7You can reconnect now.");
+        StringBuilder screen = new StringBuilder();
+        if (header == null || header.isBlank()) {
+            screen.append(ChatColor.RED).append("You were kicked from ")
+                .append(BRAND_DISPLAY.isBlank() ? "this server" : BRAND_DISPLAY).append('.');
+        } else {
+            screen.append(ChatColor.translateAlternateColorCodes('&', header));
+        }
+        screen.append("\n\n").append(ChatColor.GRAY).append("Reason: ").append(ChatColor.WHITE)
+            .append(reason == null || reason.isBlank() ? "No reason given." : reason);
+        if (footer != null && !footer.isBlank()) {
+            screen.append("\n\n").append(ChatColor.translateAlternateColorCodes('&', footer));
+        }
+        return screen.toString();
     }
 
     private String formatDate(long timestamp) {
@@ -4081,7 +4440,141 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private synchronized void saveRecords() {
-        this.storage.saveDoc(DOC_RECORDS, (YamlConfiguration) recordsConfig);
+        if (!this.storage.isMysql()) {
+            this.storage.saveDoc(DOC_RECORDS, (YamlConfiguration) recordsConfig);
+            this.dirtyRecordIds.clear();
+            return;
+        }
+        dev.pizzasmp.common.SuiteStorage.DocumentLoadResult latest = this.storage.loadDocResult(DOC_RECORDS);
+        if (latest.status() == dev.pizzasmp.common.SuiteStorage.DocumentLoadStatus.FAILED) {
+            getLogger().warning("[records] could not read the shared punishment records; the save is retried.");
+            return;
+        }
+        YamlConfiguration merged = latest.document();
+        List<String> saving = new ArrayList<>(this.dirtyRecordIds);
+        for (String id : saving) {
+            PunishmentRecord record = records.get(id);
+            if (record != null) writeRecordInto(merged, record);
+        }
+        if (this.storage.saveDocResult(DOC_RECORDS, merged)) {
+            this.dirtyRecordIds.removeAll(saving);
+        }
+        applySharedRecords(merged);
+    }
+
+    /**
+     * Database mode: adopt the shared records (other servers' punishments), keeping records changed here that are not
+     * saved yet. Bans that became active kick the player if they are here; bans lifted elsewhere are pardoned locally.
+     */
+    private synchronized void applySharedRecords(YamlConfiguration shared) {
+        ConfigurationSection section = shared.getConfigurationSection("records");
+        if (section == null) return;
+        List<PunishmentRecord> newlyActiveBans = new ArrayList<>();
+        for (String id : section.getKeys(false)) {
+            if (this.dirtyRecordIds.contains(id)) continue;
+            ConfigurationSection recordSection = section.getConfigurationSection(id);
+            PunishmentRecord fresh = recordSection == null ? null : PunishmentRecord.fromConfig(id, recordSection);
+            if (fresh == null) continue;
+            PunishmentRecord previous = records.put(id, fresh);
+            boolean wasActive = previous != null && isInForce(previous);
+            if (isBanType(fresh.type)) {
+                if (!wasActive && isInForce(fresh)) newlyActiveBans.add(fresh);
+                if (wasActive && !isInForce(fresh)) performGenericUnban(fresh.targetName, fresh.getTargetUuid(), fresh.targetAddress);
+            }
+        }
+        this.recordsConfig = shared;
+        for (PunishmentRecord ban : newlyActiveBans) kickIfOnline(ban);
+    }
+
+    private static boolean isBanType(PunishmentType type) {
+        return type == PunishmentType.BAN || type == PunishmentType.IP_BAN;
+    }
+
+    /** Active and not expired. */
+    private static boolean isInForce(PunishmentRecord record) {
+        return record.active && (record.expiresAt <= 0L || record.expiresAt > System.currentTimeMillis());
+    }
+
+    /** The punishment of this type in force for the player, or null. IP bans match the address. */
+    private PunishmentRecord recordInForce(PunishmentType type, UUID uuid, String name, String address) {
+        for (PunishmentRecord record : records.values()) {
+            if (record.type != type || !isInForce(record)) continue;
+            if (type == PunishmentType.IP_BAN) {
+                if (address != null && address.equals(record.targetAddress)) return record;
+                continue;
+            }
+            if (uuid != null && uuid.toString().equalsIgnoreCase(record.targetUuid)) return record;
+            if (name != null && name.equalsIgnoreCase(record.targetName)) return record;
+        }
+        return null;
+    }
+
+    private void kickIfOnline(PunishmentRecord ban) {
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            boolean match = ban.type == PunishmentType.IP_BAN
+                ? online.getAddress() != null && online.getAddress().getAddress().getHostAddress().equals(ban.targetAddress)
+                : online.getName().equalsIgnoreCase(ban.targetName) || online.getUniqueId().toString().equalsIgnoreCase(ban.targetUuid);
+            if (match) online.getScheduler().run(this, task -> online.kickPlayer(buildBanScreenMessage(ban)), null);
+        }
+    }
+
+    /** Database mode: pick up punishments issued on other servers, and push unsaved local ones. */
+    private void refreshSharedRecords() {
+        if (!this.storage.isMysql()) return;
+        if (!this.dirtyRecordIds.isEmpty()) {
+            saveRecords();
+            return;
+        }
+        dev.pizzasmp.common.SuiteStorage.DocumentLoadResult latest = this.storage.loadDocResult(DOC_RECORDS);
+        if (latest.status() != dev.pizzasmp.common.SuiteStorage.DocumentLoadStatus.FAILED) applySharedRecords(latest.document());
+    }
+
+    /** Bans are enforced by this plugin on every server, not only through the local server's ban list. */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onBannedPreLogin(AsyncPlayerPreLoginEvent event) {
+        if (event.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED) return;
+        refreshSharedRecords();
+        String address = event.getAddress() == null ? null : event.getAddress().getHostAddress();
+        PunishmentRecord ban = recordInForce(PunishmentType.BAN, event.getUniqueId(), event.getName(), null);
+        if (ban == null) ban = recordInForce(PunishmentType.IP_BAN, null, null, address);
+        if (ban != null) event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_BANNED, buildBanScreenMessage(ban));
+    }
+
+    /** Mutes are enforced here (chat and private messages), with or without LibertyBans. */
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onMutedChat(AsyncChatEvent event) {
+        Player player = event.getPlayer();
+        PunishmentRecord mute = recordInForce(PunishmentType.MUTE, player.getUniqueId(), player.getName(), null);
+        if (mute == null) return;
+        event.setCancelled(true);
+        player.sendMessage(ChatColor.RED + "You are muted" + muteSuffix(mute));
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onMutedCommand(PlayerCommandPreprocessEvent event) {
+        String message = event.getMessage();
+        if (message.length() < 2) return;
+        String label = message.substring(1).split("\\s+", 2)[0].toLowerCase(Locale.ROOT);
+        int colon = label.indexOf(':');
+        if (colon >= 0) label = label.substring(colon + 1);
+        if (!MUTED_BLOCKED_COMMANDS.contains(label)) return;
+        Player player = event.getPlayer();
+        PunishmentRecord mute = recordInForce(PunishmentType.MUTE, player.getUniqueId(), player.getName(), null);
+        if (mute == null) return;
+        event.setCancelled(true);
+        player.sendMessage(ChatColor.RED + "You are muted" + muteSuffix(mute));
+    }
+
+    /** The "You are muted" line for a player under an active mute, or null. Safe off the main thread. */
+    String muteNotice(UUID uuid, String name) {
+        PunishmentRecord mute = recordInForce(PunishmentType.MUTE, uuid, name, null);
+        return mute == null ? null : "You are muted" + muteSuffix(mute);
+    }
+
+    private static String muteSuffix(PunishmentRecord mute) {
+        if (mute.expiresAt <= 0L) return ".";
+        long minutes = Math.max(1L, (mute.expiresAt - System.currentTimeMillis()) / 60000L);
+        return " for " + (minutes >= 60 ? (minutes / 60) + "h " + (minutes % 60) + "m" : minutes + "m") + ".";
     }
 
     private void fillInventory(Inventory inventory, Material material, String name) {

@@ -88,7 +88,12 @@ public final class ChatRelay {
         proxy.getChannelRegistrar().register(CHANNEL);
         loadConfig();
         loadDriver();
-        ensureSchema();
+        if (databaseConfigured()) {
+            ensureSchema();
+        } else {
+            logger.warn("Database not configured in plugins/pizzaproxyguard/bridge.properties: cross-server chat, "
+                + "direct messages across servers and maintenance gating are off until it is.");
+        }
         leaseHeartbeatTask = proxy.getScheduler()
             .buildTask(owner, this::heartbeatActivePlayers)
             .repeat(15L, TimeUnit.SECONDS)
@@ -321,6 +326,7 @@ public final class ChatRelay {
     }
 
     private void upsertPlayerAndLease(Player player, String serverName, String leaseToken) {
+        if (!databaseConfigured()) return; // no network database: leases are not used
         if (player == null || serverName == null || leaseToken == null) {
             return;
         }
@@ -351,7 +357,7 @@ public final class ChatRelay {
     }
 
     private void clearLease(UUID uuid, String leaseToken) {
-        if (uuid == null) {
+        if (uuid == null || !databaseConfigured()) {
             return;
         }
         String sql = "DELETE FROM session_leases WHERE uuid=? " +
@@ -438,7 +444,15 @@ public final class ChatRelay {
      *  configured connection instead of duplicating DB config on the proxy. */
     Connection openConnection() throws Exception { return getConnection(); }
 
+    /** False until bridge.properties names real credentials; nothing connects before then. */
+    boolean databaseConfigured() {
+        return dbPassword != null && !dbPassword.isBlank() && !"CHANGE_ME".equals(dbPassword);
+    }
+
     private Connection getConnection() throws Exception {
+        if (!databaseConfigured()) {
+            throw new java.sql.SQLException("database not configured (plugins/pizzaproxyguard/bridge.properties)");
+        }
         return DriverManager.getConnection(dbUrl, dbUser, dbPassword);
     }
 

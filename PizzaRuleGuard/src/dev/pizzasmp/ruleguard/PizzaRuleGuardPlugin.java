@@ -63,7 +63,7 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
    private final Map<UUID, PizzaRuleGuardPlugin.CounterWindow> inventoryMoveWindows = new ConcurrentHashMap<>();
    private final Map<UUID, Deque<Long>> scaffoldSamples = new ConcurrentHashMap<>();
    private final Map<UUID, Deque<Long>> combatClickSamples = new ConcurrentHashMap<>();
-   private final Map<UUID, Deque<Long>> hiddenOreSamples = new ConcurrentHashMap<>();
+   private final Map<UUID, Deque<OreDiscovery>> hiddenOreSamples = new ConcurrentHashMap<>();
    private final Map<UUID, PizzaRuleGuardPlugin.CounterWindow> dupeWindows = new ConcurrentHashMap<>();
    private final Map<String, Long> alertCooldowns = new ConcurrentHashMap<>();
    private final Map<String, Long> punishmentCooldowns = new ConcurrentHashMap<>();
@@ -75,11 +75,15 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
    private boolean offenseLogClosing;
    private long droppedOffenseLogLines;
    private Path offenseLogPath;
+   // Database mode: offenses go to suite_events (namespace "ruleguard"), visible from every backend. Null in File mode.
+   private dev.pizzasmp.common.SuiteStorage store;
    private PlatformScheduler.TaskHandle dupeSweepTask;
 
    public void onEnable() {
       this.saveDefaultConfig();
       this.offenseLogPath = this.getDataFolder().toPath().resolve("offenses.log");
+      dev.pizzasmp.common.SuiteStorage storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "ruleguard");
+      this.store = storage.isMysql() ? storage : null;
       Bukkit.getPluginManager().registerEvents(this, this);
       this.startDupeSweepTask();
       this.warnIfAccountLimitHookIsStubbed();
@@ -103,6 +107,10 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
          offenseTask.cancel();
       }
       this.drainOffenseLogOnDisable();
+      if (this.store != null) {
+         this.store.close();
+         this.store = null;
+      }
 
       this.recentMovement.clear();
       this.inventoryMoveWindows.clear();
@@ -235,13 +243,28 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
          Block var3 = var1.getBlock();
          if (this.watchedMiningBlocks().contains(var3.getType()) && !this.isExposed(var3)) {
             long var4 = System.currentTimeMillis();
-            Deque var6 = this.hiddenOreSamples.computeIfAbsent(var2.getUniqueId(), var0 -> new ArrayDeque<>());
-            trimOlderThan(var6, var4 - this.getConfig().getLong("checks.mining.window-ms", 600000L));
-            var6.addLast(var4);
-            int var7 = var6.size();
+            Deque<OreDiscovery> discoveries = this.hiddenOreSamples.computeIfAbsent(var2.getUniqueId(), ignored -> new ArrayDeque<>());
+            long cutoff = var4 - this.getConfig().getLong("checks.mining.window-ms", 600000L);
+            while (!discoveries.isEmpty() && discoveries.peekFirst().timestampMillis() < cutoff) discoveries.removeFirst();
+            int clusterRadius = Math.max(0, this.getConfig().getInt("checks.mining.cluster-radius-blocks", 4));
+            boolean sameCluster = discoveries.stream().anyMatch(previous -> previous.worldId().equals(var3.getWorld().getUID())
+               && Math.abs(previous.x() - var3.getX()) <= clusterRadius
+               && Math.abs(previous.y() - var3.getY()) <= clusterRadius
+               && Math.abs(previous.z() - var3.getZ()) <= clusterRadius);
+            if (sameCluster) return;
+            discoveries.addLast(new OreDiscovery(var4, var3.getWorld().getUID(), var3.getX(), var3.getY(), var3.getZ()));
+            int var7 = discoveries.size();
             int var8 = this.getConfig().getInt("checks.mining.alert-threshold", 6);
+            String location = "world=" + var3.getWorld().getName() + ", x=" + var3.getX()
+               + ", y=" + var3.getY() + ", z=" + var3.getZ();
+            if (this.getConfig().getBoolean("checks.mining.log-discoveries", true)) {
+               this.logOffense("MINING_DISCOVERY player=" + var2.getName() + " block="
+                  + var3.getType().name().toLowerCase(Locale.ROOT) + " " + location
+                  + " distinct-discoveries=" + var7);
+            }
             if (var7 >= var8) {
-               String var9 = "hidden-valuables=" + var7 + ", block=" + var3.getType().name().toLowerCase(Locale.ROOT);
+               String var9 = "distinct-hidden-valuables=" + var7 + ", block="
+                  + var3.getType().name().toLowerCase(Locale.ROOT) + ", " + location;
                this.alert(var2, "mining", "Suspicious hidden-ore mining pattern (" + var9 + ")", true);
             }
          }
@@ -692,7 +715,18 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
    }
 
    private void appendOffenseLine(String line) throws IOException {
+      dev.pizzasmp.common.SuiteStorage db = this.store;
+      if (db != null) {
+         if (!db.appendEventResult("offense", line.strip())) throw new IOException("database write failed");
+         return;
+      }
       Files.createDirectories(this.offenseLogPath.getParent());
+      try {
+         Files.setPosixFilePermissions(this.offenseLogPath.getParent(),
+            Set.of(java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+               java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+               java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE));
+      } catch (UnsupportedOperationException ignored) { }
       Files.writeString(
          this.offenseLogPath,
          line,
@@ -701,6 +735,11 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
          StandardOpenOption.WRITE,
          StandardOpenOption.APPEND
       );
+      try {
+         Files.setPosixFilePermissions(this.offenseLogPath,
+            Set.of(java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+               java.nio.file.attribute.PosixFilePermission.OWNER_WRITE));
+      } catch (UnsupportedOperationException ignored) { }
    }
 
    private void startDupeSweepTask() {
@@ -879,4 +918,6 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
          this.horizontalDistance = var3;
       }
    }
+
+   private record OreDiscovery(long timestampMillis, UUID worldId, int x, int y, int z) { }
 }

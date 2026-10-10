@@ -56,11 +56,12 @@ checks:
 
   mining:
     enabled: true
-    # Low-confidence alerting for Xray-like mining paths.
-    # This only watches valuable ores that were not naturally exposed to open air/liquid.
-    # It is staff-visibility only; no automatic punishments are issued here.
+    # Low-confidence evidence for Xray-like mining paths, never an automatic punishment.
+    # Nearby ore blocks in one vein count as one discovery; each distinct discovery is logged with location.
     window-ms: 600000
     alert-threshold: 6
+    cluster-radius-blocks: 4
+    log-discoveries: true
     # Count an ore as "hidden" when this many or fewer faces are exposed to air, cave air, void air, water, or lava.
     max-exposed-faces: 1
     watched-blocks:

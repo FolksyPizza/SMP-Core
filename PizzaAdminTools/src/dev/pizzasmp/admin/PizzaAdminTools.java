@@ -75,6 +75,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 
 import org.bukkit.Bukkit;
+import dev.pizzasmp.common.menu.MenuLock;
 import org.bukkit.ChatColor;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -90,6 +91,7 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
@@ -120,8 +122,9 @@ import org.bukkit.util.Vector;
 
 public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor, TabCompleter, Listener {
     private static final String PERM_GTP = "pizzasmp.gtp";
-    private static final String PERM_HOME_ADMIN = "sethome.admin";
-    private static final String PERM_HOME_USE = "sethome.use";
+    private static final String PERM_HOME_ADMIN = "pizzasmp.home.admin";
+    private static final String PERM_ADMIN_HOMES = "pizzasmp.admin.homes";
+    private static final String PERM_HOME_USE = "pizzasmp.home.use";
     private static final String PERM_HOMES_CMD = "pizzasmp.homes";
     private static final String PERM_MENU_CMD = "pizzasmp.menu";
     private static final String PERM_GUIDE_CMD = "pizzasmp.guide";
@@ -134,7 +137,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private static final String PERM_MAINT_ADMIN = "pizzasmp.maintenance.admin";
     private static final String PERM_COMBAT_BYPASS = "pizzasmp.combat.bypass";
     private static final String PERM_PLUGIN_ADMIN = "pizzasmp.pluginadmin";
+    private static final String PERM_FILTER_TELEPORT = "pizzasmp.commandfilter.teleport";
     private static final String PERM_SUS_CMD = "pizzasmp.sus";
+    private static final String PERM_SUS_MANAGE = "pizzasmp.sus.manage";
     private static final String PERM_NV_CMD = "pizzasmp.nv";
     private static final String PERM_NV_OTHERS_CMD = "pizzasmp.nv.others";
     private static final String PERM_STASH_CMD = "pizzasmp.admin.stash";
@@ -159,14 +164,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private static final String BRAND_NAME = "PizzaPaper";
     // Brand identity comes from PizzaNetworkCore's branding.yml (see loadBranding); these are neutral defaults.
-    private static String BRAND_DISPLAY = "ExampleSMP";
+    private static String BRAND_DISPLAY = "";
     private static String BRAND_DISCORD = "";
     private static String BRAND_SECTION = "&x&0&0&B&F&F&F";
     private static net.kyori.adventure.text.format.TextColor BRAND_COLOR = net.kyori.adventure.text.format.TextColor.color(0x00BFFF);
-    private static String SUS_MENU_TITLE = "&8ExampleSMP Sus";
+    private static String SUS_MENU_TITLE = "&8Sus";
+    private static final String SUS_DETAIL_TITLE = "&8Sus Flags";
 
     private static final long COMBAT_TAG_MILLIS = 15_000L;
-    private static final long SUS_LOOKBACK_MILLIS = 30L * 60L * 1000L;
     private static final Pattern PLAYER_NAME_PATTERN = Pattern.compile("^[A-Za-z0-9_]{3,16}$");
     private static final int SUS_PAGE_SIZE = 45;
 
@@ -179,9 +184,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     // NOTE: /duel is intentionally NOT here. Its first arg is often a SUBCOMMAND (accept/deny/cancel),
     // not a player name, so gating it as an online-target command wrongly blocked "/duel accept <name>"
     // with "The user is not online". /duel is fully handled by PizzaNetworkCore.
-    private static final Set<String> ONLINE_TARGET_FIRST_ARG_COMMANDS = Set.of(
-        "tpa", "tpahere", "tpaccept", "tpdeny", "msg", "tell", "w", "whisper", "pay", "trade"
-    );
+    // Only commands PizzaNetworkCore does not own. PNC resolves msg, tpa and pay across the whole network; gating
+    // them here on the local player list answered "not online" for anyone on another backend.
+    private static final Set<String> ONLINE_TARGET_FIRST_ARG_COMMANDS = Set.of("whisper", "trade");
     private static final Set<String> RESTRICTED_FOR_NON_STAFF = Set.of(
         "nuke",
         "attribute",
@@ -480,13 +485,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         Map.entry("e", "world_the_end")
     );
 
-    private static String HOME_MENU_TITLE = "&8ExampleSMP Homes";
+    private static String HOME_MENU_TITLE = "&8Homes";
     private static final String HOME_DELETE_TITLE = "&8Confirm Home Deletion";
     // Absolute slot ceiling (pizza++ tier). Per-player limits come from allowedHomes().
     // NOTE: the current GUI still renders only the 5 BED_SLOTS — the GUI rework lands later;
     // the data layer + /sethome|/delhome|/home <name> already honor the full tier limits.
     private static final int MAX_HOME_SLOTS = 27;
     // Tier permission nodes: default 3, pizza+ 9, pizza++ 27 (granted via LuckPerms on deploy).
+    private static final String PERM_HOMES_5 = "pizzasmp.homes.5";
     private static final String PERM_HOMES_9 = "pizzasmp.homes.9";
     private static final String PERM_HOMES_27 = "pizzasmp.homes.27";
     private static final int HOMES_DEFAULT_LIMIT = 3;
@@ -494,7 +500,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     // EXCLUDED on purpose: '.' (Bukkit config path separator -> would corrupt SetHome storage),
     // ' ' space (breaks `/home <name>` arg parsing), ':' (UI action-id delimiter), and the color
     // chars '&'/'§'. Everything else listed (, _ - ' ! ? ( ) # + ~ @ = and more) is fine.
-    private static final Pattern HOME_NAME_PATTERN = Pattern.compile("^[\\p{L}\\p{N}_,'!?()#+~@=\\-]{1,24}$");
+    private static final Pattern HOME_NAME_PATTERN = Pattern.compile("^(?! )(?!.*  )[\\p{L}\\p{N} _,'!?()#+~@=\\-]{1,24}(?<! )$");
     private static final int[] BED_SLOTS = {10, 11, 12, 13, 14};
     private static final int[] DYE_SLOTS = {19, 20, 21, 22, 23};
     private static final String OWNER_BLUE = "&b";
@@ -506,15 +512,15 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             org.bukkit.configuration.file.YamlConfiguration b = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(
                 new File(getConfig().getString("branding.file", "plugins/PizzaNetworkCore/branding.yml")));
             String active = b.getString("active", "example");
-            BRAND_DISPLAY = b.getString("profiles." + active + ".display", "ExampleSMP");
+            BRAND_DISPLAY = b.getString("profiles." + active + ".display", "");
             BRAND_DISCORD = b.getString("profiles." + active + ".discord", "");
             String hex = b.getString("profiles." + active + ".colors.primary", "00BFFF").toUpperCase(Locale.ROOT);
             BRAND_COLOR = net.kyori.adventure.text.format.TextColor.color(Integer.parseInt(hex, 16));
             StringBuilder section = new StringBuilder("&x");
             for (char c : hex.toCharArray()) section.append('&').append(c);
             BRAND_SECTION = section.toString();
-            SUS_MENU_TITLE = "&8" + BRAND_DISPLAY + " Sus";
-            HOME_MENU_TITLE = "&8" + BRAND_DISPLAY + " Homes";
+            SUS_MENU_TITLE = "&8" + branded("Sus");
+            HOME_MENU_TITLE = "&8" + branded("Homes");
             HOME_PRIMARY = BRAND_SECTION;
         } catch (Exception ex) {
             getLogger().warning("[brand] branding.yml could not be read; using defaults: " + ex.getMessage());
@@ -523,12 +529,15 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private final Map<UUID, Long> combatTaggedUntil = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> adminTargetIndex = new ConcurrentHashMap<>();
-    // Homes dialog: remembered expansion (9/27) so actions return to the same view; cleared on fresh /homes.
+    // Homes dialog expansion is opt-in through homes.show-locked-slots.
     private final Map<UUID, Integer> homesDialogExpanded = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> pendingDeleteSlot = new ConcurrentHashMap<>();
     // Legacy homes grid: delete confirmation keyed by the actual home NAME (so custom-named homes
     // are never mis-deleted by slot index).
     private final Map<UUID, String> pendingDeleteHome = new ConcurrentHashMap<>();
+    // Staff browsing a specific player's homes (/homes <player>), and a pending staff delete of one of them.
+    private final Map<UUID, UUID> adminHomesTarget = new ConcurrentHashMap<>();
+    private final Map<UUID, String> pendingAdminDeleteHome = new ConcurrentHashMap<>();
     // Short window after a teleport during which fall damage is cancelled (kills carried momentum).
     private final Map<UUID, Long> noFallDamageUntil = new ConcurrentHashMap<>();
     // Staff mode (/sfmode): staff who toggle this are treated as normal players for the command
@@ -550,11 +559,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private final Set<UUID> maintenanceUnfreezePending = ConcurrentHashMap.newKeySet();
     private File maintenanceModeFile;
     private final Map<UUID, Integer> susMenuPages = new ConcurrentHashMap<>();
+    private final Map<UUID, SusDetailState> susDetailStates = new ConcurrentHashMap<>();
+    private volatile boolean susHistoryUnavailable;
     private final Set<UUID> nvEnabled = ConcurrentHashMap.newKeySet();
     private final Map<UUID, AtrackSession> atrackSessions = new ConcurrentHashMap<>();
     private final Map<UUID, GameMode> atrackPriorMode = new ConcurrentHashMap<>();
     private final Map<UUID, Player> atrackTrackers = new ConcurrentHashMap<>();
     private org.bukkit.NamespacedKey atrackRestoreModeKey;
+    private org.bukkit.NamespacedKey atrackRestoreLocationKey;
     private org.bukkit.NamespacedKey maintenanceRestoreInvulnerabilityKey;
     private volatile boolean atrackStopping;
     private CommandMap commandMap;
@@ -606,14 +618,20 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     @Override
     public void onEnable() {
+        saveDefaultConfig();
         loadBranding();
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "admintools");
         if (!this.storage.isMysql()) {
             getLogger().warning("[storage] running on local files: subscription tiers, staff mode and "
-                + "night vision will NOT be shared between backends. Set storage.backend: mysql to share them.");
+                + "night vision will NOT be shared between backends. Configure a database (PizzaNetworkCore sync.database or storage.database) to share them.");
         }
+        initHomeStorage();
         registerCommand("gtp", true);
         registerCommand("homes", false);
+        registerCommand("home", true);
+        registerCommand("sethome", false);
+        registerCommand("delhome", true);
+        registerCommand("admindelhome", true);
         registerCommand("menu", false);
         registerCommand("guide", false);
         registerCommand("freeze", true);
@@ -629,16 +647,19 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         registerCommand("pizzaplus", true);
         registerCommand("perks", false);
         registerCommand("atrack", true);
+        registerCommand("nv", true);
         registerCommand("servermaint", true);
         registerCommand("sfmode", false);
         registerCommand("gmcbypass", false);
-        // /sus is registered by PizzaNetworkCore (with /suspicious alias) — removed here to avoid conflict
+        // /sus is registered by PizzaNetworkCore (with /suspicious alias); without it, register it here.
         commandMap = resolveCommandMap();
+        registerStandaloneSus();
         loadStaffMode();
         initTransferDestinations();
         initMaintenanceTransferState();
         loadMaintenanceMode();
         this.atrackRestoreModeKey = new org.bukkit.NamespacedKey(this, "atrack_restore_mode");
+        this.atrackRestoreLocationKey = new org.bukkit.NamespacedKey(this, "atrack_restore_location");
         this.maintenanceRestoreInvulnerabilityKey = new org.bukkit.NamespacedKey(this, "maintenance_restore_invulnerable");
         // Keep the green maintenance hotbar persistent (action bars fade after ~3s) — refresh every 2s.
         PlatformScheduler.globalRepeating(this, () -> {
@@ -675,6 +696,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         this.frozenAnchors.clear();
         this.frozenNoticeCooldown.clear();
         this.susMenuPages.clear();
+        this.susDetailStates.clear();
         this.commandMap = null;
         this.saveMaintenanceTransferState();
         this.savePizzaPlusSubscriptions();
@@ -804,7 +826,20 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             case "gtp":
                 return this.handleGtpCommand(var1, var4);
             case "homes":
-                return this.handleHomesCommand(var1);
+            case "home":
+            case "sethome":
+            case "delhome":
+            case "admindelhome": {
+                if (!(var1 instanceof Player player)) {
+                    var1.sendMessage(color("&cOnly players can use /" + var5 + "."));
+                    return true;
+                }
+                String[] parts = new String[var4.length + 1];
+                parts[0] = var5;
+                System.arraycopy(var4, 0, parts, 1, var4.length);
+                this.routeHomeCommand(player, parts);
+                return true;
+            }
             case "menu":
                 return this.handleMenuCommand(var1);
             case "guide":
@@ -856,6 +891,16 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        String cmd = command.getName().toLowerCase(Locale.ROOT);
+        if (("home".equals(cmd) || "delhome".equals(cmd)) && args.length == 1) {
+            return completeOwnHomes(sender, args[0]);
+        }
+        if ("admindelhome".equals(cmd)) {
+            if (!(sender instanceof Player p) || !isHomeAdmin(p)) return Collections.emptyList();
+            if (args.length == 1) return completePlayerNames(args[0], false);
+            if (args.length == 2) return completeTargetHomeSlots(args[0], args[1]);
+            return Collections.emptyList();
+        }
         if (command.getName().equalsIgnoreCase("freeze")) {
             if (args.length == 1) {
                 return completePlayerNames(args[0], false);
@@ -932,11 +977,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         if (args.length == 2) {
             OfflinePlayer target = Bukkit.getOfflinePlayer(args[0]);
-            File targetFile = getSetHomeDataFile(target);
+            HomeFile targetFile = homeFile(target);
             if (targetFile == null || !targetFile.exists()) {
                 return Collections.emptyList();
             }
-            FileConfiguration cfg = YamlConfiguration.loadConfiguration(targetFile);
+            FileConfiguration cfg = targetFile.load();
             List<String> homes = cfg.getStringList("homes");
             List<String> out = new ArrayList<>();
             String prefix = args[1].toLowerCase(Locale.ROOT);
@@ -984,13 +1029,13 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return true;
         }
 
-        File targetFile = getSetHomeDataFile(target);
+        HomeFile targetFile = homeFile(target);
         if (targetFile == null || !targetFile.exists()) {
             player.sendMessage(color("&cNo SetHome data found for &e" + safeName(target) + "&c."));
             return true;
         }
 
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(targetFile);
+        FileConfiguration cfg = targetFile.load();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         if (homes.isEmpty()) {
             player.sendMessage(color("&c" + safeName(target) + " has no homes."));
@@ -1533,7 +1578,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             openPizzaPlusListDialog(viewer, tierFilter, subs);
             return;
         }
-        Inventory inv = Bukkit.createInventory(null, 54, color(PIZZAPLUS_LIST_TITLE
+        Inventory inv = MenuLock.create(54, color(PIZZAPLUS_LIST_TITLE
             + (tierFilter != null ? " &7(" + tierDisplay(tierFilter) + ")" : "")));
         int slot = 0;
         for (UUID uuid : subs) {
@@ -1762,10 +1807,24 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
 
         AtrackSession previous = this.atrackSessions.get(trackerId);
-        if (!this.atrackTrackers.containsKey(trackerId) && tracker.getGameMode() != GameMode.SPECTATOR) {
-            GameMode priorMode = tracker.getGameMode();
-            this.atrackPriorMode.putIfAbsent(trackerId, priorMode);
-            this.persistAtrackPriorMode(tracker, priorMode);
+        if (previous == null) {
+            try {
+                Location returnLocation = tracker.getLocation().clone();
+                if (tracker.getGameMode() != GameMode.SPECTATOR) {
+                    GameMode priorMode = tracker.getGameMode();
+                    this.atrackPriorMode.put(trackerId, priorMode);
+                    this.persistAtrackPriorMode(tracker, priorMode);
+                }
+                this.persistAtrackReturnLocation(tracker, returnLocation);
+                // Make the recovery marker durable before the camera starts moving the player.
+                tracker.saveData();
+            } catch (RuntimeException exception) {
+                this.atrackPriorMode.remove(trackerId);
+                this.clearAtrackRestoreState(tracker);
+                tracker.sendMessage(color("&cCould not save your /atrack return point; tracking was not started."));
+                this.getLogger().warning("Could not persist /atrack return state before camera movement.");
+                return;
+            }
         }
         if (previous != null) this.deactivateAtrack(previous);
 
@@ -1791,8 +1850,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
                 Location location = target.getLocation();
                 Vector velocity = target.getVelocity();
+                Location eye = target.getEyeLocation();
+                Location focus = this.findAtrackFocus(target, eye);
                 AtrackPose pose = new AtrackPose(location.getWorld(), location.getX(), location.getY(), location.getZ(),
-                    location.getYaw(), location.getPitch(), velocity.getX(), velocity.getY(), velocity.getZ());
+                    location.getYaw(), location.getPitch(), velocity.getX(), velocity.getY(), velocity.getZ(),
+                    focus.getX(), focus.getY(), focus.getZ());
                 try {
                     PlatformScheduler.entityNow(this, tracker, () -> {
                         try {
@@ -1831,15 +1893,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
 
         Location targetLocation = pose.toLocation();
-        if (!session.initialPoseApplied) {
-            if (!tracker.teleport(targetLocation)) {
-                this.stopAtrackSession(session, null);
-                return;
-            }
-            session.initialPoseApplied = true;
-            return;
-        }
-
         Vector flatVelocity = new Vector(pose.velocityX, 0.0, pose.velocityZ);
         Vector behind;
         if (flatVelocity.lengthSquared() > 0.0025) {
@@ -1852,25 +1905,77 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
 
         Location desired = targetLocation.clone().add(behind.clone().multiply(4.5)).add(0.0, 2.2, 0.0);
+        Location targetFocus = targetLocation.clone().add(0.0, 1.25, 0.0);
+        Vector focus = atrackFramingPoint(targetFocus.toVector(), new Vector(pose.focusX, pose.focusY, pose.focusZ));
         Location previous = session.cameraLocation;
         Location camera;
-        if (previous == null || previous.getWorld() != desired.getWorld() || previous.distanceSquared(desired) > 900.0) {
+        boolean snap = previous == null || previous.getWorld() != desired.getWorld() || previous.distanceSquared(desired) > 900.0;
+        if (snap) {
             camera = desired.clone();
         } else {
-            double easing = 0.35;
+            double easing = 0.24;
             camera = previous.clone();
             camera.add((desired.getX() - previous.getX()) * easing,
                 (desired.getY() - previous.getY()) * easing,
                 (desired.getZ() - previous.getZ()) * easing);
         }
-        Vector direction = targetLocation.clone().add(0.0, 1.2, 0.0).toVector().subtract(camera.toVector());
-        if (direction.lengthSquared() > 1.0E-6) camera.setDirection(direction);
+        Vector direction = focus.subtract(camera.toVector());
+        if (direction.lengthSquared() > 1.0E-6) {
+            Location desiredView = desired.clone();
+            desiredView.setDirection(direction);
+            if (snap) {
+                camera.setYaw(desiredView.getYaw());
+                camera.setPitch(desiredView.getPitch());
+            } else {
+                camera.setYaw(smoothAtrackYaw(previous.getYaw(), desiredView.getYaw(), 0.28f));
+                camera.setPitch(previous.getPitch() + (desiredView.getPitch() - previous.getPitch()) * 0.28f);
+            }
+        }
 
         if (!tracker.teleport(camera)) {
             this.stopAtrackSession(session, null);
             return;
         }
         session.cameraLocation = camera;
+    }
+
+    private Location findAtrackFocus(Player target, Location eye) {
+        Vector direction = eye.getDirection();
+        if (direction.lengthSquared() < 1.0E-8) return eye.clone().add(0.0, 0.0, 8.0);
+        direction.normalize();
+        double maxDistance = 24.0;
+        org.bukkit.util.RayTraceResult blockHit = target.getWorld().rayTraceBlocks(
+            eye, direction, maxDistance, FluidCollisionMode.NEVER, true);
+        org.bukkit.util.RayTraceResult entityHit = target.getWorld().rayTraceEntities(
+            eye, direction, maxDistance, 0.15,
+            candidate -> candidate != target && candidate.isValid() && !candidate.isDead()
+                && candidate instanceof LivingEntity);
+        Vector origin = eye.toVector();
+        double blockDistance = blockHit == null || blockHit.getHitPosition() == null
+            ? Double.POSITIVE_INFINITY : blockHit.getHitPosition().distanceSquared(origin);
+        double entityDistance = entityHit == null || entityHit.getHitPosition() == null
+            ? Double.POSITIVE_INFINITY : entityHit.getHitPosition().distanceSquared(origin);
+        if (entityHit != null && entityDistance < blockDistance && entityHit.getHitEntity() != null) {
+            Entity focused = entityHit.getHitEntity();
+            return focused.getLocation().add(0.0, focused.getHeight() * 0.5, 0.0);
+        }
+        if (blockHit != null && blockHit.getHitPosition() != null) {
+            Vector hit = blockHit.getHitPosition();
+            return new Location(target.getWorld(), hit.getX(), hit.getY(), hit.getZ());
+        }
+        return eye.clone().add(direction.multiply(12.0));
+    }
+
+    static Vector atrackFramingPoint(Vector subject, Vector gazeFocus) {
+        return subject.clone().multiply(0.65).add(gazeFocus.clone().multiply(0.35));
+    }
+
+    static float smoothAtrackYaw(float current, float target, float alpha) {
+        float delta = (target - current) % 360.0f;
+        if (delta >= 180.0f) delta -= 360.0f;
+        if (delta < -180.0f) delta += 360.0f;
+        float easing = Math.max(0.0f, Math.min(1.0f, alpha));
+        return current + delta * easing;
     }
 
     private boolean isCurrentAtrack(AtrackSession session) {
@@ -1891,8 +1996,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private void retireAtrackTracker(AtrackSession session) {
         if (!this.isCurrentAtrack(session) || !this.deactivateAtrack(session)) return;
-        this.atrackPriorMode.remove(session.trackerId);
-        this.atrackTrackers.remove(session.trackerId, session.tracker);
+        this.restoreAtrackTracker(session.tracker, session.trackerId, null, null);
     }
 
     private void restoreAtrackTracker(Player tracker, UUID trackerId, Component message, CompletableFuture<Void> completion) {
@@ -1912,7 +2016,16 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 if (previousMode != null && tracker.getGameMode() != previousMode) {
                     throw new IllegalStateException("Previous game mode was not restored.");
                 }
-                this.clearAtrackPriorMode(tracker);
+                Location returnLocation = this.readAtrackReturnLocation(tracker);
+                if (returnLocation != null && !tracker.teleport(returnLocation)) {
+                    throw new IllegalStateException("Saved return location was rejected.");
+                }
+                this.clearAtrackRestoreState(tracker);
+                try {
+                    tracker.saveData();
+                } catch (RuntimeException exception) {
+                    this.getLogger().warning("Could not persist cleared /atrack recovery state.");
+                }
                 if (message != null) tracker.sendActionBar(message);
                 shouldClear = true;
                 this.atrackPriorMode.remove(trackerId);
@@ -1966,6 +2079,60 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             org.bukkit.persistence.PersistentDataType.STRING, gameMode.name());
     }
 
+    private void persistAtrackReturnLocation(Player player, Location location) {
+        if (this.atrackRestoreLocationKey == null || location == null || location.getWorld() == null) {
+            throw new IllegalArgumentException("A complete /atrack return location is required.");
+        }
+        player.getPersistentDataContainer().set(this.atrackRestoreLocationKey,
+            org.bukkit.persistence.PersistentDataType.STRING,
+            encodeAtrackReturnLocation(location.getWorld().getUID(), location.getX(), location.getY(), location.getZ(),
+                location.getYaw(), location.getPitch()));
+    }
+
+    private Location readAtrackReturnLocation(Player player) {
+        if (this.atrackRestoreLocationKey == null) return null;
+        String stored = player.getPersistentDataContainer().get(this.atrackRestoreLocationKey,
+            org.bukkit.persistence.PersistentDataType.STRING);
+        if (stored == null) return null;
+        AtrackReturnLocation saved = decodeAtrackReturnLocation(stored);
+        World world = Bukkit.getWorld(saved.worldId());
+        if (world == null) throw new IllegalStateException("Saved /atrack world is not loaded.");
+        return new Location(world, saved.x(), saved.y(), saved.z(), saved.yaw(), saved.pitch());
+    }
+
+    static String encodeAtrackReturnLocation(UUID worldId, double x, double y, double z, float yaw, float pitch) {
+        if (worldId == null || !Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)
+                || !Float.isFinite(yaw) || !Float.isFinite(pitch)) {
+            throw new IllegalArgumentException("Invalid /atrack return location.");
+        }
+        return worldId + "," + Double.toString(x) + "," + Double.toString(y) + "," + Double.toString(z)
+            + "," + Float.toString(yaw) + "," + Float.toString(pitch);
+    }
+
+    static AtrackReturnLocation decodeAtrackReturnLocation(String encoded) {
+        try {
+            String[] parts = encoded.split(",", -1);
+            if (parts.length != 6) throw new IllegalArgumentException("wrong field count");
+            AtrackReturnLocation location = new AtrackReturnLocation(UUID.fromString(parts[0]),
+                Double.parseDouble(parts[1]), Double.parseDouble(parts[2]), Double.parseDouble(parts[3]),
+                Float.parseFloat(parts[4]), Float.parseFloat(parts[5]));
+            if (!Double.isFinite(location.x()) || !Double.isFinite(location.y()) || !Double.isFinite(location.z())
+                    || !Float.isFinite(location.yaw()) || !Float.isFinite(location.pitch())) {
+                throw new IllegalArgumentException("non-finite coordinate");
+            }
+            return location;
+        } catch (RuntimeException exception) {
+            throw new IllegalStateException("Saved /atrack return location is invalid.", exception);
+        }
+    }
+
+    private void clearAtrackRestoreState(Player player) {
+        this.clearAtrackPriorMode(player);
+        if (this.atrackRestoreLocationKey != null) {
+            player.getPersistentDataContainer().remove(this.atrackRestoreLocationKey);
+        }
+    }
+
     private GameMode readAtrackPriorMode(Player player) {
         if (this.atrackRestoreModeKey == null) return null;
         String stored = player.getPersistentDataContainer().get(this.atrackRestoreModeKey,
@@ -1988,8 +2155,15 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private void recoverAtrackMode(Player player) {
         if (!player.isOnline() || this.atrackSessions.containsKey(player.getUniqueId())) return;
         GameMode previousMode = this.readAtrackPriorMode(player);
-        if (previousMode == null) {
-            this.clearAtrackPriorMode(player);
+        Location returnLocation;
+        try {
+            returnLocation = this.readAtrackReturnLocation(player);
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not recover /atrack location for a player; retaining the saved marker.");
+            return;
+        }
+        if (previousMode == null && returnLocation == null) {
+            this.clearAtrackRestoreState(player);
             this.atrackPriorMode.remove(player.getUniqueId());
             this.atrackTrackers.remove(player.getUniqueId(), player);
             return;
@@ -1998,13 +2172,23 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             player.setSpectatorTarget(null);
             player.setGameMode(previousMode);
         }
-        if (player.getGameMode() == previousMode) {
-            this.clearAtrackPriorMode(player);
+        if (returnLocation != null && !player.teleport(returnLocation)) {
+            this.getLogger().warning("Could not teleport a rejoining /atrack user to the saved return point.");
+            return;
+        }
+        if (previousMode == null || player.getGameMode() == previousMode) {
+            this.clearAtrackRestoreState(player);
+            try { player.saveData(); } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not persist cleared /atrack recovery state after join.");
+            }
             this.atrackPriorMode.remove(player.getUniqueId());
             this.atrackTrackers.remove(player.getUniqueId(), player);
         } else if (player.getGameMode() != GameMode.SPECTATOR) {
             // The player already left spectator mode; never apply an old session marker later.
-            this.clearAtrackPriorMode(player);
+            this.clearAtrackRestoreState(player);
+            try { player.saveData(); } catch (RuntimeException exception) {
+                this.getLogger().warning("Could not persist cleared /atrack recovery state after join.");
+            }
             this.atrackPriorMode.remove(player.getUniqueId());
             this.atrackTrackers.remove(player.getUniqueId(), player);
         }
@@ -2068,11 +2252,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private record AtrackPose(World world, double x, double y, double z, float yaw, float pitch,
-                                      double velocityX, double velocityY, double velocityZ) {
+                                      double velocityX, double velocityY, double velocityZ,
+                                      double focusX, double focusY, double focusZ) {
         private Location toLocation() {
             return new Location(this.world, this.x, this.y, this.z, this.yaw, this.pitch);
         }
     }
+
+    record AtrackReturnLocation(UUID worldId, double x, double y, double z, float yaw, float pitch) { }
 
     private static final class AtrackSession {
         private final Player tracker;
@@ -2081,7 +2268,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         private final AtomicBoolean stopped = new AtomicBoolean();
         private final AtomicBoolean updatePending = new AtomicBoolean();
         private final AtomicReference<PlatformScheduler.TaskHandle> targetTask = new AtomicReference<>();
-        private boolean initialPoseApplied;
         private Location cameraLocation;
 
         private AtrackSession(Player tracker, UUID trackerId, UUID targetId) {
@@ -2209,7 +2395,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return true;
         }
         if (!player.hasPermission(PERM_HOMES_CMD) || !player.hasPermission(PERM_HOME_USE)) {
-            player.sendMessage(color("&cYou do not have permission to use /homes."));
+            // The preprocess listener silently blocks this command for players without home access.
             return true;
         }
         setTargetToSelf(player);
@@ -2264,7 +2450,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private void openGuideDialog(Player player) {
         java.util.List<DialogBody> body = java.util.List.of(
-            DialogBody.plainMessage(Component.text("Welcome to " + BRAND_DISPLAY + ". Pick a section below.", NamedTextColor.GRAY)));
+            DialogBody.plainMessage(Component.text("Welcome to " + (BRAND_DISPLAY.isBlank() ? "the server" : BRAND_DISPLAY) + ". Pick a section below.", NamedTextColor.GRAY)));
         java.util.List<ActionButton> buttons = java.util.List.of(
             dialogButton(Component.text("Commands", DIALOG_BRAND), null, 150, p -> openGuideSection(p, "commands")),
             dialogButton(Component.text("Economy & Shop", DIALOG_BRAND), null, 150, p -> openGuideSection(p, "economy")),
@@ -2272,7 +2458,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             dialogButton(Component.text("Rules", DIALOG_BRAND), null, 150, p -> openGuideSection(p, "rules")),
             dialogButton(Component.text("Discord", NamedTextColor.BLUE), null, 150, p -> { p.closeDialog(); p.performCommand("discord"); }),
             dialogButton(Component.text("Open Menu", NamedTextColor.WHITE), null, 150, p -> { p.closeDialog(); p.performCommand("menu"); }));
-        Dialog dialog = buildDialog(Component.text(BRAND_DISPLAY + " Guide", DIALOG_BRAND), body, java.util.List.of(),
+        Dialog dialog = buildDialog(Component.text(branded("Guide"), DIALOG_BRAND), body, java.util.List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(dialogButton(Component.text("Close"), null, 150, p -> p.closeDialog())).build());
         player.showDialog(dialog);
@@ -2315,7 +2501,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 body.add(DialogBody.plainMessage(Component.text("1) No cheating", NamedTextColor.GRAY)));
                 body.add(DialogBody.plainMessage(Component.text("2) No slurs / racism", NamedTextColor.GRAY)));
                 body.add(DialogBody.plainMessage(Component.text("3) No doxxing / threats", NamedTextColor.GRAY)));
-                body.add(DialogBody.plainMessage(Component.text("Appeals: Discord #appeals", NamedTextColor.GRAY)));
+                if (!BRAND_DISCORD.isBlank()) body.add(DialogBody.plainMessage(Component.text("Appeals: Discord #appeals", NamedTextColor.GRAY)));
             }
         }
         Dialog dialog = buildDialog(Component.text(title, DIALOG_BRAND), body, java.util.List.of(),
@@ -2476,6 +2662,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                         Location destination = target.getLocation().clone();
                         PlatformScheduler.entityNow(this, viewer, () -> {
                             if (!viewer.isOnline()) return;
+                            if (viewer.getGameMode() == GameMode.SPECTATOR && viewer.getSpectatorTarget() != null) {
+                                viewer.setSpectatorTarget(null);
+                            }
                             viewer.teleportAsync(destination, TeleportCause.COMMAND).whenComplete((success, failure) ->
                                 this.scheduleCommandFeedback(viewer,
                                     failure != null || !Boolean.TRUE.equals(success)
@@ -3133,8 +3322,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private boolean handlePizzaMenusHelp(CommandSender sender) {
         sender.sendMessage(color("&bPizzaMenus Commands"));
-        sender.sendMessage(color("&f/menu &7- Open " + BRAND_DISPLAY + " main menu"));
-        sender.sendMessage(color("&f/guide &7- Open " + BRAND_DISPLAY + " guide"));
+        sender.sendMessage(color("&f/menu &7- Open the main menu"));
+        sender.sendMessage(color("&f/guide &7- Open the guide"));
         return true;
     }
 
@@ -3155,34 +3344,95 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         sender.sendMessage(color("&f/bans or /moderation &7- Open the moderation GUI"));
         sender.sendMessage(color("&f/history <player|ip|id>, /searchid <id>"));
         sender.sendMessage(color("&f/listbans, /listmutes, /clearbans, /clearmutes"));
-        sender.sendMessage(color("&f/sus &7- Grim suspects from the last 30 minutes"));
+        sender.sendMessage(color("&f/sus &7- All active Grim flags until reviewed"));
         sender.sendMessage(color("&f/clearwarnings <player>"));
         sender.sendMessage(color("&f/clearallwarnings [player]"));
         return true;
     }
 
     private boolean handleSusCommand(CommandSender sender, String[] args) {
+        if (sender instanceof Player player && !player.hasPermission(PERM_SUS_CMD)
+                && !player.hasPermission(PERM_PLUGIN_ADMIN)) {
+            player.sendMessage(color("&cYou do not have permission to use /sus."));
+            return true;
+        }
+        if (args.length >= 2 && (args[0].equalsIgnoreCase("clear") || args[0].equalsIgnoreCase("restore"))) {
+            handleSusReviewCommand(sender, args[0], args[1]);
+            return true;
+        }
         int requestedPage = 0;
         if (args.length > 0 && !args[0].isBlank()) {
             try {
                 requestedPage = Math.max(0, Integer.parseInt(args[0]) - 1);
             } catch (NumberFormatException ex) {
-                sender.sendMessage(color("&cUsage: &e/sus [page]"));
+                openSusNamedDetail(sender, String.join(" ", args));
                 return true;
             }
         }
 
         if (sender instanceof Player player) {
-            if (!player.hasPermission(PERM_SUS_CMD) && !player.hasPermission(PERM_PLUGIN_ADMIN)) {
-                player.sendMessage(color("&cYou do not have permission to use /sus."));
-                return true;
-            }
             openSusMenu(player, requestedPage);
             return true;
         }
 
         sendConsoleSusPage(sender, requestedPage);
         return true;
+    }
+
+    private void openSusNamedDetail(CommandSender sender, String targetName) {
+        UUID subject = null;
+        String query = targetName.trim();
+        try { subject = UUID.fromString(query); } catch (IllegalArgumentException ignored) { }
+        if (subject == null) {
+            for (SusEntry entry : loadRecentSusEntries()) {
+                if (entry.playerName.equalsIgnoreCase(query)) {
+                    subject = entry.uuid;
+                    break;
+                }
+            }
+        }
+        if (subject == null) {
+            sender.sendMessage(color("&cNo undismissed Grim flags found for that player."));
+        } else if (sender instanceof Player player) {
+            openSusDetailMenu(player, subject, 0);
+        } else {
+            sendConsoleSusDetail(sender, subject);
+        }
+    }
+
+    private void handleSusReviewCommand(CommandSender sender, String action, String target) {
+        if (sender instanceof Player player && !player.hasPermission(PERM_SUS_MANAGE)
+                && !player.hasPermission(PERM_PLUGIN_ADMIN)) {
+            player.sendMessage(color("&cYou do not have permission to clear suspect flags."));
+            return;
+        }
+        UUID reviewer = sender instanceof Player player ? player.getUniqueId() : new UUID(0L, 0L);
+        UUID subject = null;
+        try { subject = UUID.fromString(target); } catch (IllegalArgumentException ignored) { }
+        if (action.equalsIgnoreCase("clear") && subject == null) {
+            for (SusEntry entry : loadRecentSusEntries()) {
+                if (entry.playerName.equalsIgnoreCase(target)) {
+                    subject = entry.uuid;
+                    break;
+                }
+            }
+        }
+        if (subject == null) {
+            sender.sendMessage(color("&cNo active suspect found. Use a UUID to restore cleared flags."));
+            return;
+        }
+        try {
+            if (action.equalsIgnoreCase("clear")) {
+                int count = susHistory().dismiss(subject, reviewer);
+                sender.sendMessage(color("&aDismissed " + count + " flag(s); Grim history remains intact."));
+            } else {
+                susHistory().restore(subject, reviewer);
+                sender.sendMessage(color("&aRestored the retained Grim flags for " + subject + "."));
+            }
+        } catch (Exception ex) {
+            getLogger().warning("Failed to update suspect review: " + ex.getMessage());
+            sender.sendMessage(color("&cSuspect review could not be saved; no change was made."));
+        }
     }
 
     private boolean handleNightVisionCommand(CommandSender sender, String[] args) {
@@ -3336,6 +3586,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (colonIdx > 0) {
             root = root.substring(colonIdx + 1);
         }
+        // pizzasmp.commandfilter.teleport lets /tp through this non-staff hide gate (for example a staff member
+        // playing as a regular player who keeps teleporting). The command's own permission still authorizes it.
+        if (player.hasPermission(PERM_FILTER_TELEPORT) && (root.equals("tp") || root.equals("teleport"))) {
+            return;
+        }
         if (RESTRICTED_FOR_NON_STAFF.contains(root)) {
             event.setCancelled(true);
             sendUnknownCommandMessage(player);
@@ -3362,6 +3617,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         // Real staff in /sfmode must keep /sfmode in their command tree so they can toggle it back
         // off (Bedrock/Geyser won't send a command the client doesn't know about).
         boolean realStaff = player.hasPermission(PERM_PLUGIN_ADMIN);
+        boolean sfModeTeleport = player.hasPermission(PERM_FILTER_TELEPORT);
         event.getCommands().removeIf(cmd -> {
             String raw = cmd.toLowerCase(Locale.ROOT);
             // Hide EVERY namespaced command variant (essentials:, deluxemenus:, minecraft:,
@@ -3373,6 +3629,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             }
             if (raw.equals("sfmode") && realStaff) {
                 return false; // keep usable
+            }
+            if (sfModeTeleport && (raw.equals("tp") || raw.equals("teleport"))) {
+                return false;
             }
             return RESTRICTED_FOR_NON_STAFF.contains(raw);
         });
@@ -3478,83 +3737,139 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onHomeMenuCommand(PlayerCommandPreprocessEvent event) {
-        Player player = event.getPlayer();
         String[] parts = parseCommandParts(event.getMessage());
-        if (parts.length == 0) {
-            return;
+        if (parts.length > 0 && routeHomeCommand(event.getPlayer(), parts)) {
+            event.setCancelled(true);
         }
+    }
 
+    /**
+     * Home commands, typed (preprocess) or dispatched (onCommand). parts[0] is the command. Home names may contain
+     * spaces, so everything after the command is one name. Returns false for anything that is not a home command.
+     */
+    private boolean routeHomeCommand(Player player, String[] parts) {
         String root = parts[0];
-        if (root.equals("homes")) {
-            if (!player.hasPermission(PERM_HOMES_CMD) || !player.hasPermission(PERM_HOME_USE)) {
-                event.setCancelled(true);
-                player.sendMessage(color("&cYou do not have permission to use /homes."));
-                return;
+        String arg = parts.length >= 2 ? String.join(" ", Arrays.copyOfRange(parts, 1, parts.length)) : null;
+        switch (root) {
+            case "homes" -> {
+                if (arg != null && isHomeAdmin(player)) {
+                    openHomesOf(player, parts[1]);
+                } else if (!player.hasPermission(PERM_HOMES_CMD) || !player.hasPermission(PERM_HOME_USE)) {
+                    // Do not reveal that this command exists to players without home access.
+                    return true;
+                } else {
+                    openHomesDialogFresh(player);
+                }
             }
-            event.setCancelled(true);
-            openHomesDialogFresh(player);
+            case "home" -> {
+                if (!player.hasPermission(PERM_HOME_USE)) {
+                    // The command is cancelled without a permission message.
+                    return true;
+                } else if (arg == null) {
+                    openHomesDialogFresh(player);
+                } else if (parts.length == 2 && "team".equalsIgnoreCase(parts[1])) {
+                    player.sendMessage(color("&cTeam homes have been retired. Your team's home was saved as a personal home (&e/home teamhome&c)."));
+                } else if (parts.length == 2 && NON_TELEPORT_HOME_SUBCOMMANDS.contains(parts[1].toLowerCase(Locale.ROOT))) {
+                    // Non-teleport subcommands (help/create/open/...) open the homes menu.
+                    openHomesDialogFresh(player);
+                } else {
+                    handleDirectHomeTeleport(player, arg);
+                }
+            }
+            case "sethome" -> {
+                if (!player.hasPermission(PERM_HOME_USE)) {
+                    // The command is cancelled without a permission message.
+                    return true;
+                } else {
+                    handleSetHomeCommand(player, arg);
+                }
+            }
+            case "delhome" -> {
+                if (!player.hasPermission(PERM_HOME_USE)) {
+                    // The command is cancelled without a permission message.
+                    return true;
+                } else if (arg == null) {
+                    player.sendMessage(color("&cUsage: /delhome <name|number>"));
+                } else {
+                    handleDelHomeCommand(player, arg);
+                }
+            }
+            case "admindelhome" -> {
+                if (!isHomeAdmin(player)) {
+                    player.sendMessage(color("&cYou do not have permission to use /admindelhome."));
+                } else if (parts.length < 3) {
+                    player.sendActionBar(color("&cUsage: /admindelhome <player> <home>"));
+                } else {
+                    OfflinePlayer target = resolveKnownPlayer(parts[1]);
+                    if (target == null) {
+                        player.sendMessage(color("&cPlayer not found: &e" + parts[1]));
+                    } else {
+                        adminDeleteHome(player, target, String.join(" ", Arrays.copyOfRange(parts, 2, parts.length)));
+                    }
+                }
+            }
+            default -> {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Home administration: the legacy SetHome node or the suite node. */
+    private boolean isHomeAdmin(Player player) {
+        return player.hasPermission(PERM_HOME_ADMIN) || player.hasPermission(PERM_ADMIN_HOMES);
+    }
+
+    /** A player this server knows by name, online or offline; null when unknown. */
+    private OfflinePlayer resolveKnownPlayer(String name) {
+        Player online = Bukkit.getPlayerExact(name);
+        if (online != null) return online;
+        OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(name);
+        return cached != null && (cached.hasPlayedBefore() || homeFile(cached).exists()) ? cached : null;
+    }
+
+    /** Staff: open another player's homes, online or offline. Left-click teleports, right-click deletes. */
+    private void openHomesOf(Player viewer, String name) {
+        OfflinePlayer target = resolveKnownPlayer(name);
+        if (target == null) {
+            viewer.sendMessage(color("&cPlayer not found: &e" + name));
             return;
         }
-
-        if (root.equals("home") && parts.length == 1) {
-            if (!player.hasPermission(PERM_HOME_USE)) {
-                event.setCancelled(true);
-                player.sendMessage(color("&cYou do not have permission to use /home."));
-                return;
-            }
-            event.setCancelled(true);
-            openHomesDialogFresh(player);
+        if (!homeFile(target).exists()) {
+            viewer.sendMessage(color("&7" + safeName(target) + " has no homes."));
             return;
         }
+        this.adminHomesTarget.put(viewer.getUniqueId(), target.getUniqueId());
+        openHomesMenu(viewer, target);
+    }
 
-        if (root.equals("home") && parts.length >= 2) {
-            if (!player.hasPermission(PERM_HOME_USE)) {
-                event.setCancelled(true);
-                player.sendMessage(color("&cYou do not have permission to use /home."));
-                return;
-            }
-            String sub = parts[1].toLowerCase(Locale.ROOT);
-            if ("team".equals(sub)) {
-                event.setCancelled(true);
-                player.sendMessage(color("&cTeam homes have been retired — your team's home was saved as a personal home (&e/home teamhome&c)."));
-                return;
-            }
-            if (NON_TELEPORT_HOME_SUBCOMMANDS.contains(sub)) {
-                // Non-teleport subcommands (help/create/open/...) open the homes GUI rather than
-                // falling through to the old legacy homes UI.
-                event.setCancelled(true);
-                openHomesDialogFresh(player);
-                return;
-            }
-            event.setCancelled(true);
-            handleDirectHomeTeleport(player, parts[1]);
+    /** Staff delete of another player's home, with the same backup as /delhome. */
+    private void adminDeleteHome(Player admin, OfflinePlayer target, String homeArg) {
+        HomeFile file = homeFile(target);
+        if (!file.exists()) {
+            admin.sendMessage(color("&cNo homes found for &e" + safeName(target) + "&c."));
             return;
         }
-
-        // Named homes backend (#8): /sethome [name] and /delhome <name|index>.
-        // Essentials' versions are in its disabled-commands list, so PAT owns these.
-        if (root.equals("sethome")) {
-            event.setCancelled(true);
-            if (!player.hasPermission(PERM_HOME_USE)) {
-                player.sendMessage(color("&cYou do not have permission to use /sethome."));
-                return;
-            }
-            handleSetHomeCommand(player, parts.length >= 2 ? parts[1] : null);
+        FileConfiguration cfg = file.load();
+        List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
+        String name = resolveHomeArg(homeArg.toLowerCase(Locale.ROOT), homes, cfg);
+        if (name == null) {
+            admin.sendMessage(color("&cHome not found for &e" + safeName(target) + "&c."));
             return;
         }
-
-        if (root.equals("delhome")) {
-            event.setCancelled(true);
-            if (!player.hasPermission(PERM_HOME_USE)) {
-                player.sendMessage(color("&cYou do not have permission to use /delhome."));
-                return;
-            }
-            if (parts.length < 2) {
-                player.sendMessage(color("&cUsage: /delhome <name|number>"));
-                return;
-            }
-            handleDelHomeCommand(player, parts[1]);
+        backupHome(target, name, cfg);
+        homes.remove(name);
+        cfg.set(name, null);
+        cfg.set("homes", homes);
+        try {
+            file.save(cfg);
+        } catch (Exception ex) {
+            getLogger().warning("Failed to delete home " + name + " of " + safeName(target) + ": " + ex.getMessage());
+            admin.sendMessage(color("&cFailed to delete that home."));
+            return;
         }
+        getLogger().info("[Homes] " + admin.getName() + " deleted " + safeName(target) + "'s home " + name + " (backed up).");
+        admin.sendMessage(color("&7Deleted home &f" + name + "&7 from &f" + safeName(target) + "&7."));
     }
 
     // DISABLED: /rtp is now fully owned by PizzaNetworkCore (which absorbed the RTP logic).
@@ -3620,6 +3935,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         // No argument suggestions for restricted (staff) commands to non-staff / staff-mode players.
         if (event.getSender() instanceof Player tabPlayer
                 && !isEffectivelyStaff(tabPlayer)
+                && !(tabPlayer.hasPermission(PERM_FILTER_TELEPORT)
+                    && (request.root.equals("tp") || request.root.equals("teleport")))
                 && RESTRICTED_FOR_NON_STAFF.contains(request.root)) {
             event.setCompletions(Collections.emptyList());
             return;
@@ -3814,11 +4131,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (!(sender instanceof Player player)) {
             return new ArrayList<>();
         }
-        File file = getSetHomeDataFile(player);
+        HomeFile file = homeFile(player);
         if (file == null || !file.exists()) {
             return new ArrayList<>();
         }
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(file);
+        FileConfiguration cfg = file.load();
         List<String> numbers = new ArrayList<>();
         List<String> names = new ArrayList<>();
         for (String home : cfg.getStringList("homes")) {
@@ -3979,6 +4296,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return;
         }
         String title = event.getView().getTitle();
+        if (isSusDetailMenu(title)) {
+            event.setCancelled(true);
+            int rawSlot = event.getRawSlot();
+            if (rawSlot >= 0 && rawSlot < event.getView().getTopInventory().getSize()) {
+                handleSusDetailClick(viewer, rawSlot);
+            }
+            return;
+        }
         if (!isSusMenu(title)) {
             return;
         }
@@ -3998,11 +4323,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         adminTargetIndex.remove(uuid);
         pendingDeleteSlot.remove(uuid);
         pendingDeleteHome.remove(uuid);
+        adminHomesTarget.remove(uuid);
+        pendingAdminDeleteHome.remove(uuid);
         pendingTeleportOrigins.remove(uuid);
         frozenPlayers.remove(uuid);
         frozenAnchors.remove(uuid);
         frozenNoticeCooldown.remove(uuid);
         susMenuPages.remove(uuid);
+        susDetailStates.remove(uuid);
         onAtrackPlayerQuit(event.getPlayer());
     }
 
@@ -4056,16 +4384,18 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         // Legacy 9x4 grid (non-dialog clients). SAFE slot mapping via buildHomeSlots — it does NOT
         // rename custom homes (unlike normalizeHomes), so named homes survive. Rows 0-2 (slots
         // 0-26) hold up to 27 home slots; left-click teleports/sets, right-click deletes.
-        File file = getSetHomeDataFile(target);
-        FileConfiguration cfg = (file != null && file.exists()) ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
+        HomeFile file = homeFile(target);
+        FileConfiguration cfg = (file != null && file.exists()) ? file.load() : new YamlConfiguration();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         String[] slots = buildHomeSlots(homes, MAX_HOME_SLOTS);
 
-        Inventory inv = Bukkit.createInventory(null, 36, color(HOME_MENU_TITLE));
+        Inventory inv = MenuLock.create(36, color(HOME_MENU_TITLE));
         for (int i = 0; i < 27; i++) {
             if (i >= allowedHomes) {
-                inv.setItem(i, item(Material.RED_BED, "&cHome " + (i + 1) + " &8(Locked)", List.of(
-                    "&7Unlock with &6Pizza+ &7/ &6Pizza++.")));
+                if (getConfig().getBoolean("homes.show-locked-slots", false)) {
+                    inv.setItem(i, item(Material.RED_BED, "&cHome " + (i + 1) + " &8(Locked)", List.of(
+                        "&7More home slots are not available to your current rank.")));
+                }
                 continue;
             }
             String homeName = i < slots.length ? slots[i] : null;
@@ -4090,11 +4420,13 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         boolean selfTarget = target.getUniqueId().equals(viewer.getUniqueId());
         int allowedHomes = allowedHomes(viewer);
         if (index >= allowedHomes) {
-            viewer.sendMessage(color("&cThis home slot is locked for your rank."));
+            if (getConfig().getBoolean("homes.show-locked-slots", false)) {
+                viewer.sendMessage(color("&7This home slot is unavailable to your current rank."));
+            }
             return;
         }
-        File file = getSetHomeDataFile(target);
-        FileConfiguration cfg = (file != null && file.exists()) ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
+        HomeFile file = homeFile(target);
+        FileConfiguration cfg = (file != null && file.exists()) ? file.load() : new YamlConfiguration();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         String[] slots = buildHomeSlots(homes, MAX_HOME_SLOTS);
         String homeName = index < slots.length ? slots[index] : null;
@@ -4109,8 +4441,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
 
         if (rightClick) {
-            if (!selfTarget) return;
-            openHomeDeleteConfirmByName(viewer, homeName);
+            if (selfTarget) {
+                openHomeDeleteConfirmByName(viewer, homeName);
+            } else if (isHomeAdmin(viewer)) {
+                openHomeDeleteConfirmByName(viewer, homeName);
+                this.pendingAdminDeleteHome.put(viewer.getUniqueId(), homeName);
+            }
             return;
         }
 
@@ -4130,7 +4466,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private void openHomeDeleteConfirmByName(Player viewer, String homeName) {
         pendingDeleteHome.put(viewer.getUniqueId(), homeName);
-        Inventory inv = Bukkit.createInventory(null, 27, color(HOME_DELETE_TITLE));
+        Inventory inv = MenuLock.create(27, color(HOME_DELETE_TITLE));
         Location loc = readHomeLocation(viewer, homeName);
         List<String> previewLore = new ArrayList<>();
         previewLore.add("&7You are about to delete &f" + homeDisplayName(homeName) + "&7.");
@@ -4149,12 +4485,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             player.sendMessage(color("&cYou are in combat. Wait &e" + remainingCombatSeconds(player) + "s &cbefore teleporting home."));
             return;
         }
-        File dataFile = getSetHomeDataFile(player);
+        HomeFile dataFile = homeFile(player);
         if (dataFile == null || !dataFile.exists()) {
             player.sendMessage(color("&cNo homes found."));
             return;
         }
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(dataFile);
+        FileConfiguration cfg = dataFile.load();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         if (homes.isEmpty()) {
             player.sendMessage(color("&cNo homes found."));
@@ -4326,9 +4662,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     /**
-     * Main homes screen: EVERY slot the player has access to (unset = "New Home").
-     * "Show More" only reveals the LOCKED slots above the player's tier limit,
-     * so it's hidden for players who already have all 27 (pizza++/staff).
+     * Main homes screen: only slots the player can use (unset = "New Home").
      */
     private void openHomesDialog(Player player) {
         if (!useDialogUi(player)) {
@@ -4336,17 +4670,16 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             openHomesMenu(player, player);
             return;
         }
-        // If the player had expanded the view, keep returning to that view until they leave the GUI.
         Integer expanded = homesDialogExpanded.get(player.getUniqueId());
         if (expanded != null && expanded > 0) {
             openAllHomesDialog(player, expanded);
             return;
         }
-        File file = getSetHomeDataFile(player);
-        FileConfiguration cfg = (file != null && file.exists()) ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
+        HomeFile file = homeFile(player);
+        FileConfiguration cfg = (file != null && file.exists()) ? file.load() : new YamlConfiguration();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         int limit = allowedHomes(player);
-        String[] slots = buildHomeSlots(homes, limit);
+        String[] slots = Arrays.copyOf(buildHomeSlots(homes, limit), Math.min(limit, MAX_HOME_SLOTS));
 
         List<ActionButton> buttons = new ArrayList<>();
         boolean grid = slots.length > 4; // 3-slot default tier keeps the compact single-column look
@@ -4354,13 +4687,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         for (int i = 0; i < slots.length; i++) {
             buttons.add(homeSlotButton(cfg, slots[i], i, btnWidth));
         }
-        if (slots.length < MAX_HOME_SLOTS) {
-            // Default tier expands in two steps (9 then 27); pizza+ goes straight to 27.
+        if (getConfig().getBoolean("homes.show-locked-slots", false) && slots.length < MAX_HOME_SLOTS) {
             int next = limit < 9 ? 9 : MAX_HOME_SLOTS;
             buttons.add(dialogButton(Component.text("Show More", DIALOG_BRAND),
                 "View locked home slots", btnWidth, p -> openAllHomesDialog(p, next)));
         }
-
         Dialog dialog = buildDialog(Component.text("Homes", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text(homes.size() + "/" + limit + " homes used", NamedTextColor.GRAY))),
             List.of(),
@@ -4371,59 +4702,44 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         player.showDialog(dialog);
     }
 
-    /** Slot above the player's tier limit: red "Locked" with an upsell tooltip. */
+    /** Slot above the player's tier limit, shown only when explicitly enabled in config. */
     private ActionButton lockedSlotButton(int slotIndex, int width, int shownCount) {
-        String tierName = slotIndex < 9 ? "Pizza+" : "Pizza++";
-        return dialogButton(Component.text("Locked", NamedTextColor.RED),
-            "Buy " + tierName + " for more home slots", width, p -> {
-                p.sendMessage(color("&cThis home slot requires &e" + tierName + "&c."));
-                openAllHomesDialog(p, shownCount);
-            });
+        return dialogButton(Component.text("Locked", NamedTextColor.GRAY),
+            "More home slots are not available to your current rank", width, p ->
+                p.sendMessage(color("&7Home " + (slotIndex + 1) + " is unavailable to your current rank.")));
     }
 
-    /**
-     * "Show More": tiered grid. First click shows 9 slots (the Pizza+ amount),
-     * a second "Show More" expands to the full 27 (Pizza++). Slots above the
-     * player's limit render as red "Locked" buttons.
-     */
+    /** Optional expanded homes view; hidden for all players by default. */
     private void openAllHomesDialog(Player player, int shownCount) {
         homesDialogExpanded.put(player.getUniqueId(), shownCount);
-        File file = getSetHomeDataFile(player);
-        FileConfiguration cfg = (file != null && file.exists()) ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
+        HomeFile file = homeFile(player);
+        FileConfiguration cfg = (file != null && file.exists()) ? file.load() : new YamlConfiguration();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         int limit = allowedHomes(player);
         int size = Math.max(shownCount, Math.max(limit, homes.size()));
-        if (shownCount < MAX_HOME_SLOTS) {
-            size = Math.min(size, Math.max(shownCount, homes.size())); // 9-view stays compact unless bonus homes overflow it
-        }
+        if (shownCount < MAX_HOME_SLOTS) size = Math.min(size, Math.max(shownCount, homes.size()));
         String[] slots = buildHomeSlots(homes, size);
-
         List<ActionButton> buttons = new ArrayList<>();
         for (int i = 0; i < slots.length; i++) {
-            if (slots[i] == null && i >= limit) {
-                buttons.add(lockedSlotButton(i, 150, shownCount));
-            } else {
-                buttons.add(homeSlotButton(cfg, slots[i], i, 150));
-            }
+            buttons.add(slots[i] == null && i >= limit
+                ? lockedSlotButton(i, 150, shownCount) : homeSlotButton(cfg, slots[i], i, 150));
         }
         if (slots.length < MAX_HOME_SLOTS) {
             buttons.add(dialogButton(Component.text("Show More", DIALOG_BRAND),
-                "View all " + MAX_HOME_SLOTS + " home slots", 150, p -> openAllHomesDialog(p, MAX_HOME_SLOTS)));
+                "View all " + MAX_HOME_SLOTS + " home slots", 150,
+                p -> openAllHomesDialog(p, MAX_HOME_SLOTS)));
         }
         Dialog dialog = buildDialog(Component.text("All Homes", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text(homes.size() + "/" + limit + " homes used", NamedTextColor.GRAY))),
-            List.of(),
-            DialogType.multiAction(buttons)
-                .columns(3)
-                .exitAction(dialogButton(Component.text("Back"), null, 150, this::openHomesDialogFresh))
-                .build());
+            List.of(), DialogType.multiAction(buttons).columns(3)
+                .exitAction(dialogButton(Component.text("Back"), null, 150, this::openHomesDialogFresh)).build());
         player.showDialog(dialog);
     }
 
     /** Per-home detail: Teleport / Change Icon / Rename / Delete / Back. */
     private void openHomeDetailDialog(Player player, String home) {
-        File file = getSetHomeDataFile(player);
-        FileConfiguration cfg = (file != null && file.exists()) ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
+        HomeFile file = homeFile(player);
+        FileConfiguration cfg = (file != null && file.exists()) ? file.load() : new YamlConfiguration();
         if (!cfg.getStringList("homes").contains(home)) {
             openHomesDialog(player);
             return;
@@ -4469,17 +4785,17 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private void saveHomeIcon(Player player, String home, String icon) {
-        File file = getSetHomeDataFile(player);
+        HomeFile file = homeFile(player);
         if (file == null || !file.exists()) {
             return;
         }
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(file);
+        FileConfiguration cfg = file.load();
         if (!cfg.getStringList("homes").contains(home)) {
             return;
         }
         cfg.set(home + ".icon", icon);
         try {
-            cfg.save(file);
+            file.save(cfg);
         } catch (Exception ex) {
             getLogger().warning("Failed to save home icon for " + player.getName() + ": " + ex.getMessage());
         }
@@ -4518,15 +4834,15 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return;
         }
         if (!HOME_NAME_PATTERN.matcher(name).matches()) {
-            openRenameDialog(player, home, "Names are 1-20 characters: letters, numbers, - or _", name);
+            openRenameDialog(player, home, "Names are up to 24 characters; spaces are allowed, dots are not", name);
             return;
         }
-        File file = getSetHomeDataFile(player);
+        HomeFile file = homeFile(player);
         if (file == null || !file.exists()) {
             openHomesDialog(player);
             return;
         }
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(file);
+        FileConfiguration cfg = file.load();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         int idx = homes.indexOf(home);
         if (idx < 0) {
@@ -4547,7 +4863,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         homes.set(idx, name);
         cfg.set("homes", homes);
         try {
-            cfg.save(file);
+            file.save(cfg);
             // No chat confirmation on rename (the GUI updates to show the new name).
         } catch (Exception ex) {
             getLogger().warning("Failed to rename home for " + player.getName() + ": " + ex.getMessage());
@@ -4578,14 +4894,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (player.hasPermission(PERM_HOMES_9)) {
             return 9; // pizza+
         }
-        if (player.hasPermission("sethome.maxhomes.5")) {
-            return 5; // legacy node — don't regress players below what they already had
+        if (player.hasPermission(PERM_HOMES_5)) {
+            return 5;
         }
         return HOMES_DEFAULT_LIMIT;
     }
 
     private boolean canViewOtherHomes(Player player) {
-        return player.hasPermission(PERM_GTP) || player.hasPermission(PERM_HOME_ADMIN);
+        return player.hasPermission(PERM_GTP) || isHomeAdmin(player);
     }
 
     private void shiftTarget(Player viewer, int delta) {
@@ -4626,6 +4942,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (!canViewOtherHomes(viewer)) {
             return viewer;
         }
+        UUID chosen = this.adminHomesTarget.get(viewer.getUniqueId());
+        if (chosen != null) {
+            return Bukkit.getOfflinePlayer(chosen);
+        }
         List<OfflinePlayer> targets = getKnownPlayersWithHomes();
         if (targets.isEmpty()) {
             return viewer;
@@ -4647,6 +4967,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (!canViewOtherHomes(viewer)) {
             return viewer;
         }
+        UUID chosen = this.adminHomesTarget.get(viewer.getUniqueId());
+        if (chosen != null && preferredTarget != null && chosen.equals(preferredTarget.getUniqueId())) {
+            return preferredTarget;
+        }
+        this.adminHomesTarget.remove(viewer.getUniqueId());
         List<OfflinePlayer> targets = getKnownPlayersWithHomes();
         if (targets.isEmpty()) {
             return viewer;
@@ -4666,12 +4991,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private List<OfflinePlayer> getKnownPlayersWithHomes() {
         List<OfflinePlayer> out = new ArrayList<>();
+        java.util.Set<UUID> withHomes = this.homeStorage != null ? new java.util.HashSet<>(this.homeStorage.listPlayers()) : null;
         for (Player online : Bukkit.getOnlinePlayers()) {
             if (!isLikelyRealPlayerName(online.getName())) {
                 continue;
             }
-            File f = getSetHomeDataFile(online);
-            if (f != null && f.exists()) {
+            if (withHomes != null ? withHomes.contains(online.getUniqueId()) : homeFile(online).exists()) {
                 out.add(online);
             }
         }
@@ -4696,11 +5021,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private List<String> getHomes(OfflinePlayer player) {
-        File file = getSetHomeDataFile(player);
+        HomeFile file = homeFile(player);
         if (file == null || !file.exists()) {
             return new ArrayList<>();
         }
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(file);
+        FileConfiguration cfg = file.load();
         return new ArrayList<>(cfg.getStringList("homes"));
     }
 
@@ -4709,11 +5034,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (pluginsDir == null) {
             return new File("plugins/SetHome/data");
         }
+        // SetHome/data is the standard location; a lowercase sethome/data is used only when it is the one that exists.
         File setHomeData = new File(pluginsDir, "SetHome/data");
-        if (!setHomeData.exists()) {
-            setHomeData = new File(pluginsDir, "sethome/data");
-        }
-        return setHomeData;
+        File legacy = new File(pluginsDir, "sethome/data");
+        return !setHomeData.exists() && legacy.isDirectory() ? legacy : setHomeData;
     }
 
     private void initTransferDestinations() {
@@ -4902,6 +5226,141 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
+    /** Database mode: homes live in suite_player (namespace "homes"); null in File mode (SetHome files). */
+    private dev.pizzasmp.common.SuiteStorage homeStorage;
+    private dev.pizzasmp.common.SuiteStorage homeBackupStorage;
+
+    private HomeFile homeFile(OfflinePlayer target) {
+        return this.homeStorage != null ? new DbHomeFile(this.homeStorage, target.getUniqueId())
+            : new FileHomeFile(getSetHomeDataFile(target));
+    }
+
+    private HomeFile homeBackupFile(OfflinePlayer target) {
+        return this.homeBackupStorage != null ? new DbHomeFile(this.homeBackupStorage, target.getUniqueId())
+            : new FileHomeFile(new File(new File(getDataFolder(), "home-backups"), target.getUniqueId() + ".yml"));
+    }
+
+    /** Homes use the database when one is connected, the SetHome files otherwise. */
+    private void initHomeStorage() {
+        if (!this.storage.isMysql()) {
+            getLogger().info("[homes] storage: files (plugins/SetHome/data)");
+            return;
+        }
+        this.homeStorage = this.storage.withNamespace("homes");
+        this.homeBackupStorage = this.storage.withNamespace("home-backups");
+        getLogger().info("[homes] storage: database");
+        importSetHomeFilesOnce();
+    }
+
+    /**
+     * First start in Database mode: copy every SetHome file into the database. Existing rows are never overwritten,
+     * and a marker document makes this run once per database.
+     */
+    private void importSetHomeFilesOnce() {
+        dev.pizzasmp.common.SuiteStorage.DocumentLoadResult marker = this.homeStorage.loadDocResult("import-state");
+        if (marker.status() == dev.pizzasmp.common.SuiteStorage.DocumentLoadStatus.FAILED) {
+            getLogger().warning("[homes] could not read the import marker; skipping the SetHome import this start.");
+            return;
+        }
+        if (marker.document().getBoolean("sethome-files", false)) return;
+        File[] files = getSetHomeDataDir().listFiles((d, n) -> n.endsWith(".yml"));
+        int imported = 0, skipped = 0, failed = 0;
+        if (files != null) {
+            for (File f : files) {
+                UUID uuid;
+                try { uuid = UUID.fromString(f.getName().substring(0, f.getName().length() - 4)); }
+                catch (IllegalArgumentException ex) { skipped++; continue; }
+                dev.pizzasmp.common.SuiteStorage.PlayerDocResult existing = this.homeStorage.loadPlayerResult(uuid);
+                if (existing.status() != dev.pizzasmp.common.SuiteStorage.PlayerDocStatus.MISSING) { skipped++; continue; }
+                YamlConfiguration cfg = new YamlConfiguration();
+                try { cfg.load(f); } catch (Exception ex) { failed++; continue; }
+                if (this.homeStorage.savePlayerResult(uuid, cfg)) imported++; else failed++;
+            }
+        }
+        if (failed > 0) {
+            getLogger().warning("[homes] SetHome import incomplete: " + imported + " imported, " + failed
+                + " failed; it will retry next start.");
+            return;
+        }
+        YamlConfiguration done = new YamlConfiguration();
+        done.set("sethome-files", true);
+        done.set("imported", imported);
+        done.set("at", System.currentTimeMillis());
+        this.homeStorage.saveDocResult("import-state", done);
+        getLogger().info("[homes] imported " + imported + " SetHome file(s) into the database (" + skipped + " skipped).");
+    }
+
+    /**
+     * One player's home document: the SetHome file in File mode, a suite_player row in Database mode. A handle whose
+     * read failed refuses to save, so a storage outage or a damaged file can never overwrite stored homes.
+     */
+    private abstract static class HomeFile {
+        abstract boolean exists();
+        abstract FileConfiguration load();
+        abstract void save(FileConfiguration cfg) throws IOException;
+    }
+
+    private static final class FileHomeFile extends HomeFile {
+        private final File file;
+        private boolean readFailed;
+
+        FileHomeFile(File file) { this.file = file; }
+
+        @Override boolean exists() { return this.file.exists(); }
+
+        @Override FileConfiguration load() {
+            YamlConfiguration cfg = new YamlConfiguration();
+            try {
+                if (this.file.exists()) cfg.load(this.file);
+            } catch (Exception ex) {
+                this.readFailed = true;
+            }
+            return cfg;
+        }
+
+        @Override void save(FileConfiguration cfg) throws IOException {
+            if (this.readFailed) throw new IOException("unreadable home file, not overwriting: " + this.file.getName());
+            File dir = this.file.getParentFile();
+            if (dir != null && !dir.exists() && !dir.mkdirs()) throw new IOException("cannot create " + dir);
+            cfg.save(this.file);
+        }
+    }
+
+    private static final class DbHomeFile extends HomeFile {
+        private final dev.pizzasmp.common.SuiteStorage storage;
+        private final UUID uuid;
+        private dev.pizzasmp.common.SuiteStorage.PlayerDocResult result;
+
+        DbHomeFile(dev.pizzasmp.common.SuiteStorage storage, UUID uuid) {
+            this.storage = storage;
+            this.uuid = uuid;
+        }
+
+        private dev.pizzasmp.common.SuiteStorage.PlayerDocResult read() {
+            if (this.result == null) this.result = this.storage.loadPlayerResult(this.uuid);
+            return this.result;
+        }
+
+        @Override boolean exists() { return read().status() != dev.pizzasmp.common.SuiteStorage.PlayerDocStatus.MISSING; }
+
+        @Override FileConfiguration load() { return read().document(); }
+
+        @Override void save(FileConfiguration cfg) throws IOException {
+            if (this.result != null && this.result.status() == dev.pizzasmp.common.SuiteStorage.PlayerDocStatus.FAILED) {
+                throw new IOException("home data could not be read, not overwriting");
+            }
+            YamlConfiguration yaml;
+            if (cfg instanceof YamlConfiguration y) {
+                yaml = y;
+            } else {
+                yaml = new YamlConfiguration();
+                try { yaml.loadFromString(cfg.saveToString()); } catch (Exception ex) { throw new IOException(ex); }
+            }
+            if (!this.storage.savePlayerResult(this.uuid, yaml)) throw new IOException("database write failed");
+            this.result = new dev.pizzasmp.common.SuiteStorage.PlayerDocResult(dev.pizzasmp.common.SuiteStorage.PlayerDocStatus.LOADED, yaml);
+        }
+    }
+
     private File getSetHomeDataFile(OfflinePlayer target) {
         if (target == null || target.getUniqueId() == null) {
             return null;
@@ -4985,11 +5444,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private Location readHomeLocation(OfflinePlayer target, String home) {
-        File dataFile = getSetHomeDataFile(target);
+        HomeFile dataFile = homeFile(target);
         if (dataFile == null || !dataFile.exists()) {
             return null;
         }
-        return readHomeLocation(YamlConfiguration.loadConfiguration(dataFile), home);
+        return readHomeLocation(dataFile.load(), home);
     }
 
     private Location readHomeLocation(FileConfiguration cfg, String home) {
@@ -5026,6 +5485,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private boolean isSusMenu(String title) {
         String strippedTitle = ChatColor.stripColor(title);
         String strippedExpected = ChatColor.stripColor(color(SUS_MENU_TITLE));
+        return strippedTitle != null && strippedExpected != null && strippedTitle.startsWith(strippedExpected);
+    }
+
+    private boolean isSusDetailMenu(String title) {
+        String strippedTitle = ChatColor.stripColor(title);
+        String strippedExpected = ChatColor.stripColor(color(SUS_DETAIL_TITLE));
         return strippedTitle != null && strippedExpected != null && strippedTitle.startsWith(strippedExpected);
     }
 
@@ -5082,7 +5547,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         int page = Math.max(0, Math.min(requestedPage, maxPage));
         susMenuPages.put(viewer.getUniqueId(), page);
 
-        Inventory inv = Bukkit.createInventory(null, 54, color(SUS_MENU_TITLE + " &7(Page " + (page + 1) + "/" + (maxPage + 1) + ")"));
+        Inventory inv = MenuLock.create(54, color(SUS_MENU_TITLE + " &7(Page " + (page + 1) + "/" + (maxPage + 1) + ")"));
         ItemStack filler = item(Material.GRAY_STAINED_GLASS_PANE, " ", List.of());
         for (int slot = 0; slot < inv.getSize(); slot++) {
             inv.setItem(slot, filler);
@@ -5099,9 +5564,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         if (entries.isEmpty()) {
             inv.setItem(22, item(
-                Material.LIME_DYE,
-                "&aNo Recent Grim Flags",
-                List.of("&7No players have been flagged in the last 30 minutes.")
+                susHistoryUnavailable ? Material.BARRIER : Material.LIME_DYE,
+                susHistoryUnavailable ? "&cGrim History Unavailable" : "&aNo Active Grim Flags",
+                List.of(susHistoryUnavailable ? "&7Check the server log." : "&7No undismissed Grim flags in retained history.")
             ));
         }
 
@@ -5111,8 +5576,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         inv.setItem(49, item(
             Material.NETHER_STAR,
             "&bRefresh",
-            List.of("&7Reload Grim suspects from the last 30 minutes.")
+            List.of("&7Reload all undismissed Grim flags.")
         ));
+        inv.setItem(51, item(Material.COMPASS, "&fSearch Player",
+            List.of("&7Look up a player's full flag history.")));
         inv.setItem(53, page < maxPage
             ? item(Material.ARROW, "&eNext Page", List.of("&7Go forward one page."))
             : item(Material.BARRIER, "&cClose", List.of("&7Close this menu."))
@@ -5129,6 +5596,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         lore.add("&7Flags: &f" + entry.flagCount);
         lore.add("&7Latest Check: &f" + entry.latestCheck);
         lore.add("&7Highest VL: &f" + entry.highestVl);
+        entry.checkCounts.entrySet().stream().sorted(Map.Entry.comparingByKey())
+            .forEach(check -> lore.add("&7" + check.getKey() + ": &f" + check.getValue()));
         lore.add("&7Status: " + (online != null ? "&aOnline" : "&cOffline"));
         if (entry.latestVerbose != null && !entry.latestVerbose.isBlank()) {
             lore.add("&7Detail:");
@@ -5137,7 +5606,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             }
         }
         lore.add("&7UUID: &f" + entry.uuid);
-        lore.add(online != null ? "&eClick to teleport." : "&cPlayer is offline.");
+        lore.add("&eClick to review every flag.");
         return playerHead(
             offline,
             (online != null ? "&a" : "&c") + entry.playerName,
@@ -5156,9 +5625,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 return;
             }
             SusEntry entry = entries.get(index);
-            viewer.closeInventory();
-            // The target's location is read on its own scheduler; the viewer then teleports async.
-            scheduleTeleportToTarget(viewer, entry.uuid, entry.playerName);
+            openSusDetailMenu(viewer, entry.uuid, 0);
             return;
         }
 
@@ -5170,6 +5637,16 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             openSusMenu(viewer, currentPage);
             return;
         }
+        if (rawSlot == 51) {
+            if (useDialogUi(viewer)) {
+                viewer.closeInventory();
+                openSusSearchDialog(viewer);
+            } else {
+                viewer.closeInventory();
+                viewer.sendMessage(color("&7Search by name with &f/sus <player>&7."));
+            }
+            return;
+        }
         if (rawSlot == 53) {
             if (currentPage < maxPage) {
                 openSusMenu(viewer, currentPage + 1);
@@ -5179,10 +5656,124 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
+    private void openSusSearchDialog(Player viewer) {
+        List<DialogInput> inputs = List.of(DialogInput.text("player",
+            Component.text("Player name", NamedTextColor.GRAY)).width(240).maxLength(32).build());
+        ActionButton search = ActionButton.builder(Component.text("Search", NamedTextColor.WHITE)).width(150)
+            .action(DialogAction.customClick((view, audience) -> {
+                if (audience instanceof Player player) {
+                    String name = view.getText("player");
+                    PlatformScheduler.entityNow(this, player, () -> {
+                        if (!player.isOnline()) return;
+                        if (name == null || name.isBlank()) {
+                            player.sendMessage(color("&cEnter a player name."));
+                            return;
+                        }
+                        openSusNamedDetail(player, name);
+                    }, null);
+                }
+            }, Options.builder().build())).build();
+        ActionButton back = dialogButton(Component.text("Back", NamedTextColor.GRAY), null, 150,
+            player -> openSusMenu(player, susMenuPages.getOrDefault(player.getUniqueId(), 0)));
+        viewer.showDialog(buildDialog(Component.text("Search Suspects", NamedTextColor.WHITE),
+            List.of(DialogBody.plainMessage(Component.text("Find retained flags for a player.", NamedTextColor.GRAY))),
+            inputs, DialogType.confirmation(search, back)));
+    }
+
+    private void openSusDetailMenu(Player viewer, UUID subject, int requestedPage) {
+        List<GrimSusHistory.Flag> flags;
+        try {
+            flags = susHistory().activeFlags().stream().filter(flag -> flag.playerId().equals(subject)).toList();
+        } catch (Exception ex) {
+            getLogger().warning("Failed to load suspect details: " + ex.getMessage());
+            viewer.sendMessage(color("&cSuspect history is unavailable; check the server log."));
+            return;
+        }
+        int maxPage = Math.max(0, (flags.size() - 1) / SUS_PAGE_SIZE);
+        int page = Math.max(0, Math.min(requestedPage, maxPage));
+        susDetailStates.put(viewer.getUniqueId(), new SusDetailState(subject, page));
+        Inventory inv = MenuLock.create(54,
+            color(SUS_DETAIL_TITLE + " &7(" + (page + 1) + "/" + (maxPage + 1) + ")"));
+        ItemStack filler = item(Material.GRAY_STAINED_GLASS_PANE, " ", List.of());
+        for (int slot = 0; slot < inv.getSize(); slot++) inv.setItem(slot, filler);
+        int start = page * SUS_PAGE_SIZE;
+        for (int slot = 0; slot < SUS_PAGE_SIZE && start + slot < flags.size(); slot++) {
+            GrimSusHistory.Flag flag = flags.get(start + slot);
+            List<String> lore = new ArrayList<>();
+            lore.add("&7Time: &f" + java.time.Instant.ofEpochMilli(flag.occurredAt()));
+            lore.add("&7VL: &f" + flag.vl());
+            if (!flag.serverName().isBlank()) lore.add("&7Server: &f" + flag.serverName());
+            if (!flag.description().isBlank()) for (String line : wrapText(flag.description(), 38)) lore.add("&7" + line);
+            if (!flag.verbose().isBlank()) for (String line : wrapText(flag.verbose(), 38)) lore.add("&f" + line);
+            inv.setItem(slot, item(Material.PAPER, "&f" + flag.checkName(), lore));
+        }
+        Map<String, Long> reasons = flags.stream().collect(java.util.stream.Collectors.groupingBy(
+            GrimSusHistory.Flag::checkName, java.util.TreeMap::new, java.util.stream.Collectors.counting()));
+        List<String> summary = new ArrayList<>();
+        reasons.forEach((check, count) -> summary.add("&7" + check + ": &f" + count));
+        inv.setItem(50, item(Material.BOOK, "&fWhy this player is listed", summary));
+        inv.setItem(45, page > 0 ? item(Material.ARROW, "&ePrevious Page", List.of()) : filler);
+        inv.setItem(47, Bukkit.getPlayer(subject) != null
+            ? item(Material.ENDER_PEARL, "&eTeleport to Player", List.of("&7Works in spectator mode.", "&7Flags stay on the list."))
+            : item(Material.GRAY_DYE, "&7Player Offline", List.of("&7Teleport is unavailable.")));
+        inv.setItem(49, item(Material.BOOK, "&bBack to Suspects", List.of("&7Return to the player list.")));
+        inv.setItem(53, page < maxPage ? item(Material.ARROW, "&eNext Page", List.of())
+            : item(Material.BARRIER, "&cClose", List.of()));
+        viewer.openInventory(inv);
+    }
+
+    private void handleSusDetailClick(Player viewer, int rawSlot) {
+        SusDetailState state = susDetailStates.get(viewer.getUniqueId());
+        if (state == null) return;
+        if (rawSlot == 45 && state.page() > 0) openSusDetailMenu(viewer, state.subject(), state.page() - 1);
+        else if (rawSlot == 47) {
+            Player target = Bukkit.getPlayer(state.subject());
+            if (target == null) {
+                viewer.sendMessage(color("&cThat player is no longer online."));
+            } else {
+                viewer.closeInventory();
+                scheduleTeleportToTarget(viewer, state.subject(), target.getName());
+            }
+        }
+        else if (rawSlot == 49) openSusMenu(viewer, susMenuPages.getOrDefault(viewer.getUniqueId(), 0));
+        else if (rawSlot == 53) {
+            try {
+                long count = susHistory().activeFlags().stream()
+                    .filter(flag -> flag.playerId().equals(state.subject())).count();
+                if ((state.page() + 1L) * SUS_PAGE_SIZE < count) {
+                    openSusDetailMenu(viewer, state.subject(), state.page() + 1);
+                } else viewer.closeInventory();
+            } catch (Exception ex) {
+                viewer.sendMessage(color("&cSuspect history is unavailable; check the server log."));
+            }
+        }
+    }
+
+    private void sendConsoleSusDetail(CommandSender sender, UUID subject) {
+        try {
+            List<GrimSusHistory.Flag> flags = susHistory().activeFlags().stream()
+                .filter(flag -> flag.playerId().equals(subject)).toList();
+            if (flags.isEmpty()) {
+                sender.sendMessage(color("&7No undismissed Grim flags for that player."));
+                return;
+            }
+            sender.sendMessage(color("&eSuspect flags: &f" + flags.size()));
+            for (GrimSusHistory.Flag flag : flags) {
+                sender.sendMessage(color("&7" + java.time.Instant.ofEpochMilli(flag.occurredAt())
+                    + " &f" + flag.checkName() + " &7VL " + flag.vl()
+                    + " &7" + flag.description() + " " + flag.verbose()));
+            }
+        } catch (Exception ex) {
+            getLogger().warning("Failed to load suspect details: " + ex.getMessage());
+            sender.sendMessage(color("&cSuspect history is unavailable; check the server log."));
+        }
+    }
+
     private void sendConsoleSusPage(CommandSender sender, int requestedPage) {
         List<SusEntry> entries = loadRecentSusEntries();
         if (entries.isEmpty()) {
-            sender.sendMessage(color("&7No Grim suspects in the last 30 minutes."));
+            sender.sendMessage(color(susHistoryUnavailable ? "&cGrim history is unavailable; check the server log."
+                : "&7No undismissed Grim flags in retained history."));
             return;
         }
 
@@ -5192,7 +5783,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         int start = page * perPage;
         int end = Math.min(entries.size(), start + perPage);
 
-        sender.sendMessage(color(BRAND_SECTION + BRAND_DISPLAY + " Suspects &7(page " + (page + 1) + "/" + (maxPage + 1) + ")"));
+        sender.sendMessage(color(BRAND_SECTION + branded("Suspects") + " &7(page " + (page + 1) + "/" + (maxPage + 1) + ")"));
         for (int i = start; i < end; i++) {
             SusEntry entry = entries.get(i);
             sender.sendMessage(color(
@@ -5206,58 +5797,31 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private List<SusEntry> loadRecentSusEntries() {
-        File dbFile = findGrimViolationsDb();
-        if (dbFile == null || !dbFile.exists()) {
-            return Collections.emptyList();
-        }
-
-        long cutoff = System.currentTimeMillis() - SUS_LOOKBACK_MILLIS;
         Map<UUID, SusEntry> grouped = new HashMap<>();
-
-        String sql = "SELECT hex(v.uuid) AS uuid_hex, c.check_name_string, v.verbose, v.vl, v.created_at "
-            + "FROM grim_history_violations v "
-            + "JOIN grim_history_check_names c ON c.id = v.check_name_id "
-            + "JOIN grim_history_servers s ON s.id = v.server_id "
-            + "WHERE s.server_name = ? AND v.created_at >= ? "
-            + "ORDER BY v.created_at DESC";
-
-        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile.getAbsolutePath());
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, getConfig().getString("suspects.grim-server-name", "Server"));
-            statement.setLong(2, cutoff);
-
-            try (ResultSet resultSet = statement.executeQuery()) {
-                while (resultSet.next()) {
-                    UUID uuid = uuidFromHex(resultSet.getString("uuid_hex"));
-                    if (uuid == null) {
-                        continue;
-                    }
-
-                    String checkName = resultSet.getString("check_name_string");
-                    String verbose = resultSet.getString("verbose");
-                    int vl = resultSet.getInt("vl");
-                    long createdAt = resultSet.getLong("created_at");
-
-                    SusEntry existing = grouped.get(uuid);
-                    if (existing == null) {
-                        OfflinePlayer offline = Bukkit.getOfflinePlayer(uuid);
-                        existing = new SusEntry(uuid, safeName(offline), createdAt, checkName, verbose, vl, 0);
-                        grouped.put(uuid, existing);
-                    }
-
-                    existing.flagCount++;
-                    existing.highestVl = Math.max(existing.highestVl, vl);
-                    if (createdAt >= existing.latestAt) {
-                        existing.latestAt = createdAt;
-                        existing.latestCheck = checkName == null ? "Unknown" : checkName;
-                        existing.latestVerbose = verbose == null ? "" : verbose;
-                    }
+        try {
+            for (GrimSusHistory.Flag flag : susHistory().activeFlags()) {
+                UUID uuid = flag.playerId();
+                String playerName = flag.playerName().isBlank()
+                    ? safeName(Bukkit.getOfflinePlayer(uuid)) : flag.playerName();
+                SusEntry existing = grouped.computeIfAbsent(uuid, ignored ->
+                    new SusEntry(uuid, playerName, flag.occurredAt(), flag.checkName(),
+                        flag.verbose().isBlank() ? flag.description() : flag.verbose(),
+                        (int) Math.ceil(flag.vl()), 0));
+                existing.flagCount++;
+                existing.highestVl = Math.max(existing.highestVl, (int) Math.ceil(flag.vl()));
+                existing.checkCounts.merge(flag.checkName(), 1, Integer::sum);
+                if (flag.occurredAt() >= existing.latestAt) {
+                    existing.latestAt = flag.occurredAt();
+                    existing.latestCheck = flag.checkName();
+                    existing.latestVerbose = flag.verbose().isBlank() ? flag.description() : flag.verbose();
                 }
             }
         } catch (Exception ex) {
+            susHistoryUnavailable = true;
             getLogger().warning("Failed to load Grim suspects: " + ex.getMessage());
             return Collections.emptyList();
         }
+        susHistoryUnavailable = false;
 
         List<SusEntry> out = new ArrayList<>(grouped.values());
         out.sort(Comparator
@@ -5266,16 +5830,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return out;
     }
 
-    private File findGrimViolationsDb() {
-        File primary = new File(getServer().getWorldContainer(), "plugins/GrimAC/violations.sqlite");
-        if (primary.exists()) {
-            return primary;
-        }
-        File legacy = new File(getServer().getWorldContainer(), "plugins/AC/GrimAC/violations.sqlite");
-        if (legacy.exists()) {
-            return legacy;
-        }
-        return null;
+    private GrimSusHistory susHistory() {
+        return new GrimSusHistory(getServer().getWorldContainer().toPath(), getDataFolder().toPath());
     }
 
     private static UUID uuidFromHex(String raw) {
@@ -5342,7 +5898,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private void openHomeDeleteConfirmMenu(Player viewer, int slotIndex) {
         pendingDeleteSlot.put(viewer.getUniqueId(), slotIndex);
-        Inventory inv = Bukkit.createInventory(null, 27, color(HOME_DELETE_TITLE));
+        Inventory inv = MenuLock.create(27, color(HOME_DELETE_TITLE));
         // No glass-pane background.
         Location loc = readHomeLocation(viewer, "home" + (slotIndex + 1));
         List<String> previewLore = new ArrayList<>();
@@ -5359,10 +5915,19 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private void handleDeleteConfirmClick(Player var1, int var2) {
         if (var2 == 11) {
+            this.pendingAdminDeleteHome.remove(var1.getUniqueId());
             this.pendingDeleteHome.remove(var1.getUniqueId());
             this.pendingDeleteSlot.remove(var1.getUniqueId());
             this.openHomesMenu(var1, this.getCurrentTarget(var1));
         } else if (var2 == 15) {
+            String adminHome = this.pendingAdminDeleteHome.remove(var1.getUniqueId());
+            OfflinePlayer adminTarget = this.getCurrentTarget(var1);
+            if (adminHome != null && !adminTarget.getUniqueId().equals(var1.getUniqueId())) {
+                this.pendingDeleteHome.remove(var1.getUniqueId());
+                this.adminDeleteHome(var1, adminTarget, adminHome);
+                this.openHomesMenu(var1, adminTarget);
+                return;
+            }
             String var3 = this.pendingDeleteHome.remove(var1.getUniqueId());
             if (var3 != null) {
                 this.handleDelHomeCommand(var1, var3);
@@ -5388,18 +5953,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
      * creating a new one is gated by the player's tier limit (3 / 9 / 27).
      */
     private void handleSetHomeCommand(Player player, String rawName) {
-        File file = getSetHomeDataFile(player);
+        HomeFile file = homeFile(player);
         if (file == null) {
             player.sendMessage(color("&cHomes are unavailable right now."));
             return;
         }
-        File dir = file.getParentFile();
-        if (dir != null && !dir.exists() && !dir.mkdirs()) {
-            player.sendMessage(color("&cHomes are unavailable right now."));
-            getLogger().warning("Could not create SetHome data dir: " + dir);
-            return;
-        }
-        FileConfiguration cfg = file.exists() ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
+        FileConfiguration cfg = file.exists() ? file.load() : new YamlConfiguration();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
 
         String name;
@@ -5419,7 +5978,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         } else {
             name = rawName.toLowerCase(Locale.ROOT);
             if (!HOME_NAME_PATTERN.matcher(name).matches()) {
-                player.sendMessage(color("&cHome names must be 1-20 characters: letters, numbers, &e-&c or &e_&c."));
+                player.sendMessage(color("&cHome names are up to 24 characters. Spaces are allowed, dots are not."));
                 return;
             }
         }
@@ -5443,7 +6002,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         cfg.set(name + ".yaw", loc.getYaw());
         cfg.set(name + ".pitch", loc.getPitch());
         try {
-            cfg.save(file);
+            file.save(cfg);
         } catch (Exception ex) {
             getLogger().warning("Failed to save home for " + player.getName() + ": " + ex.getMessage());
             player.sendMessage(color("&cFailed to save your home. Staff have been notified."));
@@ -5458,12 +6017,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     /** /delhome <name|number> — name-based delete with the standard pre-delete backup. */
     private void handleDelHomeCommand(Player player, String arg) {
-        File file = getSetHomeDataFile(player);
+        HomeFile file = homeFile(player);
         if (file == null || !file.exists()) {
             player.sendMessage(color("&cNo homes found."));
             return;
         }
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(file);
+        FileConfiguration cfg = file.load();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         if (homes.isEmpty()) {
             player.sendMessage(color("&cNo homes found."));
@@ -5479,7 +6038,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         cfg.set(name, null);
         cfg.set("homes", homes);
         try {
-            cfg.save(file);
+            file.save(cfg);
             getLogger().info("[Homes] " + player.getName() + " deleted " + name + " via /delhome (backed up).");
         } catch (Exception ex) {
             getLogger().warning("Failed to delete home for " + player.getName() + ": " + ex.getMessage());
@@ -5495,11 +6054,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private boolean setHomeInSlot(Player player, int slotIndex) {
-        File file = getSetHomeDataFile(player);
+        HomeFile file = homeFile(player);
         if (file == null) {
             return false;
         }
-        FileConfiguration cfg = file.exists() ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
+        FileConfiguration cfg = file.exists() ? file.load() : new YamlConfiguration();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         // Fixed-slot: this slot is ALWAYS "home"+(slotIndex+1). Add to the list only if absent.
         String homeName = "home" + (slotIndex + 1);
@@ -5516,7 +6075,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         cfg.set(homeName + ".yaw", loc.getYaw());
         cfg.set(homeName + ".pitch", loc.getPitch());
         try {
-            cfg.save(file);
+            file.save(cfg);
             return true;
         } catch (Exception ex) {
             getLogger().warning("Failed to save home for " + player.getName() + ": " + ex.getMessage());
@@ -5525,13 +6084,13 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private boolean removeHomeAtSlot(Player player, int slotIndex) {
-        File file = getSetHomeDataFile(player);
+        HomeFile file = homeFile(player);
         if (file == null || !file.exists()) {
             return false;
         }
         // Fixed-slot, name-based deletion: delete EXACTLY "home"+(slotIndex+1) — never by list position.
         String homeName = "home" + (slotIndex + 1);
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(file);
+        FileConfiguration cfg = file.load();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
         if (!homes.contains(homeName) && !cfg.contains(homeName + ".world")) {
             return false;
@@ -5542,7 +6101,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         cfg.set(homeName, null);
         cfg.set("homes", homes);
         try {
-            cfg.save(file);
+            file.save(cfg);
             getLogger().info("[Homes] " + player.getName() + " deleted " + homeName + " (backed up).");
             return true;
         } catch (Exception ex) {
@@ -5554,13 +6113,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     /** Appends a timestamped snapshot of a home's location to a per-player backup file. */
     private void backupHome(OfflinePlayer player, String homeName, FileConfiguration source) {
         try {
-            File dir = new File(getDataFolder(), "home-backups");
-            if (!dir.exists() && !dir.mkdirs()) {
-                getLogger().warning("Could not create home-backups dir.");
-                return;
-            }
-            File backupFile = new File(dir, player.getUniqueId() + ".yml");
-            FileConfiguration backup = backupFile.exists() ? YamlConfiguration.loadConfiguration(backupFile) : new YamlConfiguration();
+            HomeFile backupFile = homeBackupFile(player);
+            FileConfiguration backup = backupFile.exists() ? backupFile.load() : new YamlConfiguration();
             String key = "deleted." + System.currentTimeMillis();
             backup.set(key + ".home-name", homeName);
             backup.set(key + ".world", source.get(homeName + ".world"));
@@ -5569,7 +6123,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             backup.set(key + ".z", source.get(homeName + ".z"));
             backup.set(key + ".yaw", source.get(homeName + ".yaw"));
             backup.set(key + ".pitch", source.get(homeName + ".pitch"));
-            backup.save(backupFile);
+            backupFile.save(backup);
         } catch (Exception ex) {
             getLogger().warning("Failed to back up home " + homeName + " for " + player.getUniqueId() + ": " + ex.getMessage());
         }
@@ -5740,11 +6294,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private List<String> completeTargetHomeSlots(String targetArg, String prefix) {
         OfflinePlayer target = Bukkit.getOfflinePlayer(targetArg);
-        File targetFile = getSetHomeDataFile(target);
+        HomeFile targetFile = homeFile(target);
         if (targetFile == null || !targetFile.exists()) {
             return Collections.emptyList();
         }
-        FileConfiguration cfg = YamlConfiguration.loadConfiguration(targetFile);
+        FileConfiguration cfg = targetFile.load();
         List<String> homes = cfg.getStringList("homes");
         List<String> out = new ArrayList<>();
         String lower = prefix.toLowerCase(Locale.ROOT);
@@ -5930,6 +6484,27 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             }
         }
         return null;
+    }
+
+    /** Registers /sus (alias /suspicious) on servers without PizzaNetworkCore, which owns it on the network. */
+    private void registerStandaloneSus() {
+        if (commandMap == null || getServer().getPluginManager().getPlugin("PizzaNetworkCore") != null) {
+            return;
+        }
+        Command sus = new Command("sus", "Review players flagged by the anticheat", "/sus [page]", List.of("suspicious")) {
+            @Override
+            public boolean execute(CommandSender sender, String label, String[] args) {
+                return onCommand(sender, this, label, args);
+            }
+
+            @Override
+            public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
+                List<String> result = onTabComplete(sender, this, alias, args);
+                return result == null ? List.of() : result;
+            }
+        };
+        sus.setPermission(PERM_SUS_CMD);
+        commandMap.register(getName().toLowerCase(Locale.ROOT), sus);
     }
 
     private CommandMap resolveCommandMap() {
@@ -6144,6 +6719,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return !NON_TELEPORT_HOME_SUBCOMMANDS.contains(sub);
     }
 
+    /** "<brand> <suffix>", or just the suffix when no brand is configured. */
+    private static String branded(String suffix) {
+        return BRAND_DISPLAY.isBlank() ? suffix : BRAND_DISPLAY + " " + suffix;
+    }
+
     private static String color(String msg) {
         return ChatColor.translateAlternateColorCodes('&', msg);
     }
@@ -6177,7 +6757,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         String stripped = ChatColor.stripColor(message).replace("\r", "");
         String lower = stripped.toLowerCase(Locale.ROOT);
 
-        if (lower.contains("you are banned from pizzasmp") && lower.contains("ban id:") && lower.contains("duration:")) {
+        // Already a complete PizzaPunishment ban screen (its own header, details and ban id): leave it as is.
+        if (lower.contains("ban id:") && lower.contains("duration:") && lower.contains("reason:")) {
             return message;
         }
 
@@ -6252,13 +6833,15 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             }
         }
 
-        StringBuilder rebuilt = new StringBuilder()
-            .append(ChatColor.RED)
-            .append("You are banned from " + BRAND_DISPLAY + ". If you believe this was a mistake please make a ticket in the " + BRAND_DISPLAY + " Discord")
-            .append('\n')
-            .append(ChatColor.YELLOW)
-            .append(BRAND_DISCORD)
-            .append("\n\n");
+        boolean discord = !BRAND_DISCORD.isBlank();
+        StringBuilder rebuilt = new StringBuilder().append(ChatColor.RED);
+        if (BRAND_DISPLAY.isBlank() || !discord) {
+            rebuilt.append("You have been banned from ").append(BRAND_DISPLAY.isBlank() ? "this server" : BRAND_DISPLAY).append('.');
+        } else {
+            rebuilt.append("You are banned from " + BRAND_DISPLAY + ". If you believe this was a mistake please make a ticket in the " + BRAND_DISPLAY + " Discord")
+                .append('\n').append(ChatColor.YELLOW).append(BRAND_DISCORD);
+        }
+        rebuilt.append("\n\n");
         if (date != null) {
             rebuilt.append(ChatColor.GRAY).append("Date: ").append(ChatColor.WHITE).append(date).append('\n');
         }
@@ -6266,8 +6849,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (banId != null) {
             rebuilt.append(ChatColor.GRAY).append("Ban ID: ").append(ChatColor.WHITE).append(banId).append('\n');
         }
-        rebuilt.append(ChatColor.GRAY).append("Reason: ").append(ChatColor.WHITE).append(reason).append('\n');
-        rebuilt.append(ChatColor.GRAY).append("You may be able to appeal this ban on ").append(ChatColor.WHITE).append(BRAND_DISCORD).append(ChatColor.GRAY).append('.');
+        rebuilt.append(ChatColor.GRAY).append("Reason: ").append(ChatColor.WHITE).append(reason);
+        if (discord) {
+            rebuilt.append('\n').append(ChatColor.GRAY).append("You may be able to appeal this ban on ").append(ChatColor.WHITE).append(BRAND_DISCORD).append(ChatColor.GRAY).append('.');
+        }
         return rebuilt.toString();
     }
 
@@ -6385,6 +6970,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
+    private record SusDetailState(UUID subject, int page) { }
+
     private static final class SusEntry {
         private final UUID uuid;
         private final String playerName;
@@ -6393,6 +6980,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         private String latestVerbose;
         private int highestVl;
         private int flagCount;
+        private final Map<String, Integer> checkCounts = new HashMap<>();
 
         private SusEntry(UUID uuid, String playerName, long latestAt, String latestCheck, String latestVerbose, int highestVl, int flagCount) {
             this.uuid = uuid;

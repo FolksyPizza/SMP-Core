@@ -18,6 +18,7 @@ Maintenance     | MANUAL | GPLv3 — https://github.com/kennytv/Maintenance/rele
 Chunky          | MANUAL | GPLv3 — https://www.spigotmc.org/resources/chunky.81534/
 TAB             | MANUAL | verify license — https://github.com/NEZNAMY/TAB/releases (5.5.0)
 floodgate-spigot| MANUAL | MIT — https://geysermc.org/download (backend Floodgate)
+voicechat       | MANUAL | optional; Simple Voice Chat (https://modrinth.com/plugin/simple-voice-chat). PizzaPunishment mutes also silence it
 # Proxy-side (install on Velocity, not the SMP): Geyser-Velocity + floodgate-velocity (MIT)
 
 # --- proprietary / unknown-license: NOT redistributable, install manually ---

@@ -14,6 +14,8 @@ block-advertising: true     # block IPs and domain names (server advertising)
 # Slurs / hate speech — matched as WHOLE WORDS after leet-speak normalization.
 # Keep this list specific. Word-boundary matching means these never match inside
 # innocent words. (Add entries lowercase; leet variants are handled automatically.)
+# Slurs of at least this many letters also match inside longer words and across spaced-out fragments.
+slur-substring-min-length: 5
 slur-words:
   - nigger
   - niggers
@@ -157,3 +159,27 @@ safe-words:
   - therapist
   - manuscript
   - skyscraper
+
+# Chat log: public chat and private messages (msg, tell, w, r, me, teammsg, say) with player, UUID and UTC time,
+# one file per day in plugins/PizzaChatGuard/chat-log/. Blocked messages are logged and marked [blocked].
+chat-log:
+  enabled: true
+  retention-days: 90
+
+# Filter level: off, light, normal or strong. Levels are cumulative:
+#   light  - slur-words (offenders are muted) and light-words
+#   normal - light plus blocked-words and phrases (default)
+#   strong - normal plus strong-words
+# off disables word filtering only; spam, caps and link checks stay on (enabled: false turns everything off).
+level: normal
+light-words: [fuck, fucking, fucker, fucked, fuckin, motherfucker, shit, shitty, bullshit, cunt]
+strong-words: [damn, dammit, damned, goddamn, hell, crap, crappy, ass, arse, dumbass, jackass, piss, pissed, bastard,
+  bloody, wtf, stfu, frick, frickin, dick, prick, bollocks, bugger]
+# Whole phrases (blocked from normal up).
+phrases: [kill yourself, go kill yourself, kys, heil hitler, sieg heil, white power, go back to your country]
+# UUIDs the filter ignores (managed from /chatguard).
+exempt-players: []
+# Who the filter applies to: everyone (except exempt-players and, unless guard-owner is on, owner/co-owner/dev),
+# or listed (only the players in only-players, by UUID). Switch in /chatguard.
+mode: everyone
+only-players: []

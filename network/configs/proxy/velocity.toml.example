@@ -10,7 +10,9 @@ online-mode = true
 player-info-forwarding-mode = "modern"
 forwarding-secret-file = "forwarding.secret"
 announce-forge = false
-kick-existing-players = false
+# A new login replaces a stale session for the same account (a dropped connection the proxy has not noticed yet)
+# instead of refusing it with "already connected". Safe with online-mode: only the account owner can log in.
+kick-existing-players = true
 ping-passthrough = "DESCRIPTION"
 enable-player-address-logging = true
 force-key-authentication = true

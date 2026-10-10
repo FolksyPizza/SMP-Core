@@ -4,7 +4,8 @@
 
 | Version | Supported |
 | --- | --- |
-| 1.0.0-beta | Yes |
+| 1.0.0 | Yes |
+| 1.0.0-beta | No |
 | 0.1.0 | No |
 
 Security fixes go into the latest release. Upgrade before reporting if you can.

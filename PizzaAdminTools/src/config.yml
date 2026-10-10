@@ -1,0 +1,5 @@
+# Home menu presentation. This does not change permission grants or the maximum slots a player may use.
+homes:
+  # When enabled, show locked home slots and the "Show More" control in supported dialog UIs.
+  # Defaults to hidden so players only see slots they can use.
+  show-locked-slots: false

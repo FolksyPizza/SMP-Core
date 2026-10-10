@@ -29,7 +29,7 @@ body:
     attributes:
       label: Versions
       description: SMP-Core version, Paper version and build, Java version.
-      placeholder: 1.0.0-beta, Paper 1.21.11 build 100, Java 21
+      placeholder: 1.0.0, Paper 1.21.11 build 100, Java 21
     validations:
       required: true
   - type: dropdown

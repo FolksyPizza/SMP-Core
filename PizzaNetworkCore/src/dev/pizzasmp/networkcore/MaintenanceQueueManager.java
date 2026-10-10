@@ -664,14 +664,8 @@ final class MaintenanceQueueManager {
     }
 
     private void ensureQueueColumnExists(Connection connection, String columnName, String alterSql) throws SQLException {
-        String checkSql = "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='maintenance_queue' AND COLUMN_NAME=? LIMIT 1";
-        try (PreparedStatement check = connection.prepareStatement(checkSql);){
-            check.setString(1, columnName);
-            try (ResultSet rs = check.executeQuery();){
-                if (rs.next()) {
-                    return;
-                }
-            }
+        if (PizzaNetworkCore.columnExists(connection, "maintenance_queue", columnName)) {
+            return;
         }
         try (PreparedStatement alter = connection.prepareStatement(alterSql);){
             alter.executeUpdate();
@@ -690,6 +684,10 @@ final class MaintenanceQueueManager {
     }
 
     private Connection getConnection() throws SQLException {
+        // Share PizzaNetworkCore's pool (MariaDB or the File-mode H2 database).
+        if (this.plugin instanceof PizzaNetworkCore pnc) {
+            return pnc.openSyncConnection();
+        }
         try {
             Class.forName("org.mariadb.jdbc.Driver");
         }

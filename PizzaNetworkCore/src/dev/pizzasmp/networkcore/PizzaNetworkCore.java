@@ -148,6 +148,7 @@ import net.milkbowl.vault.chat.Chat;
 import net.milkbowl.vault.economy.Economy;
 import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
+import dev.pizzasmp.common.menu.MenuLock;
 import org.bukkit.GameMode;
 import org.bukkit.Difficulty;
 import org.bukkit.GameRule;
@@ -417,10 +418,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private static final String TITLE_NAV = "Navigator";
     private static final String TITLE_ADMIN = "Server Admin";
     private static final String TITLE_DUEL_SETUP = "Duel Setup";
+    private static final long DUEL_LOOT_WINDOW_MILLIS = 5L * 60L * 1000L;
+    // Duels are a preview feature: labelled on every screen that starts one.
+    private static final String DUEL_PREVIEW_NOTE = "Duels are in preview; expect changes.";
     private static final String TITLE_DUEL_RTP_CONFIRM = "Leave Duel?";
     private static final String TITLE_RTP = "Random Teleport";
-    private static final String TITLE_HOMES = "Your Homes";
-    private static final String TITLE_HOME_DELETE_CONFIRM = "Delete Home";
     private static final String TITLE_BALTOP = "Top Balances";
     private static final String TITLE_INVSEE_PREFIX = "Inspect: ";
     private static final String TITLE_TEAM_SETTINGS = "&#00BFFFTeam Settings";
@@ -661,8 +663,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // Runtime End-RTP-closed flag (was a compile-time constant); toggle from the Feature Flags panel.
     private volatile boolean endRtpClosed = true;
     private static final String PERM_ADMIN_CONSOLE = "pizzasmp.admin.console";
-    /** Staff browsing another player's homes (/homes <player>, /admindelhome). */
-    private static final String PERM_ADMIN_HOMES = "pizzasmp.admin.homes";
     private static final String PERM_ADMIN_AUCTION = "pizzasmp.admin.auction";
     private static final String PERM_ADMIN_INVSEE = "pizzasmp.admin.invsee";
     private static final String TITLE_AH_ADMIN = "Staff: Auction Listings";
@@ -788,7 +788,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         volatile boolean started; volatile boolean fightBegan; volatile boolean paused; volatile boolean celebrating; volatile boolean finalPresentationShown; volatile boolean ended;
         volatile boolean arenaEntered; volatile boolean postMatchLootWindow; volatile boolean wagerSettled;
         volatile boolean loserReturned; volatile boolean winnerInventoryFinalized; volatile boolean loserInventoryFinalized;
-        volatile boolean loserInventoryDropped;
+        volatile boolean loserInventoryDropped; volatile long lootDroppedAt;
         volatile long arenaSearchStartedAt; volatile long lootWindowEndsAt;
         volatile long arenaSearchDeadline;
         volatile int round = 1; volatile int winsA; volatile int winsB;
@@ -988,9 +988,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.registerCommand("orders", this);
         this.registerCommand("afk", this);
         this.registerCommand("discord", this);
-        this.registerCommand("gtp", this);
-        this.registerCommand("homes", this);
-        this.registerCommand("home", this);
         this.registerCommand("bal", this);
         this.registerCommand("baltop", this);
         this.registerCommand("leaderboard", this);
@@ -1211,6 +1208,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         catch (NoClassDefFoundError ignored) {
             this.economy = null;
+        }
+        if (this.economy == null) {
+            this.getLogger().severe("Vault is not installed: the economy is off (balances, /pay, /sell, auctions and orders "
+                + "do nothing). Install Vault and restart.");
         }
     }
     private void setupChat() {
@@ -1610,6 +1611,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         final UUID advUuid = e.getPlayer().getUniqueId();
         this.runPlayerTaskLater(e.getPlayer(), () -> this.runAsyncTask(() -> this.saveAdvancementsToDb(advUuid)), 1L);
     }
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onPreLoginSyncCheck(org.bukkit.event.player.AsyncPlayerPreLoginEvent e) {
+        if (e.getLoginResult() != org.bukkit.event.player.AsyncPlayerPreLoginEvent.Result.ALLOWED || this.playerSyncManager == null) return;
+        String reason = this.playerSyncManager.preLoginDenyReason();
+        if (reason != null) {
+            e.disallow(org.bukkit.event.player.AsyncPlayerPreLoginEvent.Result.KICK_OTHER,
+                Component.text(reason, net.kyori.adventure.text.format.NamedTextColor.GRAY));
+        }
+    }
+
     /**
      * Put the player's synced advancements on disk before they load. AsyncPreLogin blocks the
      * login until this returns, which is the ordering the whole file-copy approach depends on:
@@ -2141,6 +2152,202 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         }
     }
+    // Player commands arrive two ways: typed (PlayerCommandPreprocessEvent, which also sees commands other plugins
+    // own) and dispatched (Bukkit.dispatchCommand or performCommand, which skip preprocess and land in onCommand).
+    // Both entry points route these through routePlayerCommand so the two paths cannot drift apart.
+    private static final Set<String> SHARED_PLAYER_COMMANDS = Set.of(
+            "bal", "balance", "money", "shards", "settings", "shop", "duel", "1v1", "spectate", "spec",
+            "spawn", "afk", "warp", "setmoneyboard", "rtp", "wild", "randomtp", "sell", "ah", "auction",
+            "orders", "order", "msg", "tell", "w", "reply", "r", "team", "teams",
+            "tpa", "tpahere", "tpacancel", "tpaaccept", "tpaccept", "tpacept", "tpadeny", "tpdeny",
+            "hubbypass", "hubedit", "sethubspawn", "addafkspot", "clearafkspots", "wherepos", "coords",
+            "invsee");
+
+    /**
+     * Handles a shared player command. Returns false to let the caller fall through: hub commands before the hub
+     * worlds are ready, and menus the player has no use permission for.
+     */
+    private boolean routePlayerCommand(Player player, String label, String[] args) {
+        String[] split = new String[args.length + 1];
+        split[0] = label;
+        System.arraycopy(args, 0, split, 1, args.length);
+        switch (label) {
+            case "bal", "balance", "money" -> this.handleBalanceCommand(player, args);
+            case "shards" -> {
+                if (args.length >= 1 && "give".equalsIgnoreCase(args[0])) {
+                    if (!player.hasPermission("pizzasmp.admin.shards")) {
+                        player.sendMessage("§cYou do not have permission.");
+                    } else if (args.length < 3) {
+                        player.sendActionBar(Component.text("§cUsage: /shards give <player> <amount>"));
+                    } else {
+                        this.handleShardsGiveCommand(player, args[1], args[2]);
+                    }
+                } else {
+                    this.handleShardsCommand(player);
+                }
+            }
+            case "settings" -> {
+                if (!player.hasPermission("pizzasmp.use.settings")) return false;
+                this.openSettings(player);
+            }
+            case "shop" -> {
+                if (args.length > 0 && "reload".equalsIgnoreCase(args[0])) {
+                    if (!player.hasPermission("pizzasmp.shop.admin.reload")) {
+                        player.sendMessage("§cNo permission.");
+                    } else {
+                        this.loadShopConfig();
+                        player.sendMessage("§7Shop catalogue reloaded.");
+                    }
+                    return true;
+                }
+                if (!player.hasPermission("pizzasmp.use.shop")) return false;
+                this.openShopMain(player);
+            }
+            case "duel", "1v1" -> {
+                if (player.hasPermission("pizzasmp.use.duel")) this.handleDuelCommand(player, args);
+                else player.sendMessage("§cThis command does not exist.");
+            }
+            case "spectate", "spec" -> {
+                if (player.hasPermission("pizzasmp.use.spectate")) this.handleSpectateCommand(player, args);
+                else player.sendMessage("§cThis command does not exist.");
+            }
+            case "spawn", "afk", "warp" -> {
+                // Before the hub worlds load, /spawn, /afk and /warp belong to the network routes and Essentials.
+                if (!this.hubWorldsReady()) return false;
+                this.routeHubCommand(player, label, args);
+            }
+            case "setmoneyboard" -> this.handleSetMoneyBoard(player);
+            case "hubbypass", "hubedit" -> this.handleHubBypassCommand(player);
+            // Self-service teleport-point setters: stand where you want the point and run the command.
+            case "sethubspawn" -> this.handleSetHubSpawn(player);
+            case "addafkspot" -> this.handleAddAfkSpot(player);
+            case "clearafkspots" -> this.handleClearAfkSpots(player);
+            case "wherepos", "coords" -> this.handleWherePos(player);
+            case "invsee" -> this.handleInvseeCommand(player, split);
+            case "rtp" -> this.handleRtpCommand(player, args);
+            case "wild" -> this.handleRtpCommand(player, new String[]{"overworld"});
+            case "randomtp" -> this.handleRtpCommand(player, new String[0]);
+            case "sell" -> this.handleSellCommand(player, args);
+            case "ah", "auction" -> {
+                if (args.length >= 2 && "admin".equalsIgnoreCase(args[0]) && player.hasPermission(PERM_ADMIN_AUCTION)) {
+                    this.openAdminAhListingsByName(player, args[1]);
+                } else if (player.hasPermission("pizzasmp.use.ah")) {
+                    if (args.length >= 2 && "sell".equalsIgnoreCase(args[0])) this.handleAhSellInHandCommand(player, args[1]);
+                    else this.openAuctionFromCommand(player, args);
+                }
+            }
+            case "orders", "order" -> {
+                if (player.hasPermission("pizzasmp.use.orders")) this.openOrdersFromCommand(player, args);
+                else player.sendMessage("§cYou do not have permission to use /orders.");
+            }
+            case "msg", "tell", "w" -> this.handleMsgCommand(player, args);
+            case "reply", "r" -> this.handleReplyCommand(player, args);
+            case "team", "teams" -> {
+                if ("team".equals(label) && this.handleCrossServerRoutePreprocess(player, label, split, "/" + String.join(" ", split))) {
+                    return true;
+                }
+                this.handleTeamCommand(player, args);
+            }
+            default -> this.routeTeleportRequestCommand(player, label, split);
+        }
+        return true;
+    }
+
+    /** /spawn, /afk and /warp inside the local hub worlds. */
+    private void routeHubCommand(Player player, String label, String[] args) {
+        if ("afk".equals(label) && !player.hasPermission("pizzasmp.use.afk")) return;
+        if ("warp".equals(label) && args.length < 1) {
+            player.sendMessage("§cUsage: /warp <spawn|duels|pvp|survival|main|afk>");
+            return;
+        }
+        this.routeWarpLikeCommand(player, "warp".equals(label) ? args[0].toLowerCase(Locale.ROOT) : label);
+    }
+
+    /** /tpa, /tpahere, /tpacancel, /tpaaccept and /tpadeny, local or across backends. */
+    private void routeTeleportRequestCommand(Player player, String label, String[] split) {
+        if (this.activeDuels.containsKey(player.getUniqueId())) {
+            player.sendActionBar(Component.text("§cTeleport requests are unavailable during a duel."));
+            return;
+        }
+        if (("tpa".equals(label) || "tpahere".equals(label))
+                && this.handleCrossServerRoutePreprocess(player, label, split, "/" + String.join(" ", split))) {
+            return;
+        }
+        if (this.handleCrossServerTeleportRequestCommand(player, label, split)) {
+            return;
+        }
+        switch (label) {
+            case "tpa" -> { if (split.length >= 2) this.handleTpaCommand(player, split[1], "tpa"); else player.sendActionBar(Component.text("§cUsage: /tpa <player>")); }
+            case "tpahere" -> { if (split.length >= 2) this.handleTpaCommand(player, split[1], "tpahere"); else player.sendActionBar(Component.text("§cUsage: /tpahere <player>")); }
+            case "tpacancel" -> this.handleTpaCancelCommand(player);
+            case "tpaaccept", "tpaccept", "tpacept" -> this.handleTpaAcceptCommand(player, split.length >= 2 ? split[1] : null);
+            case "tpadeny", "tpdeny" -> this.handleTpaDenyCommand(player, split.length >= 2 ? split[1] : null);
+            default -> { }
+        }
+    }
+
+    /**
+     * /ah [search]: bare opens the clean homepage (default filter and sort). A player name filters by seller;
+     * anything else searches, keeping spaces so enchantment terms after the material still match.
+     */
+    private void openAuctionFromCommand(Player player, String[] args) {
+        UUID uuid = player.getUniqueId();
+        if (args.length == 0) {
+            this.ahViewState.put(uuid, new AhViewState());
+            this.openAuctionHouseMenu(player);
+            return;
+        }
+        String search = this.expandItemAbbrev(uuid, String.join(" ", args)).toLowerCase(Locale.ROOT);
+        // The seller lookup can query the database, so it runs off the tick thread.
+        this.runAsyncTask(() -> {
+            UUID seller = this.playerUuidByName(search);
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                AhViewState vs = this.ahViewState.computeIfAbsent(uuid, id -> new AhViewState());
+                if (seller != null) {
+                    vs.sellerFilter = seller.toString();
+                    vs.search = "";
+                } else {
+                    vs.sellerFilter = null;
+                    Material mat = Material.matchMaterial(search.toUpperCase(Locale.ROOT));
+                    vs.search = mat != null ? this.humanName(mat) : search;
+                }
+                vs.page = 1;
+                this.openAuctionHouseMenu(player);
+            });
+        });
+    }
+
+    /**
+     * /orders [search]: bare opens the clean homepage. A player name filters by creator; anything else matches item
+     * keys, so spaces become underscores.
+     */
+    private void openOrdersFromCommand(Player player, String[] args) {
+        UUID uuid = player.getUniqueId();
+        if (args.length == 0) {
+            this.ordersViewState.put(uuid, new OrdersViewState());
+            this.openOrdersMenu(player);
+            return;
+        }
+        String search = this.expandItemAbbrev(uuid, String.join(" ", args)).toLowerCase(Locale.ROOT);
+        this.runAsyncTask(() -> {
+            UUID creator = this.playerUuidByName(search);
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                OrdersViewState vs = this.ordersViewState.computeIfAbsent(uuid, id -> new OrdersViewState());
+                if (creator != null) {
+                    vs.creatorFilter = creator.toString();
+                    vs.search = "";
+                } else {
+                    vs.creatorFilter = null;
+                    vs.search = search.replace(' ', '_');
+                }
+                vs.page = 1;
+                this.openOrdersMenu(player);
+            });
+        });
+    }
+
     @EventHandler(priority=EventPriority.HIGHEST, ignoreCancelled=true)
     public void onTeleportCommandDelay(PlayerCommandPreprocessEvent e) {
         Player player = e.getPlayer();
@@ -2164,6 +2371,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (commandDuel != null && "leave".equals(label)) {
             e.setCancelled(true);
             if (commandDuel.soloTest) this.finishSoloDuel(commandDuel, "§7Duel test ended.", true);
+            // The winner is done collecting: end the loot window and go back.
+            else if (commandDuel.postMatchLootWindow) this.resolveMatch(commandDuel, commandDuel.pendingRoundWinner, commandDuel.pendingRoundLoser);
             else this.forfeitDuelByChoice(commandDuel, uuid);
             return;
         }
@@ -2173,113 +2382,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (("eco".equals(label) || "economy".equals(label)) && this.economyDispatchBypass.remove(uuid)) {
             return;
         }
-        if (this.isBalanceCommand(label)) {
+        if (SHARED_PLAYER_COMMANDS.contains(label)
+                && this.routePlayerCommand(player, label, Arrays.copyOfRange(split, 1, split.length))) {
             e.setCancelled(true);
-            this.handleBalanceCommand(player, split.length > 1 ? Arrays.copyOfRange(split, 1, split.length) : new String[]{});
-            return;
-        }
-        if (this.isShardsCommand(label)) {
-            if (split.length >= 2 && "give".equalsIgnoreCase(split[1])) {
-                // Admin sub-command — let it fall through to onCommand
-            } else {
-                e.setCancelled(true);
-                this.handleShardsCommand(player);
-                return;
-            }
-        }
-        if ("settings".equals(label)) {
-            if (player.hasPermission("pizzasmp.use.settings")) {
-                e.setCancelled(true);
-                this.openSettings(player);
-            }
-            return;
-        }
-        if ("shop".equals(label)) {
-            if (player.hasPermission("pizzasmp.use.shop")) {
-                e.setCancelled(true);
-                this.openShopMain(player);
-            }
-            return;
-        }
-        // /duel + /spectate are handled HERE (preprocess) like /tpa and /shop — cancelling the event so
-        // they bypass the command-throttle/audit stage that was silently eating the onCommand path.
-        if ("duel".equals(label) || "1v1".equals(label)) {
-            e.setCancelled(true);
-            if (player.hasPermission("pizzasmp.use.duel")) {
-                this.handleDuelCommand(player, split.length > 1 ? Arrays.copyOfRange(split, 1, split.length) : new String[]{});
-            } else {
-                player.sendMessage("§cThis command does not exist.");
-            }
-            return;
-        }
-        // Hub routing must win over Essentials' /spawn, /afk, /warp (which otherwise shadow ours). Handled
-        // in preprocess so the command reaches PNC regardless of which plugin "owns" it.
-        if (this.hubWorldsReady()) {
-            if ("spawn".equals(label)) { e.setCancelled(true); this.routeWarpLikeCommand(player, "spawn"); return; }
-            if ("afk".equals(label))   { e.setCancelled(true); this.routeWarpLikeCommand(player, "afk"); return; }
-            if ("warp".equals(label)) {
-                e.setCancelled(true);
-                this.routeWarpLikeCommand(player, split.length > 1 ? split[1].toLowerCase(Locale.ROOT) : "");
-                return;
-            }
-        }
-        if ("hubbypass".equals(label) || "hubedit".equals(label)) {
-            e.setCancelled(true);
-            this.handleHubBypassCommand(player);
-            return;
-        }
-        // Self-service teleport-point setters: stand where you want the point and run the command.
-        if ("sethubspawn".equals(label)) { e.setCancelled(true); this.handleSetHubSpawn(player); return; }
-        if ("addafkspot".equals(label))  { e.setCancelled(true); this.handleAddAfkSpot(player); return; }
-        if ("clearafkspots".equals(label)) { e.setCancelled(true); this.handleClearAfkSpots(player); return; }
-        if ("setmoneyboard".equals(label)) { e.setCancelled(true); this.handleSetMoneyBoard(player); return; }
-        if ("wherepos".equals(label) || "coords".equals(label)) { e.setCancelled(true); this.handleWherePos(player); return; }
-        if ("spectate".equals(label) || "spec".equals(label)) {
-            e.setCancelled(true);
-            if (player.hasPermission("pizzasmp.use.spectate")) {
-                this.handleSpectateCommand(player, split.length > 1 ? Arrays.copyOfRange(split, 1, split.length) : new String[]{});
-            } else {
-                player.sendMessage("§cThis command does not exist.");
-            }
-            return;
-        }
-        if ("orders".equals(label) || "order".equals(label)) {
-            e.setCancelled(true);
-            if (!player.hasPermission("pizzasmp.use.orders")) {
-                player.sendMessage("\u00a7cYou do not have permission to use /orders.");
-                return;
-            }
-            OrdersViewState _oState = this.ordersViewState.computeIfAbsent(player.getUniqueId(), _id -> new OrdersViewState());
-            if (split.length >= 2) {
-                String _rawSearch = this.expandItemAbbrev(player.getUniqueId(), String.join(" ", Arrays.copyOfRange(split, 1, split.length)));
-                _oState.search = _rawSearch.toLowerCase(Locale.ROOT).replace(' ', '_');
-                _oState.creatorFilter = null;
-            } else {
-                _oState.search = "";
-                _oState.creatorFilter = null;
-            }
-            _oState.page = 1;
-            this.openOrdersMenu(player);
-            return;
-        }
-        if ("rtp".equals(label)) {
-            e.setCancelled(true);
-            this.handleRtpCommand(player, Arrays.copyOfRange(split, 1, split.length));
-            return;
-        }
-        if ("wild".equals(label)) {
-            e.setCancelled(true);
-            this.handleRtpCommand(player, new String[]{"overworld"});
-            return;
-        }
-        if ("randomtp".equals(label)) {
-            e.setCancelled(true);
-            this.handleRtpCommand(player, new String[0]);
-            return;
-        }
-        if ("sell".equals(label)) {
-            e.setCancelled(true);
-            this.handleSellCommand(player, Arrays.copyOfRange(split, 1, split.length));
             return;
         }
         if ("eco".equals(label) || "economy".equals(label)) {
@@ -2296,37 +2401,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             return;
         }
-        if ("invsee".equals(label)) {
-            e.setCancelled(true);
-            this.handleInvseeCommand(player, split);
-            return;
-        }
-        if ("ah".equals(label) || "auction".equals(label)) {
-            e.setCancelled(true);
-            if (split.length >= 3 && "admin".equalsIgnoreCase(split[1]) && player.hasPermission(PERM_ADMIN_AUCTION)) {
-                this.openAdminAhListingsByName(player, split[2]);
-                return;
-            }
-            if (!player.hasPermission("pizzasmp.use.ah")) {
-                return;
-            }
-            if (split.length >= 3 && "sell".equalsIgnoreCase(split[1])) {
-                this.handleAhSellInHandCommand(player, split[2]);
-            } else {
-                AhViewState _ahState = this.ahViewState.computeIfAbsent(player.getUniqueId(), _id -> new AhViewState());
-                if (split.length >= 2) {
-                    String _rawSearch = this.expandItemAbbrev(player.getUniqueId(), String.join(" ", Arrays.copyOfRange(split, 1, split.length)));
-                    _ahState.search = _rawSearch.toLowerCase(Locale.ROOT).replace(' ', '_');
-                    _ahState.sellerFilter = null;
-                } else {
-                    _ahState.search = "";
-                    _ahState.sellerFilter = null;
-                }
-                _ahState.page = 1;
-                this.openAuctionHouseMenu(player);
-            }
-            return;
-        }
         // /pay is now handled by onPayFirst (LOWEST priority) above.
         if ("sethome".equals(label) && this.isCombatTagged(player)) {
             e.setCancelled(true);
@@ -2336,52 +2410,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (this.handleCrossServerRoutePreprocess(player, label, split, message)) {
             e.setCancelled(true);
-            return;
-        }
-        if (label.equals("msg") || label.equals("tell") || label.equals("w")) {
-            e.setCancelled(true);
-            this.handleMsgCommand(player, Arrays.copyOfRange(split, 1, split.length));
-            return;
-        }
-        if (label.equals("tpa") || label.equals("tpahere") || label.equals("tpacancel") || label.equals("tpaaccept") || label.equals("tpaccept") || label.equals("tpacept") || label.equals("tpadeny") || label.equals("tpdeny")) {
-            e.setCancelled(true);
-            if (this.activeDuels.containsKey(player.getUniqueId())) {
-                player.sendActionBar(Component.text("§cTeleport requests are unavailable during a duel."));
-                return;
-            }
-            if (this.handleCrossServerTeleportRequestCommand(player, label, split)) {
-                return;
-            }
-            switch (label) {
-                case "tpa" -> { if (split.length >= 2) this.handleTpaCommand(player, split[1], "tpa"); else player.sendActionBar(Component.text("§cUsage: /tpa <player>")); }
-                case "tpahere" -> { if (split.length >= 2) this.handleTpaCommand(player, split[1], "tpahere"); else player.sendActionBar(Component.text("§cUsage: /tpahere <player>")); }
-                case "tpacancel" -> this.handleTpaCancelCommand(player);
-                case "tpaaccept", "tpaccept", "tpacept" -> this.handleTpaAcceptCommand(player, split.length >= 2 ? split[1] : null);
-                case "tpadeny", "tpdeny" -> this.handleTpaDenyCommand(player, split.length >= 2 ? split[1] : null);
-            }
-            return;
-        }
-        if (label.equals("admindelhome")) {
-            e.setCancelled(true);
-            if (!player.hasPermission("pizzasmp.admin.homes")) {
-                player.sendMessage("§cYou do not have permission to use /admindelhome.");
-                return;
-            }
-            if (split.length < 3) {
-                player.sendActionBar(Component.text("§cUsage: /admindelhome <player> <home>"));
-                return;
-            }
-            this.handleAdminDelHome(player, split[1], split[2]);
-            return;
-        }
-        if (label.equals("reply") || label.equals("r")) {
-            e.setCancelled(true);
-            this.handleReplyCommand(player, Arrays.copyOfRange(split, 1, split.length));
-            return;
-        }
-        if (label.equals("team") || label.equals("teams")) {
-            e.setCancelled(true);
-            this.handleTeamCommand(player, Arrays.copyOfRange(split, 1, split.length));
             return;
         }
         if (this.isRestrictedAdminCommand(label, split) && !player.hasPermission("pizzasmp.admin.commands")) {
@@ -3123,24 +3151,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.handleRtpMenuClick(p, e.getCurrentItem());
             return;
         }
-        if (TITLE_HOMES.equals(title)) {
-            if (e.getClickedInventory() == null || !e.getClickedInventory().equals((Object)e.getView().getTopInventory())) {
-                if (e.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) e.setCancelled(true);
-                return;
-            }
-            e.setCancelled(true);
-            this.handleHomesClick(p, e.getSlot(), e.getCurrentItem(), e.getClick());
-            return;
-        }
-        if (TITLE_HOME_DELETE_CONFIRM.equals(title)) {
-            if (e.getClickedInventory() == null || !e.getClickedInventory().equals((Object)e.getView().getTopInventory())) {
-                if (e.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) e.setCancelled(true);
-                return;
-            }
-            e.setCancelled(true);
-            this.handleHomeDeleteConfirmClick(p, e.getSlot());
-            return;
-        }
         if (TITLE_BALTOP.equals(title)) {
             if (e.getClickedInventory() == null || !e.getClickedInventory().equals((Object)e.getView().getTopInventory())) {
                 if (e.getAction() == InventoryAction.MOVE_TO_OTHER_INVENTORY) e.setCancelled(true);
@@ -3174,6 +3184,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             } else if ("sus_reload".equals(id)) {
                 SuspiciousPlayersGuiState state = this.suspiciousPlayersGuiState.computeIfAbsent(p.getUniqueId(), k -> new SuspiciousPlayersGuiState());
                 this.openSuspiciousPlayersGui(p, state.page);
+            } else if ("sus_search".equals(id)) {
+                p.closeInventory();
+                if (this.useDialogUi(p)) {
+                    this.openSuspiciousSearchDialog(p);
+                } else {
+                    p.sendMessage("§7Search by name with §f/sus <player>§7.");
+                }
             } else if (id.startsWith("sus_player:")) {
                 String targetUuid = id.substring(11);
                 this.openSuspiciousPlayerDetailGui(p, targetUuid);
@@ -3256,12 +3273,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             } else if (id.startsWith("sus_clear_yes:")) {
                 String targetUuid = id.substring("sus_clear_yes:".length());
                 this.runAsyncTask(() -> {
-                    int deleted = this.clearSuspiciousFlags(targetUuid);
+                    int dismissed = this.clearSuspiciousFlags(targetUuid, p.getUniqueId().toString());
                     this.runOnPlayerThread(p, () -> {
-                        if (deleted < 0) {
+                        if (dismissed < 0) {
                             p.sendMessage("§cFailed to clear flags.");
                         } else {
-                            p.sendMessage("§aCleared §f" + deleted + " §aflag(s).");
+                            p.sendMessage("§aDismissed §f" + dismissed + " §aflag(s); history retained.");
                         }
                         this.openSuspiciousPlayersGui(p);
                     });
@@ -3372,8 +3389,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
     public void onContainerOpenHealSellMarkers(org.bukkit.event.inventory.InventoryOpenEvent e) {
         Inventory top = e.getInventory();
-        // Only real block/entity containers — custom GUIs (null holder) manage their own items
-        if (top.getHolder() != null && !(top.getHolder() instanceof Player)) {
+        // Only real block/entity containers; menus (MenuLock holders) manage their own items
+        if (top.getHolder() != null && !(top.getHolder() instanceof Player) && !(top.getHolder() instanceof MenuLock.Locked)) {
             this.healSellMarkers(top);
         }
     }
@@ -3826,16 +3843,36 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         for (Material m : Material.values()) {
             if (m.isItem() && m.name().toLowerCase(Locale.ROOT).contains(joined)) return raw;   // real hit
         }
-        String[] words = norm.split("[ _]+");
+        // Correct word by word, keeping the original separators: AH search reads trailing words as enchantment terms,
+        // so they must stay separate and must never be "corrected" into item names (sharpness -> harness).
+        java.util.Set<String> enchantWords = this.enchantmentQueryWords();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("[^ _]+").matcher(norm);
         StringBuilder out = new StringBuilder();
+        int last = 0;
         boolean changed = false;
-        for (String w : words) {
-            String c = this.spellCorrectWord(w);
+        while (m.find()) {
+            String w = m.group();
+            String c = enchantWords.contains(w) ? w : this.spellCorrectWord(w);
             if (!w.equals(c)) changed = true;
-            if (out.length() > 0) out.append('_');
-            out.append(c);
+            out.append(norm, last, m.start()).append(c);
+            last = m.end();
         }
+        out.append(norm.substring(last));
         return changed ? out.toString() : raw;
+    }
+
+    private volatile java.util.Set<String> enchantmentQueryWords;
+
+    /** Every word of every enchantment key ("fire_aspect" gives "fire" and "aspect"), plus level numerals. */
+    private java.util.Set<String> enchantmentQueryWords() {
+        java.util.Set<String> words = this.enchantmentQueryWords;
+        if (words != null) return words;
+        java.util.Set<String> built = new java.util.HashSet<>(java.util.List.of("i", "ii", "iii", "iv", "v"));
+        for (Enchantment e : org.bukkit.Registry.ENCHANTMENT) {
+            built.addAll(java.util.Arrays.asList(e.getKey().getKey().toLowerCase(Locale.ROOT).split("_")));
+        }
+        this.enchantmentQueryWords = java.util.Set.copyOf(built);
+        return this.enchantmentQueryWords;
     }
 
     // ---- Command spell-check -------------------------------------------------------------------
@@ -4183,16 +4220,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return true;
         }
         Player p = (Player)sender;
+        String typed = label.toLowerCase(Locale.ROOT);
+        if (typed.contains(":")) typed = typed.substring(typed.indexOf(':') + 1);
+        String shared = SHARED_PLAYER_COMMANDS.contains(typed) ? typed : SHARED_PLAYER_COMMANDS.contains(cmdNameLower) ? cmdNameLower : null;
+        if (shared != null) {
+            if (!this.routePlayerCommand(p, shared, args) && ("spawn".equals(shared) || "afk".equals(shared) || "warp".equals(shared))) {
+                // Hub worlds not loaded: fall back to the network warp targets.
+                this.routeHubCommand(p, shared, args);
+            }
+            return true;
+        }
         switch (command.getName().toLowerCase()) {
             case "guide": {
                 this.openGuide(p);
-                break;
-            }
-            case "settings": {
-                if (!p.hasPermission("pizzasmp.use.settings")) {
-                    return true;
-                }
-                this.openSettings(p);
                 break;
             }
             case "stats": {
@@ -4206,64 +4246,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
                 break;
             }
-            case "shop": {
-                // pizzasmp.shop.admin.reload has been declared in plugin.yml all along but was
-                // never wired to anything, so editing configs/shop meant a full restart. Mirrors
-                // /sell reload.
-                if (args.length > 0 && "reload".equalsIgnoreCase(args[0])) {
-                    if (!p.hasPermission("pizzasmp.shop.admin.reload")) {
-                        p.sendMessage("§cNo permission.");
-                        return true;
-                    }
-                    this.loadShopConfig();
-                    p.sendMessage("§aShop catalogue reloaded.");
-                    return true;
-                }
-                if (!p.hasPermission("pizzasmp.use.shop")) {
-                    return true;
-                }
-                this.openShopMain(p);
-                break;
-            }
             case "navigator": {
                 this.openNavigator(p);
-                break;
-            }
-            case "spawn": {
-                this.routeWarpLikeCommand(p, "spawn");
-                break;
-            }
-            case "warp": {
-                if (args.length < 1) {
-                    p.sendMessage("\u00a7cUsage: /warp <spawn|duels|pvp|survival|main|afk>");
-                    return true;
-                }
-                this.routeWarpLikeCommand(p, args[0].toLowerCase());
-                break;
-            }
-            case "setmoneyboard": {
-                this.handleSetMoneyBoard(p);
-                break;
-            }
-            case "rtp": {
-                this.handleRtpCommand(p, args);
                 break;
             }
             case "rtpq":
             case "rtpqueue": {
                 this.handleRtpQueueCommand(p, args);
-                break;
-            }
-            case "duel":
-            case "1v1": {
-                if (!p.hasPermission("pizzasmp.use.duel")) { p.sendMessage("§cThis command does not exist."); return true; }
-                this.handleDuelCommand(p, args);
-                break;
-            }
-            case "spectate":
-            case "spec": {
-                if (!p.hasPermission("pizzasmp.use.spectate")) { p.sendMessage("§cThis command does not exist."); return true; }
-                this.handleSpectateCommand(p, args);
                 break;
             }
             case "nv":
@@ -4277,22 +4266,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             case "tpauto": {
                 this.handleTpAutoCommand(p);
-                break;
-            }
-            case "msg": 
-            case "tell": 
-            case "w": {
-                this.handleMsgCommand(p, args);
-                break;
-            }
-            case "reply":
-            case "r": {
-                this.handleReplyCommand(p, args);
-                break;
-            }
-            case "team":
-            case "teams": {
-                this.handleTeamCommand(p, args);
                 break;
             }
             case "follow": {
@@ -4325,74 +4298,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.handleIgnoreCommand(p, args, "block", true);
                 break;
             }
-            case "sell": {
-                this.handleSellCommand(p, args);
-                break;
-            }
-            case "ah": {
-                if (!p.hasPermission("pizzasmp.use.ah")) {
-                    return true;
-                }
-                if (args.length >= 2 && "sell".equalsIgnoreCase(args[0])) {
-                    this.handleAhSellInHandCommand(p, args[1]);
-                    return true;
-                }
-                // Bare /ah always opens the clean homepage: default filter/sort, no search.
-                AhViewState vs;
-                if (args.length == 0) {
-                    vs = new AhViewState();
-                    this.ahViewState.put(p.getUniqueId(), vs);
-                } else {
-                    vs = this.ahViewState.computeIfAbsent(p.getUniqueId(), id -> new AhViewState());
-                }
-                if (args.length >= 1 && !"sell".equalsIgnoreCase(args[0])) {
-                    String search = this.expandItemAbbrev(p.getUniqueId(), String.join(" ", args)).toLowerCase(Locale.ROOT);
-                    UUID playerUuid = this.playerUuidByName(search);
-                    if (playerUuid != null) {
-                        vs.sellerFilter = playerUuid.toString();
-                        vs.search = "";
-                    } else {
-                        vs.sellerFilter = null;
-                        Material mat = Material.matchMaterial(search.toUpperCase(Locale.ROOT));
-                        if (mat != null) {
-                            vs.search = this.humanName(mat);
-                        } else {
-                            vs.search = search;
-                        }
-                    }
-                }
-                vs.page = 1;
-                this.openAuctionHouseMenu(p);
-                break;
-            }
-            case "orders": {
-                if (!p.hasPermission("pizzasmp.use.orders")) {
-                    p.sendMessage("\u00a7cYou do not have permission to use /orders.");
-                    return true;
-                }
-                // Bare /orders always opens the clean homepage (same as /ah).
-                OrdersViewState vs;
-                if (args.length == 0) {
-                    vs = new OrdersViewState();
-                    this.ordersViewState.put(p.getUniqueId(), vs);
-                } else {
-                    vs = this.ordersViewState.computeIfAbsent(p.getUniqueId(), id -> new OrdersViewState());
-                }
-                if (args.length >= 1) {
-                    String search = String.join(" ", args).toLowerCase(Locale.ROOT);
-                    UUID playerUuid = this.playerUuidByName(search);
-                    if (playerUuid != null) {
-                        vs.creatorFilter = playerUuid.toString();
-                        vs.search = "";
-                    } else {
-                        vs.creatorFilter = null;
-                        vs.search = search;
-                    }
-                }
-                vs.page = 1;
-                this.openOrdersMenu(p);
-                break;
-            }
             case "ecobot": {
                 if (!p.hasPermission("pizzasmp.admin.eco")) {
                     p.sendMessage("\u00a7cNo permission.");
@@ -4401,57 +4306,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.handleEcobotCommand(p, args);
                 break;
             }
-            case "afk": {
-                if (!p.hasPermission("pizzasmp.use.afk")) {
-                    return true;
-                }
-                this.routeWarpLikeCommand(p, "afk");
-                break;
-            }
             case "discord": {
                 this.handleDiscordCommand(p);
-                break;
-            }
-            case "gtp": {
-                this.handleGtpCommand(p, args);
-                break;
-            }
-            case "homes": {
-                // `/homes <player>` is the staff browse. It used to live in PizzaAdminTools and
-                // read the retired SetHome plugin's per-server YAML, while `/home` read the
-                // homes table — two datasets behind two commands that look like one feature.
-                // Staff saw stale data, or none at all. One owner, one source.
-                if (args.length >= 1 && p.hasPermission(PERM_ADMIN_HOMES)) {
-                    this.openHomesOfPlayer(p, args[0]);
-                    break;
-                }
-                this.openHomesFromAnyServer(p);
-                break;
-            }
-            case "home": {
-                // Absorbed from SetHomeGUI: no args opens the 9×4 homes GUI; a name teleports.
-                if (args.length == 0) {
-                    this.openHomesFromAnyServer(p);
-                } else {
-                    String homeKey = args[0].toLowerCase(Locale.ROOT);
-                    this.runAsyncTask(() -> {
-                        HomeRecord home = this.loadHomeRecord(p.getUniqueId(), homeKey);
-                        this.runOnPlayerThread(p, () -> {
-                            if (home != null) {
-                                this.startHomeTeleportCountdown(p, home);
-                            } else {
-                                p.sendActionBar(Component.text("§cNo home named '" + homeKey + "'."));
-                                this.openHomesFromAnyServer(p);
-                            }
-                        });
-                    });
-                }
-                break;
-            }
-            case "bal":
-            case "balance": 
-            case "money": {
-                this.handleBalanceCommand(p, args);
                 break;
             }
             case "baltop": {
@@ -4532,47 +4388,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.openSellMultiMainGui(p);
                 break;
             }
-            case "sethome":
-            case "delhome": {
-                p.performCommand("home");
-                break;
-            }
-            case "tpa": {
-                if (args.length < 1) {
-                    p.sendActionBar(Component.text("§cUsage: /tpa <player>"));
-                    return true;
-                }
-                this.handleTpaCommand(p, args[0], "tpa");
-                return true;
-            }
-            case "tpahere": {
-                if (args.length < 1) {
-                    p.sendActionBar(Component.text("§cUsage: /tpahere <player>"));
-                    return true;
-                }
-                this.handleTpaCommand(p, args[0], "tpahere");
-                return true;
-            }
-            case "tpacancel": {
-                this.handleTpaCancelCommand(p);
-                return true;
-            }
-            case "tpaaccept": {
-                String requesterName = args.length > 0 ? args[0] : null;
-                this.handleTpaAcceptCommand(p, requesterName);
-                return true;
-            }
-            case "tpadeny": {
-                String requesterName = args.length > 0 ? args[0] : null;
-                this.handleTpaDenyCommand(p, requesterName);
-                return true;
-            }
             case "sus": {
                 if (!p.hasPermission("pizzasmp.admin.commands")) {
                     p.sendMessage("§cYou do not have permission to use /sus.");
                     return true;
                 }
-                this.openSuspiciousPlayersGui(p);
+                if (args.length == 0) this.openSuspiciousPlayersGui(p);
+                else this.openSuspiciousPlayerByName(p, String.join(" ", args));
                 return true;
             }
             case "ping": {
@@ -4599,18 +4421,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 p.sendMessage("§fPlayers: §a" + playerCount + " / " + maxPlayers);
                 p.sendMessage("§fTPS (1m avg): §a" + String.format("%.2f", tps));
                 p.sendMessage("§fUptime: §a" + hours + "h " + minutes + "m");
-                return true;
-            }
-            case "shards": {
-                if (!p.hasPermission("pizzasmp.admin.shards")) {
-                    p.sendMessage("§cYou do not have permission.");
-                    return true;
-                }
-                if (args.length < 3 || !"give".equalsIgnoreCase(args[0])) {
-                    p.sendActionBar(Component.text("§cUsage: /shards give <player> <amount>"));
-                    return true;
-                }
-                this.handleShardsGiveCommand(p, args[1], args[2]);
                 return true;
             }
             case "reset": {
@@ -4746,7 +4556,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         this.runAsyncTask(() -> {
-            String sql = "INSERT INTO network_teleport_requests (requester_uuid,requester_name,target_uuid,target_name,request_type,requester_server,target_server,status,expires_at) VALUES (?,?,?,?,?,?,?,'PENDING', DATE_ADD(NOW(), INTERVAL 60 SECOND))";
+            String sql = "INSERT INTO network_teleport_requests (requester_uuid,requester_name,target_uuid,target_name,request_type,requester_server,target_server,status,expires_at) VALUES (?,?,?,?,?,?,?,'PENDING', TIMESTAMPADD(SECOND, 60, NOW()))";
             try (Connection conn = this.openSyncConnection();
                  PreparedStatement ps = conn.prepareStatement(sql);){
                 ps.setString(1, requester.getUniqueId().toString());
@@ -5033,31 +4843,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * Enabled unnecessary exception pruning
      * Enabled aggressive exception aggregation
      */
-    private String lookupPlayerServer(String playerName) {
-        if (playerName == null) return null;
-        if (playerName.isBlank()) {
-            return null;
-        }
-        Player local = Bukkit.getPlayer((String)playerName);
-        if (local != null && local.isOnline()) {
-            return this.detectServerName();
-        }
-        String sql = "SELECT sl.server_name FROM players p JOIN session_leases sl ON sl.uuid=p.uuid AND sl.expires_at > CURRENT_TIMESTAMP WHERE LOWER(p.username)=LOWER(?) LIMIT 1";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);){
-            ps.setString(1, playerName);
-            try (ResultSet rs = ps.executeQuery();){
-                if (!rs.next()) return null;
-                String string = rs.getString(1);
-                return string;
-            }
-        }
-        catch (Exception ex) {
-            this.getLogger().warning("Failed looking up player server for " + playerName + ": " + ex.getMessage());
-        }
-        return null;
-    }
-
     private void routeCommandToServer(Player player, String targetServer, String commandToRun, String capabilityName) {
         if (targetServer == null || targetServer.isBlank()) {
             return;
@@ -5180,9 +4965,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return chestplate != null && chestplate.getType() == Material.ELYTRA;
     }
 
-    // Essentials is configured to preserve flight for this permission across world changes.
+    // Survival flight granted by another plugin is kept across world changes for this permission.
     private boolean hasExternalFlightEntitlement(Player p) {
-        return p.hasPermission("essentials.fly");
+        return p.hasPermission("pizzasmp.flight");
     }
 
     private void clearHubDoubleJumpFlight(Player p) {
@@ -5910,7 +5695,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (staff == null || !staff.isOnline()) {
             return;
         }
-        if (!staff.hasPermission("pizzasmp.staff.invsee") && !staff.hasPermission("essentials.invsee")) {
+        // pizzasmp.admin.invsee is the node the admin console checks; the other two are kept for existing grants.
+        if (!staff.hasPermission(PERM_ADMIN_INVSEE) && !staff.hasPermission("pizzasmp.staff.invsee")) {
             staff.sendMessage("\u00a7cNo permission.");
             return;
         }
@@ -6032,65 +5818,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         player.sendMessage("\u00a79Discord \u00a78\u00bb \u00a7b" + (this.brandDiscord.startsWith("http") ? this.brandDiscord : "https://" + this.brandDiscord));
     }
 
-    private void handleGtpCommand(Player staff, String[] args) {
-        if (!staff.hasPermission("pizzasmp.staff.gtp")) {
-            staff.sendMessage("\u00a7cNo permission.");
-            return;
-        }
-        if (args.length < 1) {
-            staff.sendMessage("\u00a7cUsage: /gtp <player>");
-            return;
-        }
-        String targetName = args[0];
-        Player local = Bukkit.getPlayerExact((String)targetName);
-        if (local != null && local.isOnline()) {
-            this.runOnPlayerThread(staff, () -> staff.teleport(local.getLocation()));
-            return;
-        }
-        this.runAsyncTask(() -> {
-            String sql = "SELECT p.uuid, sl.server_name FROM players p JOIN session_leases sl ON sl.uuid=p.uuid AND sl.expires_at > CURRENT_TIMESTAMP WHERE LOWER(p.username)=LOWER(?) LIMIT 1";
-            String targetUuid = null;
-            String server = null;
-            try (Connection conn = this.openSyncConnection();
-                 PreparedStatement ps = conn.prepareStatement(sql);){
-                ps.setString(1, targetName);
-                try (ResultSet rs = ps.executeQuery();){
-                    if (rs.next()) {
-                        targetUuid = rs.getString(1);
-                        server = rs.getString(2);
-                    }
-                }
-            }
-            catch (Exception ex) {
-                String msg = ex.getMessage();
-                this.runOnPlayerThread(staff, () -> staff.sendMessage("\u00a7cGTP lookup failed: " + msg));
-                return;
-            }
-            if (targetUuid == null || server == null || server.isBlank()) {
-                this.runOnPlayerThread(staff, () -> staff.sendMessage("\u00a7cThat player is offline."));
-                return;
-            }
-            String targetServer = this.normalizeServerTarget(server);
-            this.runOnPlayerThread(staff, () -> {
-                if (!staff.isOnline()) {
-                    return;
-                }
-                if (targetServer.equalsIgnoreCase(this.detectServerName())) {
-                    Player now = Bukkit.getPlayerExact((String)targetName);
-                    if (now == null) {
-                        staff.sendMessage("\u00a7cThat player is no longer online.");
-                        return;
-                    }
-                    staff.teleport(now.getLocation());
-                    return;
-                }
-                if (this.playerSyncManager != null) {
-                    this.playerSyncManager.queueOneTimeAction(staff.getUniqueId(), "TPTO:" + targetName, 45);
-                }
-                this.connectToServer(staff, targetServer);
-            });
-        });
-    }
     private void handleSellCommand(Player player, String[] args) {
         if (args.length > 0 && "reload".equalsIgnoreCase(args[0])) {
             if (!player.hasPermission("pizzasmp.sell.reload")) {
@@ -6248,7 +5975,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openSellGui(Player player) {
-        Inventory inv = Bukkit.createInventory(null, (int)36, (String)TITLE_SELL_GUI);
+        Inventory inv = MenuLock.create((int)36, (String)TITLE_SELL_GUI, slot -> slot < 36);
         // Worth display in the sell GUI is packet-only (sellGuiViewers gate in the worth
         // listener). NEVER write lore/PDC onto the real items: marked items that escaped
         // the GUI had different NBT and silently refused to stack with clean ones.
@@ -6309,95 +6036,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    private void returnSellGuiItems(Player player, Inventory inv) {
-        for (int slot = 0; slot < 36; ++slot) {
-            ItemStack stack;
-            if (!this.isSellGuiInsertSlot(slot) || (stack = inv.getItem(slot)) == null || stack.getType() == Material.AIR) continue;
-            inv.setItem(slot, null);
-            HashMap leftovers = player.getInventory().addItem(new ItemStack[]{this.stripSellWorthMarker(stack)});
-            if (leftovers.isEmpty()) continue;
-            for (Object left : leftovers.values()) {
-                player.getWorld().dropItemNaturally(player.getLocation(), (ItemStack)left);
-            }
-        }
-    }
-
-    private List<ItemStack> collectSellGuiItems(Inventory inv) {
-        ArrayList<ItemStack> out = new ArrayList<ItemStack>();
-        for (int slot = 0; slot < 36; ++slot) {
-            ItemStack stack = inv.getItem(slot);
-            if (stack == null || stack.getType() == Material.AIR) continue;
-            out.add(this.stripSellWorthMarker(stack));
-        }
-        return out;
-    }
-
     // ---- Order-matching engine (foundation) --------------------------------------------------
     // enchant_spec grammar: "*" = any, "" = unenchanted only, "sharpness:5,fire_aspect:2" = item must
     // hold at least those enchants at >= those levels. Enchant keys use the vanilla registry name.
-
-    /** The canonical enchant spec that describes an item exactly (for EcoBot-posted specific orders). */
-    private String itemEnchantSpecOf(ItemStack item) {
-        if (item == null) return "*";
-        java.util.Map<org.bukkit.enchantments.Enchantment, Integer> ench = item.getEnchantments();
-        if (ench.isEmpty()) return "";   // plain
-        java.util.List<String> parts = new java.util.ArrayList<>();
-        for (java.util.Map.Entry<org.bukkit.enchantments.Enchantment, Integer> e : ench.entrySet()) {
-            parts.add(e.getKey().getKey().getKey() + ":" + e.getValue());
-        }
-        java.util.Collections.sort(parts);
-        return String.join(",", parts);
-    }
-
-    /** True if {@code item} satisfies an order's {@code spec} (see grammar above). */
-    private boolean itemMatchesSpec(ItemStack item, String spec) {
-        if (spec == null || spec.equals("*")) return true;                 // wildcard
-        java.util.Map<org.bukkit.enchantments.Enchantment, Integer> have = item == null
-            ? java.util.Map.of() : item.getEnchantments();
-        if (spec.isEmpty()) return have.isEmpty();                         // plain-only
-        for (String req : spec.split(",")) {
-            int c = req.lastIndexOf(':');
-            if (c < 0) continue;
-            String key = req.substring(0, c).toLowerCase(Locale.ROOT);
-            int lvl;
-            try { lvl = Integer.parseInt(req.substring(c + 1)); } catch (NumberFormatException e) { return false; }
-            org.bukkit.enchantments.Enchantment en = org.bukkit.Registry.ENCHANTMENT.get(
-                org.bukkit.NamespacedKey.minecraft(key));
-            if (en == null) return false;
-            Integer h = have.get(en);
-            if (h == null || h < lvl) return false;                       // missing / under-leveled
-        }
-        return true;
-    }
-
-    /** A candidate order the seller can deliver into (highest unitPrice among spec-matching orders). */
-    private record OrderMatch(long id, String creatorUuid, double unitPrice, int remaining, String enchantSpec) {}
-
-    /**
-     * Best active order to deliver {@code item} into: material match, spec-satisfied, remaining>0,
-     * not the seller's own, ordered by unit_price DESC. Returns null if none. Caller does the escrow-
-     * safe FOR UPDATE fill; this is just the lookup used by /sell, AH-sell and order-sweep.
-     */
-    private OrderMatch bestOrderFor(Connection conn, ItemStack item, String excludeUuid) throws SQLException {
-        if (item == null) return null;
-        String key = item.getType().name().toLowerCase(Locale.ROOT);
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id,creator_uuid,unit_price,(amount_total-amount_filled) AS remaining,enchant_spec "
-                + "FROM order_listings WHERE item_key=? AND status='ACTIVE' AND amount_total>amount_filled "
-                + "AND creator_uuid<>? ORDER BY unit_price DESC")) {
-            ps.setString(1, key);
-            ps.setString(2, excludeUuid == null ? "" : excludeUuid);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String spec = rs.getString("enchant_spec");
-                    if (!this.itemMatchesSpec(item, spec)) continue;      // enchant requirement not met
-                    return new OrderMatch(rs.getLong("id"), rs.getString("creator_uuid"),
-                        rs.getDouble("unit_price"), rs.getInt("remaining"), spec);
-                }
-            }
-        }
-        return null;   // no spec-matching order; caller falls back to server sell / AH listing
-    }
 
     private double sellUnitPrice(Material material) {
         ConfigurationSection worth;
@@ -6508,319 +6149,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         clone.setItemMeta(meta);
         return clone;
-    }
-
-    /**
-     * Staff view of another player's homes, from the shared table.
-     *
-     * Replaces the PizzaAdminTools version, which read the retired SetHome plugin's
-     * per-server YAML — a different dataset from the one /home writes, so staff were shown
-     * stale homes or none at all. Text rather than a GUI: this is a lookup, and staff
-     * generally want the coordinates to act on rather than a clickable list.
-     */
-    private void openHomesOfPlayer(Player staff, String targetName) {
-        this.runAsyncTask(() -> {
-            UUID targetUuid = this.playerUuidByName(targetName);
-            if (targetUuid == null) {
-                this.runOnPlayerThread(staff, () -> staff.sendActionBar(this.networkAbsenceMessage(targetName)));
-                return;
-            }
-            java.util.List<String> lines = new ArrayList<>();
-            String sql = "SELECT home_name, world_name, x, y, z FROM homes WHERE uuid=? ORDER BY home_name";
-            try (Connection c = this.openSyncConnection();
-                 PreparedStatement ps = c.prepareStatement(sql)) {
-                ps.setString(1, targetUuid.toString());
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        lines.add("\u00a77 - \u00a7f" + rs.getString(1) + " \u00a78" + rs.getString(2)
-                            + " \u00a77" + Math.round(rs.getDouble(3)) + ", " + Math.round(rs.getDouble(4))
-                            + ", " + Math.round(rs.getDouble(5)));
-                    }
-                }
-            } catch (Exception ex) {
-                this.getLogger().warning("homes lookup failed for " + targetName + ": " + ex.getMessage());
-                return;
-            }
-            this.runOnPlayerThread(staff, () -> {
-                if (lines.isEmpty()) {
-                    staff.sendMessage("\u00a77" + targetName + " has no homes.");
-                    return;
-                }
-                staff.sendMessage(this.legacyColorize("&#00BFFF" + targetName + "&7's homes (" + lines.size() + ")"));
-                for (String line : lines) staff.sendMessage(line);
-            });
-        });
-    }
-
-    private void openHomesFromAnyServer(Player player) {
-        if (player == null || !player.hasPermission("pizzasmp.homes.open")) {
-            return;
-        }
-        if (this.normalizeServerTarget("survival").equalsIgnoreCase(this.detectServerName())) {
-            this.openHomesMenu(player);
-            return;
-        }
-        this.routeCommandToServer(player, "survival", "homes", "homes");
-    }
-
-    private void openHomesMenu(Player player) {
-        if (player == null || !player.isOnline()) {
-            return;
-        }
-        UUID uuid = player.getUniqueId();
-        boolean hasSetPermission = player.hasPermission("pizzasmp.teamhome.set");
-        this.runAsyncTask(() -> {
-            HomesGuiState state = this.loadHomesGuiState(uuid, hasSetPermission);
-            this.runOnPlayerThread(player, () -> {
-                if (!player.isOnline()) {
-                    return;
-                }
-                int limit = this.homeLimit(player);
-                Inventory inv = Bukkit.createInventory(null, 36, TITLE_HOMES);
-                this.pendingHomeDeleteSlot.remove(uuid);
-                ItemStack border = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, "§8", "homes_border", List.of());
-                // Top row (row4) and bottom row (row1) = borders
-                for (int s = 0; s < 9; s++) inv.setItem(s, border);
-                for (int s = 27; s < 36; s++) inv.setItem(s, border);
-                // Side columns of middle rows
-                inv.setItem(9, border); inv.setItem(17, border);
-                inv.setItem(18, border); inv.setItem(26, border);
-                // Row 3 col 2 (slot 10): WHITE_BANNER = teleport to team home
-                inv.setItem(TEAM_HOME_TP_SLOT, this.buildTeamHomeTpItem(state.teamHome != null));
-                // Row 2 col 2 (slot 19): DYE = set team home
-                inv.setItem(TEAM_HOME_SET_SLOT, this.buildTeamHomeSetItem(state.teamHome != null, state.canSetTeamHome));
-                // Row 3 cols 5-8 (slots 13-16): home beds; Row 2 cols 5-8 (slots 22-25): home dye actions
-                for (int i = 0; i < HOME_KEYS.length; ++i) {
-                    String homeKey = HOME_KEYS[i];
-                    HomeRecord home = state.homes.get(homeKey);
-                    boolean locked = i >= limit;
-                    inv.setItem(HOME_SLOTS[i], this.buildHomeBedItem(i + 1, home, locked));
-                    inv.setItem(HOME_DELETE_SLOTS[i], this.buildHomeDyeItem(i + 1, home != null, locked));
-                }
-                // Close button at bottom-right (slot 35)
-                inv.setItem(35, this.namedWithLore(Material.BARRIER, "§cClose", "homes_close", List.of()));
-                player.openInventory(inv);
-            });
-        });
-    }
-
-    private void handleHomesClick(Player player, int slot, ItemStack current, ClickType clickType) {
-        if (player == null || !player.isOnline()) {
-            return;
-        }
-        if (slot == 35) {
-            player.closeInventory();
-            return;
-        }
-        if (slot == TEAM_HOME_TP_SLOT) {
-            this.teleportToTeamHome(player);
-            return;
-        }
-        if (slot == TEAM_HOME_SET_SLOT) {
-            if (this.isCombatTagged(player)) {
-                player.sendActionBar((Component)Component.text("\u00a7cYou can't do this in combat"));
-                this.logCombatBlocked(player, "teamhome_set");
-                return;
-            }
-            this.setTeamHomeHere(player);
-            return;
-        }
-        for (int i = 0; i < HOME_SLOTS.length; ++i) {
-            if (slot == HOME_SLOTS[i]) {
-                this.handleHomeBedClick(player, i, current, clickType);
-                return;
-            }
-            if (slot != HOME_DELETE_SLOTS[i]) continue;
-            this.handleHomeDyeClick(player, i, current);
-            return;
-        }
-    }
-
-    private void handleHomeBedClick(Player player, int index, ItemStack current, ClickType clickType) {
-        if (current == null || current.getType() == Material.AIR) {
-            return;
-        }
-        // Use the action ID from the clicked item (set at render time) rather than slot index
-        int actualIndex = index;
-        String actionId = this.uiActionId(current);
-        if (actionId != null) {
-            String prefix = null;
-            if (actionId.startsWith("homes_tp:")) prefix = "homes_tp:";
-            else if (actionId.startsWith("homes_set:")) prefix = "homes_set:";
-            if (prefix != null) {
-                try {
-                    int n = Integer.parseInt(actionId.substring(prefix.length()));
-                    if (n >= 1 && n <= HOME_KEYS.length) actualIndex = n - 1;
-                } catch (NumberFormatException ignored) {}
-            }
-        }
-        String homeKey = HOME_KEYS[actualIndex];
-        if (current.getType() == Material.RED_BED) {
-            player.sendActionBar((Component)Component.text("\u00a7cYou have reached your home limit."));
-            return;
-        }
-        if (clickType != ClickType.LEFT && clickType != ClickType.SHIFT_LEFT) {
-            return;
-        }
-        if (current.getType() == Material.GRAY_BED) {
-            if (this.isCombatTagged(player)) {
-                player.sendActionBar((Component)Component.text("\u00a7cYou can't do this in combat"));
-                this.logCombatBlocked(player, "home_set");
-                return;
-            }
-            Location snapshot = player.getLocation().clone();
-            int limit = this.homeLimit(player);
-            this.runAsyncTask(() -> {
-                int claimed = this.countClaimedHomes(player.getUniqueId());
-                if (claimed >= limit) {
-                    this.runOnPlayerThread(player, () -> this.openHomesMenu(player));
-                    return;
-                }
-                this.upsertHome(player.getUniqueId(), homeKey, snapshot);
-                this.runOnPlayerThread(player, () -> this.openHomesMenu(player));
-            });
-        } else if (current.getType() == Material.BLUE_BED) {
-            this.runAsyncTask(() -> {
-                HomeRecord home = this.loadHomeRecord(player.getUniqueId(), homeKey);
-                if (home != null) {
-                    this.runOnPlayerThread(player, () -> this.startHomeTeleportCountdown(player, home));
-                } else {
-                    this.runOnPlayerThread(player, () -> this.openHomesMenu(player));
-                }
-            });
-        }
-    }
-
-    private void handleHomeDyeClick(Player player, int index, ItemStack current) {
-        if (current == null || current.getType() == Material.AIR) {
-            return;
-        }
-        if (current.getType() != Material.BLUE_DYE) {
-            return;
-        }
-        // Use the action ID from the clicked item (set at render time) rather than slot index
-        int actualIndex = index;
-        String actionId = this.uiActionId(current);
-        if (actionId != null && actionId.startsWith("homes_delete:")) {
-            try {
-                int n = Integer.parseInt(actionId.substring("homes_delete:".length()));
-                if (n >= 1 && n <= HOME_KEYS.length) actualIndex = n - 1;
-            } catch (NumberFormatException ignored) {}
-        }
-        PendingDeleteTarget target = PendingDeleteTarget.home(actualIndex);
-        this.pendingHomeDeleteSlot.put(player.getUniqueId(), target);
-        this.openHomeDeleteConfirm(player, target);
-    }
-
-    private void openHomeDeleteConfirm(Player player, PendingDeleteTarget target) {
-        ItemStack preview;
-        Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_HOME_DELETE_CONFIRM);
-        if (target.teamHome) {
-            preview = this.namedWithLore(Material.BLUE_BANNER, "\u00a79TEAM HOME", "homes_delete_target", List.of("\u00a77THIS WILL DELETE THIS HOME.", "\u00a77THIS CANNOT BE UNDONE."));
-        } else {
-            int number = target.homeIndex + 1;
-            preview = this.namedWithLore(Material.BLUE_BED, "\u00a79HOME " + number, "homes_delete_target", List.of("\u00a77THIS WILL DELETE THIS HOME.", "\u00a77THIS CANNOT BE UNDONE."));
-        }
-        inv.setItem(10, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7lCANCEL", "homes_delete_cancel", List.of()));
-        inv.setItem(13, preview);
-        inv.setItem(16, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE, "\u00a7a\u00a7lCONFIRM", "homes_delete_confirm", List.of()));
-        player.openInventory(inv);
-    }
-
-    private void handleHomeDeleteConfirmClick(Player player, int slot) {
-        UUID uuid = player.getUniqueId();
-        PendingDeleteTarget target = this.pendingHomeDeleteSlot.get(uuid);
-        if (target == null) {
-            player.closeInventory();
-            return;
-        }
-        if (slot == 16) {
-            this.pendingHomeDeleteSlot.remove(uuid);
-            this.runAsyncTask(() -> {
-                if (target.teamHome) {
-                    this.clearTeamHome(uuid);
-                } else if (target.homeIndex >= 0 && target.homeIndex < HOME_KEYS.length) {
-                    this.deleteHome(uuid, HOME_KEYS[target.homeIndex]);
-                }
-                this.runOnPlayerThread(player, () -> this.openHomesMenu(player));
-            });
-            return;
-        }
-        if (slot == 10) {
-            this.pendingHomeDeleteSlot.remove(uuid);
-            this.openHomesMenu(player);
-        }
-    }
-
-    private ItemStack buildTeamHomeTpItem(boolean hasTeamHome) {
-        ArrayList<String> lore = new ArrayList<String>();
-        lore.add(hasTeamHome ? "\u00a77Click to teleport to \u00a7fTeam Home" : "\u00a7cNo team home set");
-        lore.add("\u00a77Status: " + (hasTeamHome ? "\u00a7aSET" : "\u00a7cNOT SET"));
-        return this.namedWithLore(Material.WHITE_BANNER, "\u00a7bTeam Home", "homes_team_tp", lore);
-    }
-
-    private ItemStack buildTeamHomeSetItem(boolean hasTeamHome, boolean canSetTeamHome) {
-        ArrayList<String> lore = new ArrayList<String>();
-        if (canSetTeamHome) {
-            lore.add("\u00a77Click to create/update team home");
-        } else {
-            lore.add("\u00a7cNo permission to set team home");
-        }
-        Material mat = hasTeamHome ? Material.BLUE_DYE : Material.GRAY_DYE;
-        return this.namedWithLore(mat, "\u00a7bTeam Home", "homes_team_set", lore);
-    }
-
-    private ItemStack buildHomeBedItem(int number, HomeRecord home, boolean locked) {
-        if (locked) {
-            return this.namedWithLore(Material.RED_BED, "\u00a7cHOME " + number + " \u00a78(Locked)", "homes_locked_bed", List.of("\u00a77Upgrade to unlock more homes."));
-        }
-        if (home == null) {
-            return this.namedWithLore(Material.GRAY_BED, "\u00a77HOME " + number + " \u00a78(Empty)", "homes_set:" + number, List.of("\u00a77Click to set home here."));
-        }
-        return this.namedWithLore(Material.BLUE_BED, "&#00BFFFHOME " + number, "homes_tp:" + number, List.of("\u00a77Click to teleport."));
-    }
-
-    private ItemStack buildHomeDyeItem(int number, boolean hasHome, boolean locked) {
-        if (locked) {
-            return this.namedWithLore(Material.RED_DYE, "\u00a7cHOME " + number + " \u00a78(Locked)", "homes_locked_dye", List.of());
-        }
-        if (!hasHome) {
-            return this.namedWithLore(Material.GRAY_DYE, "\u00a77HOME " + number + " \u00a78(Not set)", "homes_dye_empty:" + number, List.of());
-        }
-        return this.namedWithLore(Material.BLUE_DYE, "\u00a7cDelete Home " + number, "homes_delete:" + number, List.of("\u00a77Click to delete this home.", "\u00a77Opens confirmation."));
-    }
-
-    private void teleportToTeamHome(Player player) {
-        if (player == null || !player.isOnline()) {
-            return;
-        }
-        if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
-            this.logCombatBlocked(player, "teamhome_tp");
-            return;
-        }
-        this.runAsyncTask(() -> {
-            TeamHomeRecord teamHome = this.loadTeamHome(player.getUniqueId());
-            if (teamHome == null) {
-                return;
-            }
-            this.runOnPlayerThread(player, () -> this.startHomeTeleportCountdown(player, teamHome.toHomeRecord()));
-        });
-    }
-
-    private void startHomeTeleportCountdown(Player player, HomeRecord home) {
-        if (player == null || !player.isOnline() || home == null) {
-            return;
-        }
-        if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
-            this.logCombatBlocked(player, "home_tp");
-            return;
-        }
-        UUID uuid = player.getUniqueId();
-        this.cancelPendingHomeTeleport(uuid);
-        // Instant teleport — no warmup, no cooldown for /home.
-        this.teleportToHomeRecord(player, home);
     }
 
     private void tickHomeTeleportCountdown(UUID uuid) {
@@ -6996,64 +6324,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }, ticks + 2L);
     }
 
-    private int homeLimit(Player player) {
-        if (player == null) {
-            return 2;
-        }
-        // Staff, ops, pizza+ get all 4 home slots; others get 2
-        if (player.isOp() || player.hasPermission("pizzasmp.homes.limit.5") || player.hasPermission("pizzasmp.rank.pizzaplus")) {
-            return 4;
-        }
-        return 2;
-    }
-
-    private HomesGuiState loadHomesGuiState(UUID uuid, boolean hasSetPermission) {
-        HashMap<String, HomeRecord> homes = new HashMap<String, HomeRecord>();
-        TeamHomeRecord teamHome = null;
-        boolean canSetTeamHome = false;
-        String sql = "SELECT home_name, world_name, x, y, z, yaw, pitch FROM homes WHERE uuid=? AND LOWER(home_name) IN ('home1','home2','home3','home4','home5')";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);){
-            ps.setString(1, uuid.toString());
-            try (ResultSet rs = ps.executeQuery();){
-                while (rs.next()) {
-                    String name = rs.getString("home_name");
-                    if (name == null) continue;
-                    homes.put(name.toLowerCase(), new HomeRecord(rs.getString("world_name"), rs.getDouble("x"), rs.getDouble("y"), rs.getDouble("z"), rs.getFloat("yaw"), rs.getFloat("pitch")));
-                }
-            }
-            teamHome = this.loadTeamHome(conn, uuid);
-            canSetTeamHome = this.canManageTeamHome(conn, uuid, hasSetPermission);
-        }
-        catch (Exception ex) {
-            this.getLogger().warning("Failed loading homes GUI state: " + ex.getMessage());
-        }
-        return new HomesGuiState(homes, teamHome, canSetTeamHome);
-    }
-
     /*
      * Enabled aggressive block sorting
      * Enabled unnecessary exception pruning
      * Enabled aggressive exception aggregation
      */
-    private HomeRecord loadHomeRecord(UUID uuid, String homeName) {
-        String sql = "SELECT world_name, x, y, z, yaw, pitch FROM homes WHERE uuid=? AND LOWER(home_name)=LOWER(?) LIMIT 1";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);){
-            ps.setString(1, uuid.toString());
-            ps.setString(2, homeName);
-            try (ResultSet rs = ps.executeQuery();){
-                if (!rs.next()) return null;
-                HomeRecord homeRecord = new HomeRecord(rs.getString("world_name"), rs.getDouble("x"), rs.getDouble("y"), rs.getDouble("z"), rs.getFloat("yaw"), rs.getFloat("pitch"));
-                return homeRecord;
-            }
-        }
-        catch (Exception ex) {
-            this.getLogger().warning("Failed loading home " + homeName + ": " + ex.getMessage());
-        }
-        return null;
-    }
-
     private TeamHomeRecord loadTeamHome(UUID uuid) {
         try (Connection conn = this.openSyncConnection();){
             return this.loadTeamHome(conn, uuid);
@@ -7125,219 +6400,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    private boolean canManageTeamHome(Connection conn, UUID uuid, boolean hasSetPermission) throws SQLException {
-        if (!hasSetPermission) {
-            return false;
-        }
-        String sql = "SELECT role FROM team_members WHERE member_uuid=? LIMIT 1";
-        try (PreparedStatement ps = conn.prepareStatement(sql);){
-            boolean bl;
-            block21: {
-                String role;
-                ResultSet rs;
-                block19: {
-                    boolean bl2;
-                    block20: {
-                        block17: {
-                            boolean bl3;
-                            block18: {
-                                ps.setString(1, uuid.toString());
-                                rs = ps.executeQuery();
-                                try {
-                                    if (rs.next()) break block17;
-                                    bl3 = false;
-                                    if (rs == null) break block18;
-                                }
-                                catch (Throwable throwable) {
-                                    if (rs != null) {
-                                        try {
-                                            rs.close();
-                                        }
-                                        catch (Throwable throwable2) {
-                                            throwable.addSuppressed(throwable2);
-                                        }
-                                    }
-                                    throw throwable;
-                                }
-                                rs.close();
-                            }
-                            return bl3;
-                        }
-                        role = rs.getString("role");
-                        if (role != null) break block19;
-                        bl2 = false;
-                        if (rs == null) break block20;
-                        rs.close();
-                    }
-                    return bl2;
-                }
-                String normalized = role.toUpperCase(Locale.ROOT);
-                boolean bl4 = bl = "OWNER".equals(normalized) || "OFFICER".equals(normalized);
-                if (rs == null) break block21;
-                rs.close();
-            }
-            return bl;
-        }
-    }
-
-    private void setTeamHomeHere(Player player) {
-        if (player == null || !player.isOnline()) {
-            return;
-        }
-        if (this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
-            this.logCombatBlocked(player, "teamhome_set");
-            return;
-        }
-        if (!player.hasPermission("pizzasmp.teamhome.set")) {
-            return;
-        }
-        UUID uuid = player.getUniqueId();
-        Location snapshot = player.getLocation().clone();
-        this.runAsyncTask(() -> {
-            boolean updated = this.setTeamHome(uuid, snapshot);
-            if (!updated) {
-                return;
-            }
-            this.runOnPlayerThread(player, () -> this.openHomesMenu(player));
-        });
-    }
-
     /*
      * Exception decompiling
      */
-    private boolean setTeamHome(UUID uuid, Location location) {
-        String sql = "UPDATE teams t JOIN team_members tm ON tm.team_id = t.id "
-            + "SET t.home_world=?, t.home_x=?, t.home_y=?, t.home_z=?, t.home_yaw=?, t.home_pitch=? "
-            + "WHERE tm.member_uuid=?";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, location.getWorld().getName());
-            ps.setDouble(2, location.getX());
-            ps.setDouble(3, location.getY());
-            ps.setDouble(4, location.getZ());
-            ps.setFloat(5, location.getYaw());
-            ps.setFloat(6, location.getPitch());
-            ps.setString(7, uuid.toString());
-            return ps.executeUpdate() > 0;
-        } catch (SQLException ex) {
-            this.getLogger().warning("[teamhome] setTeamHome failed: " + ex.getMessage());
-            return false;
-        }
-    }
-    private void clearTeamHome(UUID uuid) {
-        if (uuid == null) {
-            return;
-        }
-        String lookupSql = "SELECT team_id, role FROM team_members WHERE member_uuid=? LIMIT 1";
-        String clearSql = "UPDATE teams SET home_world=NULL, home_x=NULL, home_y=NULL, home_z=NULL, home_yaw=NULL, home_pitch=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement lookup = conn.prepareStatement(lookupSql);){
-            lookup.setString(1, uuid.toString());
-            try (ResultSet rs = lookup.executeQuery();){
-                if (!rs.next()) {
-                    return;
-                }
-                long teamId = rs.getLong("team_id");
-                String role = rs.getString("role");
-                if (role == null) {
-                    return;
-                }
-                String normalized = role.toUpperCase(Locale.ROOT);
-                if (!"OWNER".equals(normalized) && !"OFFICER".equals(normalized)) {
-                    return;
-                }
-                try (PreparedStatement clear = conn.prepareStatement(clearSql);){
-                    clear.setLong(1, teamId);
-                    clear.executeUpdate();
-                }
-            }
-        }
-        catch (Exception ex) {
-            this.getLogger().warning("Failed clearing team home: " + ex.getMessage());
-        }
-    }
-
     /*
      * Enabled aggressive block sorting
      * Enabled unnecessary exception pruning
      * Enabled aggressive exception aggregation
      */
-    private int countClaimedHomes(UUID uuid) {
-        String sql = "SELECT COUNT(*) FROM homes WHERE uuid=? AND LOWER(home_name) IN ('home1','home2','home3','home4','home5')";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);){
-            ps.setString(1, uuid.toString());
-            try (ResultSet rs = ps.executeQuery();){
-                if (!rs.next()) return 0;
-                int n = rs.getInt(1);
-                return n;
-            }
-        }
-        catch (Exception ex) {
-            this.getLogger().warning("Failed counting homes: " + ex.getMessage());
-        }
-        return 0;
-    }
-
-    private void upsertHome(UUID uuid, String homeName, Location location) {
-        if (location == null || location.getWorld() == null) {
-            return;
-        }
-        String sql = "INSERT INTO homes (uuid, home_name, world_name, x, y, z, yaw, pitch) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE world_name=VALUES(world_name), x=VALUES(x), y=VALUES(y), z=VALUES(z), yaw=VALUES(yaw), pitch=VALUES(pitch), updated_at=CURRENT_TIMESTAMP";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);){
-            ps.setString(1, uuid.toString());
-            ps.setString(2, homeName.toLowerCase());
-            ps.setString(3, location.getWorld().getName());
-            ps.setDouble(4, location.getX());
-            ps.setDouble(5, location.getY());
-            ps.setDouble(6, location.getZ());
-            ps.setFloat(7, location.getYaw());
-            ps.setFloat(8, location.getPitch());
-            ps.executeUpdate();
-        }
-        catch (Exception ex) {
-            this.getLogger().warning("Failed saving home " + homeName + ": " + ex.getMessage());
-        }
-    }
-
-    private void deleteHome(UUID uuid, String homeName) {
-        String sql = "DELETE FROM homes WHERE uuid=? AND LOWER(home_name)=LOWER(?)";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);){
-            ps.setString(1, uuid.toString());
-            ps.setString(2, homeName);
-            ps.executeUpdate();
-        }
-        catch (Exception ex) {
-            this.getLogger().warning("Failed deleting home " + homeName + ": " + ex.getMessage());
-        }
-    }
-
-    private void handleAdminDelHome(Player admin, String targetName, String homeName) {
-        PlatformScheduler.asyncNow(this, () -> {
-            String sql = "SELECT uuid FROM players WHERE LOWER(username)=LOWER(?) LIMIT 1";
-            try (Connection conn = this.openSyncConnection();
-                 PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, targetName);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        this.runOnPlayerThread(admin, () -> admin.sendMessage("§cPlayer not found: §f" + targetName));
-                        return;
-                    }
-                    UUID targetUuid = UUID.fromString(rs.getString(1));
-                    this.deleteHome(targetUuid, homeName);
-                    this.runOnPlayerThread(admin, () -> admin.sendMessage("§aDeleted home §f" + homeName + "§a from §f" + targetName + "§a."));
-                }
-            } catch (Exception ex) {
-                this.getLogger().warning("adminDelhome failed: " + ex.getMessage());
-                String error = ex.getMessage();
-                this.runOnPlayerThread(admin, () -> admin.sendMessage("§cError deleting home: " + error));
-            }
-        });
-    }
-
     /** One structured line per RTP hop. See the rtpDebug field for why this exists. */
     void rtpLog(String stage, String detail) {
         if (this.rtpDebug) {
@@ -7392,7 +6462,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openLegacyDuelRtpConfirmation(Player player, String dimension) {
-        Inventory inventory = Bukkit.createInventory(null, 27, TITLE_DUEL_RTP_CONFIRM);
+        Inventory inventory = MenuLock.create(27, TITLE_DUEL_RTP_CONFIRM);
         inventory.setItem(11, this.namedWithLore(Material.ENDER_PEARL, "§cLeave duel and use /rtp", "duel_rtp_leave:" + dimension,
             List.of("§7This ends the duel and forfeits the wager.")));
         inventory.setItem(15, this.namedWithLore(Material.SHIELD, "§7Stay in duel", "duel_rtp_stay", List.of()));
@@ -7557,7 +6627,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             String sql = "INSERT INTO rtp_requests (uuid, dimension, origin_server, target_server, status, "
                        + "world_name, x, y, z, created_at, expires_at) "
                        + "VALUES (?, ?, ?, 'survival', 'PENDING', NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP, "
-                       + "DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 60 SECOND)) "
+                       + "TIMESTAMPADD(SECOND, 60, CURRENT_TIMESTAMP)) "
                        + "ON DUPLICATE KEY UPDATE dimension=VALUES(dimension), origin_server=VALUES(origin_server), "
                        + "target_server=VALUES(target_server), status='PENDING', world_name=NULL, x=NULL, y=NULL, "
                        + "z=NULL, created_at=CURRENT_TIMESTAMP, expires_at=VALUES(expires_at)";
@@ -8843,8 +7913,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             .action(DialogAction.customClick((view, aud) -> {
                 if (aud instanceof Player pl) this.submitDuelSetup(pl, tu, view.getText("wager"), view.getFloat("rounds"), view.getText("arena"), true);
             }, ClickCallback.Options.builder().build())).build();
-        Dialog dialog = this.buildDialog(Component.text("Duel " + target.getName(), DIALOG_BRAND),
-            List.of(DialogBody.plainMessage(Component.text("Challenge " + target.getName() + " to a 1v1. Press Esc to cancel.", NamedTextColor.GRAY))),
+        Dialog dialog = this.buildDialog(Component.text("Duel " + target.getName() + " (Preview)", DIALOG_BRAND),
+            List.of(DialogBody.plainMessage(Component.text("Challenge " + target.getName() + " to a 1v1. Press Esc to cancel.", NamedTextColor.GRAY)),
+                DialogBody.plainMessage(Component.text(DUEL_PREVIEW_NOTE, NamedTextColor.DARK_GRAY))),
             inputs, DialogType.confirmation(ranked, restored));
         if (!DialogCompat.show(challenger, dialog)) this.openLegacyDuelSetup(challenger, target, false);
     }
@@ -8893,7 +7964,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void renderLegacyDuelSetup(Player player, DuelSetupState state) {
-        Inventory inventory = Bukkit.createInventory(null, 27, TITLE_DUEL_SETUP);
+        Inventory inventory = MenuLock.create(27, TITLE_DUEL_SETUP);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, "§8", null, List.of());
         for (int slot = 0; slot < inventory.getSize(); slot++) inventory.setItem(slot, filler);
         if (state.soloTest) {
@@ -9043,7 +8114,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text("Click to deny"))));
         if (this.useDialogUi(target)) this.openDuelRequestDialog(target, challenger, req);
         else target.sendMessage(chat);
-        this.hotbarWithSound(target, "&#00BFFF" + challenger.getName() + " §7challenged you to a duel", Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.5f);
+        this.hotbarWithSound(target, "&#00BFFF" + challenger.getName() + " §7challenged you to a duel §8(preview)", Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.5f);
         this.hotbarWithSound(challenger, "&#00BFFFDuel challenge sent to §7" + target.getName(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 1.9f);
         PlatformScheduler.globalLater(this, () -> {
             if (this.pendingDuelRequests.get(tu) == req) {
@@ -9072,9 +8143,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     this.handleDuelDeny(pl, challenger.getName());
                 }
             }, ClickCallback.Options.builder().build())).build();
-        Dialog dialog = this.buildDialog(Component.text("Duel Challenge", DIALOG_BRAND),
+        Dialog dialog = this.buildDialog(Component.text("Duel Challenge (Preview)", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text(challenger.getName() + " challenged you", NamedTextColor.GRAY)),
-                DialogBody.plainMessage(summary)), List.of(), DialogType.confirmation(accept, decline));
+                DialogBody.plainMessage(summary),
+                DialogBody.plainMessage(Component.text(DUEL_PREVIEW_NOTE, NamedTextColor.DARK_GRAY))),
+            List.of(), DialogType.confirmation(accept, decline));
         DialogCompat.show(target, dialog);
     }
 
@@ -10409,8 +9482,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         for (DuelSession s : new java.util.HashSet<>(this.activeDuels.values())) {
             if (s.ended) continue;
             if (s.postMatchLootWindow) {
-                if (s.lootWindowEndsAt > 0L && now >= s.lootWindowEndsAt)
+                if (s.lootWindowEndsAt > 0L && now >= s.lootWindowEndsAt) {
                     this.resolveMatch(s, s.pendingRoundWinner, s.pendingRoundLoser);
+                } else {
+                    Player winner = s.pendingRoundWinner == null ? null : Bukkit.getPlayer(s.pendingRoundWinner);
+                    if (winner != null && winner.isOnline()) {
+                        Component bar = this.lootWindowBar(s.lootWindowEndsAt - now);
+                        PlatformScheduler.entityNow(this, winner, () -> winner.sendActionBar(bar), null);
+                    }
+                }
                 continue;
             }
             if (s.paused) {
@@ -10697,6 +9777,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             loser.setItemOnCursor(null);
             loser.updateInventory();
             s.loserInventoryDropped = true;
+            s.lootDroppedAt = System.currentTimeMillis();
         } catch (RuntimeException ex) {
             for (org.bukkit.entity.Item item : drops) {
                 this.protectedDeathDrops.remove(item.getUniqueId());
@@ -10715,8 +9796,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.resolveMatch(s, winnerId, loserId);
             return;
         }
+        // The window exists for the loser's dropped items. Snapshot-loadout duels and matches whose items could not
+        // be dropped end straight away instead of holding the winner in an empty arena.
+        if (!s.loserInventoryDropped) {
+            this.resolveMatch(s, winnerId, loserId);
+            return;
+        }
         s.postMatchLootWindow = true;
-        s.lootWindowEndsAt = System.currentTimeMillis() + 5L * 60L * 1000L;
+        // Timed from the moment the loot dropped, which is also when the winner can start collecting.
+        long dropped = s.lootDroppedAt > 0L ? s.lootDroppedAt : System.currentTimeMillis();
+        s.lootWindowEndsAt = dropped + DUEL_LOOT_WINDOW_MILLIS;
         s.stuckDeadline = 0L;
         this.settleDuelWager(s, winnerId);
         this.finalizeDuelInventoriesForResult(s, winnerId, loserId);
@@ -10743,10 +9832,17 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (loser == null || !loser.isOnline()) this.forgetOfflineDuelBorder(loserId);
         s.loserReturned = true;
 
-        winner.sendActionBar(Component.text("Loot window  ·  05:00", NamedTextColor.GRAY));
+        winner.sendActionBar(this.lootWindowBar(s.lootWindowEndsAt - System.currentTimeMillis()));
+        // duelStateFailsafe ends the window at lootWindowEndsAt; this is the backstop if that tick stalls.
         this.runPlayerTaskLater(winner, () -> {
             if (!s.ended && s.postMatchLootWindow) this.resolveMatch(s, winnerId, loserId);
-        }, 5L * 60L * 20L);
+        }, Math.max(20L, (s.lootWindowEndsAt - System.currentTimeMillis()) / 50L + 20L));
+    }
+
+    private Component lootWindowBar(long remainingMillis) {
+        long seconds = Math.max(0L, (remainingMillis + 999L) / 1000L);
+        return Component.text(String.format("Loot window  ·  %02d:%02d  ·  /leave to return", seconds / 60L, seconds % 60L),
+            NamedTextColor.GRAY);
     }
 
     private void settleDuelWager(DuelSession s, UUID winnerId) {
@@ -12043,36 +11139,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }, 1L);
     }
 
-    private void executeRtp(Player player, String dimension, boolean bypassChecks) {
-        if (dimension == null) {
-            return;
-        }
-        if (!bypassChecks && this.isCombatTagged(player)) {
-            player.sendActionBar((Component)Component.text((String)"\u00a7cYou can't do this in combat"));
-            this.logCombatBlocked(player, "rtp_execute");
-            return;
-        }
-        if (!bypassChecks && !this.canUseRtpNow(player)) {
-            long remaining = this.getRtpCooldownRemainingMillis(player);
-            long remainingSeconds = Math.max(1L, (long)Math.ceil((double)remaining / 1000.0));
-            player.sendActionBar(this.legacyColorize("\u00a7cYou can't rtp for another " + remainingSeconds + "s"));
-            return;
-        }
-        if (this.maintenanceQueueManager != null && this.maintenanceQueueManager.isServerUnderMaintenance("survival")) {
-            player.sendMessage("\u00a7cSurvival is under maintenance. Try again later.");
-            return;
-        }
-        this.markRtpUsed(player);
-        if (this.isServer("survival")) {
-            this.performLocalRtp(player, dimension);
-            return;
-        }
-        if (this.playerSyncManager != null) {
-            this.playerSyncManager.queueOneTimeAction(player.getUniqueId(), "RTP:" + dimension.toUpperCase(), 45);
-        }
-        this.connectToServer(player, "survival");
-    }
-
     private boolean handlePayCommandGate(Player sender, String[] split) {
         if (sender == null) {
             return false;
@@ -12175,14 +11241,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return null;
     }
 
-    private boolean isBalanceCommand(String label) {
-        return "bal".equals(label) || "balance".equals(label) || "money".equals(label);
-    }
-
-    private boolean isShardsCommand(String label) {
-        return "shards".equals(label);
-    }
-
     /** Exact money with thousands separators: 100999123000 -> "100,999,123,000.00". */
     private String formatExactMoney(double amount) {
         return String.format("%,.0f", amount);
@@ -12229,17 +11287,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 } catch (Throwable ignored) { }
             });
         });
-    }
-
-    /** Drop the balance line when the viewer turns the setting off. */
-    private void clearMoneyNametag(Player target) {
-        try {
-            org.bukkit.scoreboard.Scoreboard sb = Bukkit.getScoreboardManager().getMainScoreboard();
-            String teamName = "pzbal_" + target.getName();
-            if (teamName.length() > 16) teamName = teamName.substring(0, 16);
-            org.bukkit.scoreboard.Team t = sb.getTeam(teamName);
-            if (t != null) t.unregister();
-        } catch (Throwable ignored) { }
     }
 
     private void handleBalanceCommand(Player player, String[] args) {
@@ -12410,11 +11457,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         // empty catch block
                     }
                 }
-                try {
-                    this.upsertMoneyBalance(uuid, this.economy.getBalance((OfflinePlayer)player));
-                }
-                catch (Exception exception) {
-                    // empty catch block
+                // Mirror a third-party provider's balance into the table. PizzaEconomy already reads
+                // and writes the table, and writing its reading back would store 0 after a failed read.
+                if (!(this.economy instanceof PizzaEconomy)) {
+                    try {
+                        this.upsertMoneyBalance(uuid, this.economy.getBalance((OfflinePlayer)player));
+                    }
+                    catch (Exception exception) {
+                        // empty catch block
+                    }
                 }
                 this.refreshSidebarSoon(player);
             });
@@ -12633,7 +11684,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return false;
         }
         if ("reset".equals(op)) {
-            if (!sender.hasPermission("essentials.eco") && !sender.hasPermission("essentials.eco.reset")) {
+            if (!sender.hasPermission("pizzasmp.admin.eco")) {
                 sender.sendMessage("\u00a7cNo permission.");
                 return true;
             }
@@ -12657,7 +11708,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (split.length < 4) {
             return false;
         }
-        if (!(sender.hasPermission("essentials.eco") || sender.hasPermission("essentials.eco." + op) || sender.hasPermission("essentials.eco." + op + ".all"))) {
+        if (!sender.hasPermission("pizzasmp.admin.eco")) {
             sender.sendMessage("\u00a7cYou do not have permission to use /eco " + op + ".");
             return true;
         }
@@ -13338,179 +12389,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return this.playerUuidByName(name);
     }
 
-    /** Status of the relationship between two players, or null if none. Async only. */
-    private String friendStatus(Connection conn, UUID a, UUID b) throws Exception {
-        String sql = "SELECT status FROM friends WHERE (requester_uuid=? AND target_uuid=?) OR (requester_uuid=? AND target_uuid=?) LIMIT 1";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, a.toString());
-            ps.setString(2, b.toString());
-            ps.setString(3, b.toString());
-            ps.setString(4, a.toString());
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
-            }
-        }
-    }
-
-    private int friendCount(Connection conn, UUID who) throws Exception {
-        String sql = "SELECT COUNT(*) FROM friends WHERE status='ACCEPTED' AND (requester_uuid=? OR target_uuid=?)";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, who.toString());
-            ps.setString(2, who.toString());
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getInt(1) : 0;
-            }
-        }
-    }
-
-    private void handleFriendAdd(Player p, String[] args) {
-        if (args.length < 2) {
-            this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cUsage: /friend add <player>")));
-            return;
-        }
-        String targetName = args[1];
-        UUID lookedUpUuid = this.playerUuidByName(targetName);
-        if (lookedUpUuid == null) {   // typo-tolerant fallback against online players
-            Player fz = this.fuzzyOnlinePlayer(p, targetName);
-            if (fz != null) lookedUpUuid = fz.getUniqueId();
-        }
-        final UUID targetUuid = lookedUpUuid;
-        if (targetUuid == null) {
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cPlayer not found: " + targetName));
-            return;
-        }
-        if (targetUuid.equals(p.getUniqueId())) {
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cYou cannot friend yourself."));
-            return;
-        }
-        String resolvedName = this.playerNameForUuid(targetUuid.toString());
-        String displayName = resolvedName != null ? resolvedName : targetName;
-        try (Connection conn = this.openSyncConnection()) {
-            String existing = this.friendStatus(conn, p.getUniqueId(), targetUuid);
-            if ("ACCEPTED".equals(existing)) {
-                this.runOnPlayerThread(p, () -> p.sendMessage("§7You are already friends with §e" + displayName + "§7."));
-                return;
-            }
-            if ("PENDING".equals(existing)) {
-                // If THEY already requested US, adding back = accepting.
-                String reverseSql = "UPDATE friends SET status='ACCEPTED', responded_at=NOW() WHERE requester_uuid=? AND target_uuid=? AND status='PENDING'";
-                try (PreparedStatement ps = conn.prepareStatement(reverseSql)) {
-                    ps.setString(1, targetUuid.toString());
-                    ps.setString(2, p.getUniqueId().toString());
-                    if (ps.executeUpdate() > 0) {
-                        this.notifyFriendEvent(targetUuid, "§a" + p.getName() + " accepted your friend request!");
-                        this.runOnPlayerThread(p, () -> p.sendMessage("§aYou are now friends with §e" + displayName + "§a!"));
-                        return;
-                    }
-                }
-                this.runOnPlayerThread(p, () -> p.sendMessage("§7You already sent §e" + displayName + " §7a friend request."));
-                return;
-            }
-            if (this.friendCount(conn, p.getUniqueId()) >= MAX_FRIENDS) {
-                this.runOnPlayerThread(p, () -> p.sendMessage("§cFriend limit reached (" + MAX_FRIENDS + ")."));
-                return;
-            }
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO friends (requester_uuid,target_uuid,status) VALUES (?,?,'PENDING')")) {
-                ps.setString(1, p.getUniqueId().toString());
-                ps.setString(2, targetUuid.toString());
-                ps.executeUpdate();
-            }
-            this.notifyFriendEvent(targetUuid, "§e" + p.getName() + " §asent you a friend request. §7/friend accept " + p.getName());
-            this.runOnPlayerThread(p, () -> p.sendMessage("§aFriend request sent to §e" + displayName + "§a."));
-        } catch (Exception ex) {
-            this.getLogger().warning("[Friends] add failed: " + ex.getMessage());
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cSomething went wrong. Try again."));
-        }
-    }
-
-    private void handleFriendAccept(Player p, String[] args) {
-        if (args.length < 2) {
-            this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cUsage: /friend accept <player>")));
-            return;
-        }
-        UUID requesterUuid = this.playerUuidByName(args[1]);
-        if (requesterUuid == null) {
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cPlayer not found: " + args[1]));
-            return;
-        }
-        String displayName = this.playerNameForUuid(requesterUuid.toString());
-        String shown = displayName != null ? displayName : args[1];
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                "UPDATE friends SET status='ACCEPTED', responded_at=NOW() WHERE requester_uuid=? AND target_uuid=? AND status='PENDING'")) {
-            ps.setString(1, requesterUuid.toString());
-            ps.setString(2, p.getUniqueId().toString());
-            if (ps.executeUpdate() > 0) {
-                this.notifyFriendEvent(requesterUuid, "§a" + p.getName() + " accepted your friend request!");
-                this.runOnPlayerThread(p, () -> p.sendMessage("§aYou are now friends with §e" + shown + "§a!"));
-            } else {
-                this.runOnPlayerThread(p, () -> p.sendMessage("§cNo pending friend request from §e" + shown + "§c."));
-            }
-        } catch (Exception ex) {
-            this.getLogger().warning("[Friends] accept failed: " + ex.getMessage());
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cSomething went wrong. Try again."));
-        }
-    }
-
-    private void handleFriendDeny(Player p, String[] args) {
-        if (args.length < 2) {
-            this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cUsage: /friend deny <player>")));
-            return;
-        }
-        UUID requesterUuid = this.playerUuidByName(args[1]);
-        if (requesterUuid == null) {
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cPlayer not found: " + args[1]));
-            return;
-        }
-        String displayName = this.playerNameForUuid(requesterUuid.toString());
-        String shown = displayName != null ? displayName : args[1];
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                "DELETE FROM friends WHERE requester_uuid=? AND target_uuid=? AND status='PENDING'")) {
-            ps.setString(1, requesterUuid.toString());
-            ps.setString(2, p.getUniqueId().toString());
-            if (ps.executeUpdate() > 0) {
-                this.runOnPlayerThread(p, () -> p.sendMessage("§7Denied the friend request from §e" + shown + "§7."));
-            } else {
-                this.runOnPlayerThread(p, () -> p.sendMessage("§cNo pending friend request from §e" + shown + "§c."));
-            }
-        } catch (Exception ex) {
-            this.getLogger().warning("[Friends] deny failed: " + ex.getMessage());
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cSomething went wrong. Try again."));
-        }
-    }
-
-    private void handleFriendRemove(Player p, String[] args) {
-        if (args.length < 2) {
-            this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cUsage: /friend remove <player>")));
-            return;
-        }
-        UUID otherUuid = this.playerUuidByName(args[1]);
-        if (otherUuid == null) {
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cPlayer not found: " + args[1]));
-            return;
-        }
-        String displayName = this.playerNameForUuid(otherUuid.toString());
-        String shown = displayName != null ? displayName : args[1];
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                "DELETE FROM friends WHERE status='ACCEPTED' AND ((requester_uuid=? AND target_uuid=?) OR (requester_uuid=? AND target_uuid=?))")) {
-            ps.setString(1, p.getUniqueId().toString());
-            ps.setString(2, otherUuid.toString());
-            ps.setString(3, otherUuid.toString());
-            ps.setString(4, p.getUniqueId().toString());
-            if (ps.executeUpdate() > 0) {
-                this.runOnPlayerThread(p, () -> p.sendMessage("§7Removed §e" + shown + " §7from your friends."));
-            } else {
-                this.runOnPlayerThread(p, () -> p.sendMessage("§cYou are not friends with §e" + shown + "§c."));
-            }
-        } catch (Exception ex) {
-            this.getLogger().warning("[Friends] remove failed: " + ex.getMessage());
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cSomething went wrong. Try again."));
-        }
-    }
-
     private void handleFriendList(Player p) {
         UUID me = p.getUniqueId();
         try (Connection conn = this.openSyncConnection()) {
@@ -13539,50 +12417,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         } catch (Exception ex) {
             this.getLogger().warning("[Friends] list failed: " + ex.getMessage());
             this.runOnPlayerThread(p, () -> p.sendMessage("§cSomething went wrong. Try again."));
-        }
-    }
-
-    private void handleFriendRequests(Player p) {
-        String sql = "SELECT requester_uuid, created_at FROM friends WHERE target_uuid=? AND status='PENDING' ORDER BY created_at DESC";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, p.getUniqueId().toString());
-            java.util.List<String> lines = new java.util.ArrayList<>();
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    UUID requester;
-                    try { requester = UUID.fromString(rs.getString(1)); } catch (Exception ignored) { continue; }
-                    String name = this.playerNameForUuid(requester.toString());
-                    if (name == null) name = requester.toString().substring(0, 8);
-                    lines.add("§7 - §e" + name + " §8— §a/friend accept " + name + " §8| §c/friend deny " + name);
-                }
-            }
-            this.runOnPlayerThread(p, () -> {
-                if (lines.isEmpty()) {
-                    p.sendMessage("§7No pending friend requests.");
-                    return;
-                }
-                p.sendMessage(this.legacyColorize("&#00BFFFFriend Requests §7(" + lines.size() + ")"));
-                for (String line : lines) p.sendMessage(line);
-            });
-        } catch (Exception ex) {
-            this.getLogger().warning("[Friends] requests failed: " + ex.getMessage());
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cSomething went wrong. Try again."));
-        }
-    }
-
-    /** Notify a player of a friend event: chat message if online here, queued notification otherwise. */
-    private void notifyFriendEvent(UUID recipient, String message) {
-        Player online = Bukkit.getPlayer(recipient);
-        if (online != null && online.isOnline()) {
-            final Player target = online;
-            this.runOnPlayerThread(target, () -> target.sendMessage(message));
-            return;
-        }
-        try {
-            this.queuePlayerNotification(recipient, message, "", 60 * 60 * 24 * 7);
-        } catch (Exception ex) {
-            this.getLogger().warning("[Friends] notify failed: " + ex.getMessage());
         }
     }
 
@@ -13799,81 +12633,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.runOnPlayerThread(p, () -> DialogCompat.show(p, dialog));
     }
 
-    /** Add-friend screen: player-name input + confirm. */
-    private void openFriendAddDialog(Player p) {
-        List<DialogInput> inputs = List.of(
-            DialogInput.text("name", Component.text("Player name", NamedTextColor.GRAY))
-                .width(200)
-                .maxLength(16)
-                .build());
-        ActionButton yes = ActionButton.builder(Component.text("Send Request", NamedTextColor.GREEN))
-            .width(130)
-            .action(DialogAction.customClick((view, audience) -> {
-                if (audience instanceof Player pl) {
-                    String raw = view.getText("name");
-                    if (raw == null || raw.isBlank()) {
-                        this.runOnPlayerThread(pl, () -> pl.sendMessage("§cEnter a player name."));
-                        return;
-                    }
-                    String name = raw.trim();
-                    this.runAsyncTask(() -> this.handleFriendAdd(pl, new String[]{"add", name}));
-                }
-            }, ClickCallback.Options.builder().build()))
-            .build();
-        ActionButton no = this.dialogButton(Component.text("Cancel"), null, 130,
-            pl -> this.runAsyncTask(() -> this.openFriendsDialog(pl)));
-        Dialog dialog = this.buildDialog(Component.text("Add Friend", DIALOG_BRAND),
-            List.of(DialogBody.plainMessage(Component.text("Sends a friend request.", NamedTextColor.GRAY))),
-            inputs, DialogType.confirmation(yes, no));
-        DialogCompat.show(p, dialog);
-    }
-
-    /** Incoming requests: one Accept + one Deny button per requester. ASYNC ONLY. */
-    private void openFriendRequestsDialog(Player p) {
-        List<String> requesters = new ArrayList<>();
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                "SELECT requester_uuid FROM friends WHERE target_uuid=? AND status='PENDING' ORDER BY created_at DESC")) {
-            ps.setString(1, p.getUniqueId().toString());
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String name = this.playerNameForUuid(rs.getString(1));
-                    if (name != null) requesters.add(name);
-                }
-            }
-        } catch (Exception ex) {
-            this.getLogger().warning("[Friends] requests dialog load failed: " + ex.getMessage());
-            this.runOnPlayerThread(p, () -> p.sendMessage("§cSomething went wrong. Try again."));
-            return;
-        }
-        if (requesters.isEmpty()) {
-            this.openFriendsDialog(p);
-            return;
-        }
-        List<ActionButton> buttons = new ArrayList<>();
-        for (String name : requesters) {
-            buttons.add(this.dialogButton(Component.text("✔ " + name, NamedTextColor.GREEN), "Accept", 130,
-                pl -> this.runAsyncTask(() -> {
-                    this.handleFriendAccept(pl, new String[]{"accept", name});
-                    this.openFriendsDialog(pl);
-                })));
-            buttons.add(this.dialogButton(Component.text("✖ " + name, NamedTextColor.RED), "Deny", 130,
-                pl -> this.runAsyncTask(() -> {
-                    this.handleFriendDeny(pl, new String[]{"deny", name});
-                    this.openFriendsDialog(pl);
-                })));
-        }
-        Dialog dialog = this.buildDialog(Component.text("Friend Requests", DIALOG_BRAND),
-            List.of(DialogBody.plainMessage(Component.text(requesters.size() + " pending request" + (requesters.size() == 1 ? "" : "s"), NamedTextColor.GRAY))),
-            List.of(),
-            DialogType.multiAction(buttons)
-                .columns(2)
-                .exitAction(this.dialogButton(Component.text("Back"), null, 110,
-                    pl -> this.runAsyncTask(() -> this.openFriendsDialog(pl))))
-                .build());
-        this.runOnPlayerThread(p, () -> DialogCompat.show(p, dialog));
-    }
-
     private void handleTeamCreate(Player p, String[] args) {
         if (args.length < 2) {
             this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cUsage: /team create <name>")));
@@ -13979,7 +12738,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 return;
             }
             String teamName = this.getTeamName(conn, teamId);
-            try (PreparedStatement ps = conn.prepareStatement("REPLACE INTO team_invites (team_id, invitee_uuid, inviter_uuid, expires_at) VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 5 MINUTE))")) {
+            try (PreparedStatement ps = conn.prepareStatement("REPLACE INTO team_invites (team_id, invitee_uuid, inviter_uuid, expires_at) VALUES (?, ?, ?, TIMESTAMPADD(MINUTE, 5, NOW()))")) {
                 ps.setLong(1, teamId);
                 ps.setString(2, target.getUniqueId().toString());
                 ps.setString(3, p.getUniqueId().toString());
@@ -14402,7 +13161,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             if (teamId < 0) { this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cYou are not in a team."))); return; }
             String teamName = this.getTeamName(conn, teamId);
             List<String[]> memberInfos = new ArrayList<>();
-            try (PreparedStatement ps = conn.prepareStatement("SELECT member_uuid, role FROM team_members WHERE team_id=? ORDER BY FIELD(role,'OWNER','OFFICER','MEMBER')")) {
+            try (PreparedStatement ps = conn.prepareStatement("SELECT member_uuid, role FROM team_members WHERE team_id=? ORDER BY CASE role WHEN 'OWNER' THEN 1 WHEN 'OFFICER' THEN 2 WHEN 'MEMBER' THEN 3 ELSE 4 END")) {
                 ps.setLong(1, teamId);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
@@ -14447,7 +13206,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             boolean finalPvp = pvpEnabled;
             this.runOnPlayerThread(p, () -> {
-                Inventory inv = Bukkit.createInventory(null, 27, "§bTeam Settings#00BFFFTeam Settings");
+                Inventory inv = MenuLock.create(27, "§bTeam Settings#00BFFFTeam Settings");
                 ItemStack pvpItem = this.namedWithLore(
                     finalPvp ? Material.DIAMOND_SWORD : Material.WOODEN_SWORD,
                     "§fFriendly Fire",
@@ -14829,7 +13588,48 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return members;
     }
 
+    /**
+     * Storage backend: the configured MySQL/MariaDB database, or File mode (an embedded H2 database file in the plugin
+     * folder) when no database is configured or storage.backend is "file". A configured database is never swapped for
+     * the file during an outage: that would split the economy into two datasets.
+     */
+    boolean usesFileStorage() {
+        String backend = this.settings.getString("storage.backend", "auto");
+        if ("file".equalsIgnoreCase(backend) || "yaml".equalsIgnoreCase(backend)) return true;
+        if ("mysql".equalsIgnoreCase(backend) || "database".equalsIgnoreCase(backend)) return false;
+        String user = this.settings.getString("sync.database.user", "");
+        String pass = this.settings.getString("sync.database.password", "");
+        return user == null || user.isBlank() || pass == null || pass.isBlank() || "CHANGE_ME".equals(pass);
+    }
+
+    private String fileJdbcUrl() {
+        java.io.File db = new java.io.File(this.getDataFolder(), "data/smpcore");
+        return "jdbc:h2:file:" + db.getAbsolutePath()
+            + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DEFAULT_NULL_ORDERING=HIGH";
+    }
+
+    /** True when the column exists; portable across MariaDB and H2. */
+    static boolean columnExists(Connection conn, String table, String column) throws SQLException {
+        java.sql.DatabaseMetaData md = conn.getMetaData();
+        for (String t : new String[]{table, table.toUpperCase(Locale.ROOT)}) {
+            for (String c : new String[]{column, column.toUpperCase(Locale.ROOT)}) {
+                try (ResultSet rs = md.getColumns(conn.getCatalog(), null, t, c)) {
+                    if (rs.next()) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Declared size of a column (for example a VARCHAR length), or -1 when unknown. */
+    static int columnSize(Connection conn, String table, String column) throws SQLException {
+        try (ResultSet rs = conn.getMetaData().getColumns(conn.getCatalog(), null, table, column)) {
+            return rs.next() ? rs.getInt("COLUMN_SIZE") : -1;
+        }
+    }
+
     private String jdbcUrl() {
+        if (this.usesFileStorage()) return this.fileJdbcUrl();
         String host = this.settings.getString("sync.database.host", "127.0.0.1");
         int port = this.settings.getInt("sync.database.port", 3306);
         String database = this.settings.getString("sync.database.name", "pizzasmp");
@@ -14842,12 +13642,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.dataSource != null) {
             return this.dataSource;
         }
+        if (this.usesFileStorage()) {
+            return this.ensureFileDataSource();
+        }
         String databaseUser = this.settings.getString("sync.database.user", "");
         String databasePassword = this.settings.getString("sync.database.password", "");
-        if (databaseUser == null || databaseUser.isBlank() || databasePassword == null || databasePassword.isBlank()) {
-            this.getLogger().warning("Database connection is disabled because credentials are not configured.");
-            return null;
-        }
         try {
             com.zaxxer.hikari.HikariConfig hc = new com.zaxxer.hikari.HikariConfig();
             hc.setPoolName("PizzaNetworkCore");
@@ -14874,6 +13673,33 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         return this.dataSource;
     }
+    /** File mode: an embedded H2 database, single server only (the file is locked by this process). */
+    private com.zaxxer.hikari.HikariDataSource ensureFileDataSource() {
+        try {
+            java.io.File dir = new java.io.File(this.getDataFolder(), "data");
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                this.getLogger().severe("[db] cannot create " + dir + "; storage is unavailable.");
+                return null;
+            }
+            com.zaxxer.hikari.HikariConfig hc = new com.zaxxer.hikari.HikariConfig();
+            hc.setPoolName("PizzaNetworkCore-file");
+            hc.setDriverClassName("org.h2.Driver");
+            hc.setJdbcUrl(this.fileJdbcUrl());
+            hc.setUsername("sa");
+            hc.setPassword("");
+            hc.setMaximumPoolSize(10);
+            hc.setMinimumIdle(2);
+            this.dataSource = new com.zaxxer.hikari.HikariDataSource(hc);
+            this.getLogger().info("[db] storage: file (" + new java.io.File(dir, "smpcore.mv.db").getPath()
+                + "). Single server only; configure sync.database to share data across a network.");
+            this.applyBundledSchema(this.dataSource);
+        } catch (Throwable t) {
+            this.getLogger().severe("[db] file storage failed to open: " + t.getMessage());
+            this.dataSource = null;
+        }
+        return this.dataSource;
+    }
+
     // A fresh install has an empty database. The bundled schema.sql is idempotent (CREATE TABLE IF NOT EXISTS,
     // INSERT IGNORE), so it is applied on every start; existing tables and rows are left untouched.
     private void applyBundledSchema(javax.sql.DataSource ds) {
@@ -14917,11 +13743,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (ds != null) {
             return ds.getConnection();
         }
+        if (this.usesFileStorage()) {
+            throw new SQLException("File storage is unavailable.");
+        }
         String databaseUser = this.settings.getString("sync.database.user", "");
         String databasePassword = this.settings.getString("sync.database.password", "");
-        if (databaseUser == null || databaseUser.isBlank() || databasePassword == null || databasePassword.isBlank()) {
-            throw new SQLException("Database credentials are not configured.");
-        }
         // Fallback: pool unavailable — per-op connection.
         if (!this.mariadbDriverLoaded) {
             try {
@@ -14949,13 +13775,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.cancelPendingById(uuid);
         // Instant teleport — no warmup.
         this.executeDelayedTeleportCommand(player, fullCommand);
-    }
-
-    private boolean exceedsTeleportMoveTolerance(Location from, Location to) {
-        double dx = Math.abs(from.getX() - to.getX());
-        double dy = Math.abs(from.getY() - to.getY());
-        double dz = Math.abs(from.getZ() - to.getZ());
-        return dx > 1.5 || dz > 1.5 || dy > 2.5;
     }
 
     private void cancelPendingTeleport(Player player, boolean notify) {
@@ -15019,45 +13838,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 Bukkit.dispatchCommand((CommandSender)player, (String)fullCommand.substring(1));
             }
         }
-    }
-
-    private void performLocalRtp(Player player, String dimension) {
-        String worldName = switch (dimension) {
-            case "nether" -> "world_nether";
-            case "end" -> "world_the_end";
-            default -> "world";
-        };
-        World world = Bukkit.getWorld((String)worldName);
-        if (world == null && !Bukkit.getWorlds().isEmpty()) {
-            world = (World)Bukkit.getWorlds().getFirst();
-        }
-        if (world == null) {
-            player.sendMessage("\u00a7cThe RTP world is unavailable right now.");
-            return;
-        }
-        if (!this.activeRtpSearches.add(player.getUniqueId())) {
-            return;
-        }
-        double borderRadius = 3000.0;
-        double centerX = 0.0;
-        double centerZ = 0.0;
-        if (world.getWorldBorder() != null) {
-            centerX = world.getWorldBorder().getCenter().getX();
-            centerZ = world.getWorldBorder().getCenter().getZ();
-            borderRadius = this.rtpMaxRadius(world);
-        }
-        RtpSearchPlan plan = new RtpSearchPlan(world.getName(), centerX, centerZ, Math.max(0.0, this.settings.getDouble("rtp.min-radius", 500.0)), borderRadius, Math.max(8, this.settings.getInt("rtp.search-attempts", 96)), player.getLocation().getYaw());
-        this.searchRtpLocation(player.getUniqueId(), plan, 0);
-    }
-    private void openRtpMenu(Player player) {
-        Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_RTP);
-        this.fillBlue(inv);
-        // Small-caps (unicode) names matching the old RTPGUI style.
-        inv.setItem(11, this.namedWithLore(Material.GRASS_BLOCK, "\u00a7a\u1d07\u1d00s\u1d1b", "rtp_dim:overworld", List.of("\u00a7fClick to randomly teleport")));
-        inv.setItem(13, this.namedWithLore(Material.NETHERRACK, "\u00a7a\u1d1b\u029c\u1d07 \u0274\u1d07\u1d1b\u029c\u1d07\u0280", "rtp_dim:nether", List.of("\u00a7fClick to randomly teleport")));
-        inv.setItem(15, this.namedWithLore(Material.END_STONE, "\u00a7a\u1d1b\u029c\u1d07 \u1d07\u0274\u1d05", "rtp_dim:end", List.of("\u00a7fClick to randomly teleport")));
-        player.openInventory(inv);
-        player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 0.7f, 1.2f);
     }
 
     private void handleRtpMenuClick(Player player, ItemStack current) {
@@ -16051,7 +14831,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (recipientUuid == null) {
             return;
         }
-        String sql = "INSERT INTO network_player_notifications (recipient_uuid,message,action,expires_at) VALUES (?,?,?, DATE_ADD(NOW(), INTERVAL ? SECOND))";
+        String sql = "INSERT INTO network_player_notifications (recipient_uuid,message,action,expires_at) VALUES (?,?,?, TIMESTAMPADD(SECOND, ?, NOW()))";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql);){
             ps.setString(1, recipientUuid.toString());
@@ -16566,7 +15346,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openGuide(Player p) {
-        Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_GUIDE);
+        Inventory inv = MenuLock.create((int)54, (String)TITLE_GUIDE);
         this.fillBlue(inv);
         inv.setItem(10, this.named(Material.BOOK, "\u00a79Getting Started", null));
         inv.setItem(12, this.named(Material.GOLD_INGOT, "\u00a79Economy", null));
@@ -16710,7 +15490,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void openSettingsInventory(Player player, Map<String, Boolean> values, int page) {
         // 9x5 keeps the compatibility settings screen on one page with the RTP visual toggle.
-        Inventory inv = Bukkit.createInventory(null, 45, TITLE_SETTINGS);
+        Inventory inv = MenuLock.create(45, TITLE_SETTINGS);
         for (SettingDefinition def : SETTINGS_DEFINITIONS) {
             if (def.slot < 0 || def.slot >= 45) continue;
             boolean enabled = values.getOrDefault(def.key, def.defaultValue);
@@ -17198,7 +15978,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 return;
             }
             // 9x3: middle row has 5 category icons centered, no glass fillers
-            Inventory inv = Bukkit.createInventory(null, 27, TITLE_SHOP);
+            Inventory inv = MenuLock.create(27, TITLE_SHOP);
             inv.setItem(11, this.buildMainShopCategoryItem(Material.END_STONE,       "End",    "shop_main_open:end"));
             inv.setItem(12, this.buildMainShopCategoryItem(Material.NETHERRACK,      "Nether", "shop_main_open:nether"));
             inv.setItem(13, this.buildMainShopCategoryItem(Material.TOTEM_OF_UNDYING,"Gear",   "shop_main_open:gear"));
@@ -17241,7 +16021,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (player == null || !player.isOnline()) return;
         this.runOnPlayerThread(player, () -> {
             if (!player.isOnline()) return;
-            Inventory inv = Bukkit.createInventory(null, 54, TITLE_PVP_SHOP);
+            Inventory inv = MenuLock.create(54, TITLE_PVP_SHOP);
             double setPrice = this.pvpPrice("armor-set", 1000000.0);
             double swordPrice = this.pvpPrice("sword", 300000.0);
             // Armor set trim variants (representative chestplate icon; buying gives the full 4-piece set).
@@ -17371,7 +16151,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.openShopMain(player);
             return;
         }
-        Inventory inv = Bukkit.createInventory(null, 27, this.categoryTitle(categoryKey));
+        Inventory inv = MenuLock.create(27, this.categoryTitle(categoryKey));
         for (int i = 0; i < entries.size() && i < 9; ++i) {
             inv.setItem(9 + i, this.buildCategorySelectItem(categoryKey, entries.get(i)));
         }
@@ -17471,8 +16251,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         String profile = this.settings != null ? this.settings.getString("optimizations.profile", "balanced") : "balanced";
         switch (profile == null ? "balanced" : profile.toLowerCase(java.util.Locale.ROOT)) {
             case "off": return false;
-            case "conservative": return feature.equals("join-send-ramp") || feature.equals("deferred-join-work");
-            default: return true; // balanced / aggressive / unknown
+            // join-send-ramp is opt-in: each view-distance step makes the client re-render every loaded chunk, so a
+            // join visibly refreshes several times. It only helps on a constrained uplink.
+            case "conservative": return feature.equals("deferred-join-work");
+            default: return !feature.equals("join-send-ramp"); // balanced / aggressive / unknown
         }
     }
     private boolean optAggressive() {
@@ -17885,7 +16667,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         int maxQty = this.shopMaxQty(entry);
         state.quantity = Math.max(1, Math.min(maxQty, state.quantity));
 
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_SHOP_CONFIRM);
+        Inventory inv = MenuLock.create(27, TITLE_SHOP_CONFIRM);
         // qty buttons only for stackable items
         if (maxQty > 1) {
             int maxStack = entry.material.getMaxStackSize();
@@ -18200,7 +16982,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (!player.isOnline()) {
                     return;
                 }
-                Inventory inv = Bukkit.createInventory(null, 54, TITLE_SHARD_SHOP);
+                Inventory inv = MenuLock.create(54, TITLE_SHARD_SHOP);
                 ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
                 for (int i = 0; i < 54; i++) inv.setItem(i, filler);
                 inv.setItem(4, this.namedWithLore(Material.AMETHYST_SHARD, "\u00a7fShard Balance", "shard_balance", List.of("\u00a77Shards: \u00a7b" + shards)));
@@ -18362,7 +17144,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (title == null || price == null) {
             return;
         }
-        Inventory inv = Bukkit.createInventory(null, 54, title);
+        Inventory inv = MenuLock.create(54, title);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 54; i++) inv.setItem(i, filler);
         inv.setItem(4, this.namedWithLore(Material.CHEST, "\u00a7f" + title, null,
@@ -18391,7 +17173,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         boolean crate = "crate".equals(type);
         Integer price = crate ? SHARD_CRATE_PRICES.get(key) : SHARD_ITEM_PRICES.get(key);
         if (price == null) { this.openShardShopMenu(player); return; }
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_SHARD_CONFIRM);
+        Inventory inv = MenuLock.create(27, TITLE_SHARD_CONFIRM);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         ItemStack icon = crate
@@ -18515,17 +17297,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             source.setItemMeta((ItemMeta)armorMeta);
         }
         return source;
-    }
-
-    private List<String> prefixedLore(List<String> input) {
-        if (input == null || input.isEmpty()) {
-            return List.of();
-        }
-        ArrayList<String> out = new ArrayList<String>();
-        for (String line : input) {
-            out.add("\u00a77" + line);
-        }
-        return out;
     }
 
     private void logCrateReward(UUID uuid, String username, String crateKey, int shardsCost, int rewardCount) {
@@ -18695,12 +17466,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void addColumnIfMissing(Connection conn, Statement st, String table, String column, String definition) {
         try {
             boolean exists;
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1")) {
-                ps.setString(1, table);
-                ps.setString(2, column);
-                try (ResultSet rs = ps.executeQuery()) { exists = rs.next(); }
-            }
+            exists = columnExists(conn, table, column);
             if (!exists) {
                 st.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
             }
@@ -18751,6 +17517,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.addColumnIfMissing(conn, st, "limbo_control", "smp_ready_at", "TIMESTAMP NULL DEFAULT NULL");
             this.addColumnIfMissing(conn, st, "limbo_control", "branding_reload_at", "TIMESTAMP NULL DEFAULT NULL");
             this.addColumnIfMissing(conn, st, "limbo_control", "closed_worlds", "VARCHAR(255) NOT NULL DEFAULT ''");
+            this.addColumnIfMissing(conn, st, "limbo_control", "limbo_seen_at", "TIMESTAMP NULL DEFAULT NULL");
             this.addColumnIfMissing(conn, st, "order_listings", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at");
             this.addColumnIfMissing(conn, st, "order_listings", "expires_at", "TIMESTAMP NULL DEFAULT NULL AFTER updated_at");
             // Order-matching engine: enchantment requirement for this order.
@@ -19124,7 +17891,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openNavigator(Player p) {
-        Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_NAV);
+        Inventory inv = MenuLock.create((int)54, (String)TITLE_NAV);
         inv.setItem(10, this.named(Material.GRASS_BLOCK, "\u00a79Survival", "nav_survival"));
         inv.setItem(12, this.named(Material.IRON_SWORD, "\u00a79Duels", "nav_duels"));
         inv.setItem(14, this.named(Material.CHEST, "\u00a79Auction House", "nav_ah"));
@@ -19154,7 +17921,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         // Cache the rendered listings so a buy can refresh INSTANTLY in-memory (no DB re-query).
         state.cachedListings = new ArrayList<>(entries);
-        Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_AH);
+        Inventory inv = MenuLock.create((int)54, (String)TITLE_AH);
         this.renderAhListingEntries(inv, entries, state.page);
         inv.setItem(47, this.namedWithLore(Material.CAULDRON, "\u00a7aSort: \u00a7f" + state.sort, "ah_sort", List.of("\u00a77\u2022 Highest price", "\u00a77\u2022 Lowest price", "\u00a77\u2022 Last listed", "\u00a77\u2022 Recently listed")));
         inv.setItem(48, this.namedWithLore(Material.HOPPER, "\u00a7aFilter: \u00a7f" + state.filter, "ah_filter", List.of("\u00a77\u2022 All", "\u00a77\u2022 Blocks", "\u00a77\u2022 Tools", "\u00a77\u2022 Food", "\u00a77\u2022 Combat", "\u00a77\u2022 Potions", "\u00a77\u2022 Books", "\u00a77\u2022 Ingredients", "\u00a77\u2022 Utilities")));
@@ -19243,7 +18010,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (player == null || !player.isOnline()) {
             return;
         }
-        Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_ORDERS);
+        Inventory inv = MenuLock.create((int)54, (String)TITLE_ORDERS);
         int start = Math.max(0, (state.page - 1) * 45);
         int end = Math.min(orders.size(), start + 45);
         for (int i = start; i < end; ++i) {
@@ -19296,7 +18063,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void renderOrdersItemList(Player player, List<OrderEntry> orders, OrdersViewState state) {
         if (player == null || !player.isOnline()) return;
-        Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_ORDERS_ITEM);
+        Inventory inv = MenuLock.create((int)54, (String)TITLE_ORDERS_ITEM);
         int start = Math.max(0, (state.itemPage - 1) * 45);
         int end = Math.min(orders.size(), start + 45);
         for (int i = start; i < end; ++i) {
@@ -19341,7 +18108,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void renderOrdersMy(Player player, List<OrderEntry> orders, int pendingDeliveries, OrdersViewState state) {
-        Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_ORDERS_MY);
+        Inventory inv = MenuLock.create((int)54, (String)TITLE_ORDERS_MY);
         // Tiered slot grid: active orders fill from slot 0, then GRAY "empty" slots up to the
         // rank cap (click to create), then RED locked slots (unlock with Pizza+/Pizza++).
         int cap = this.marketSlotCap(player);
@@ -19386,7 +18153,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void openOrderNewMenu(Player player) {
         OrderBuilderState state = this.orderBuilderState.computeIfAbsent(player.getUniqueId(), id -> new OrderBuilderState());
-        Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_ORDERS_NEW);
+        Inventory inv = MenuLock.create((int)27, (String)TITLE_ORDERS_NEW);
         inv.setItem(10, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7lCancel", "orders_new_cancel", List.of()));
         Material previewMaterial = state.material == null || !state.material.isItem() ? Material.PAPER : state.material;
         String previewLabel = state.material == null || !state.material.isItem() ? "\u00a7aChoose item" : "\u00a7a" + this.humanName(state.material);
@@ -19403,7 +18170,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void openOrderItemPicker(Player player) {
         OrdersViewState state = this.ordersViewState.computeIfAbsent(player.getUniqueId(), id -> new OrdersViewState());
-        Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_ORDERS_PICK);
+        Inventory inv = MenuLock.create((int)54, (String)TITLE_ORDERS_PICK);
         List<Material> materials = this.pickerMaterials(state.search);
         int start = Math.max(0, (state.page - 1) * 45);
         int end = Math.min(materials.size(), start + 45);
@@ -19831,7 +18598,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (player == null || !player.isOnline() || order == null) {
             return;
         }
-        Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_ORDER_DETAIL);
+        Inventory inv = MenuLock.create((int)27, (String)TITLE_ORDER_DETAIL);
         ItemStack preview = new ItemStack(order.material());
         ItemMeta meta = preview.getItemMeta();
         meta.setDisplayName("\u00a7a" + this.humanName(order.material()));
@@ -19855,7 +18622,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.runAsyncTask(() -> {
             OrderEntry order = this.loadOrderByIdForCreator(orderId, player.getUniqueId());
             this.runOnPlayerThread(player, () -> {
-                Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_ORDER_CANCEL_CONFIRM);
+                Inventory inv = MenuLock.create((int)27, (String)TITLE_ORDER_CANCEL_CONFIRM);
                 ItemStack fill = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, "\u00a7r", null, List.of());
                 for (int s = 0; s < 27; ++s) inv.setItem(s, fill);
                 ItemStack preview;
@@ -19913,7 +18680,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         this.orderConfirmState.put(player.getUniqueId(), new OrderConfirmState(OrderConfirmMode.SELL_ORDER_DELIVERIES, ordersState.selectedOrderId));
-        Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_ORDER_SELL_CONFIRM);
+        Inventory inv = MenuLock.create((int)27, (String)TITLE_ORDER_SELL_CONFIRM);
         inv.setItem(11, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7lCancel", "orders_sell_back", List.of()));
         inv.setItem(15, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE, "\u00a7a\u00a7lConfirm", "orders_sell_confirm", List.of()));
         inv.setItem(13, this.namedWithLore(Material.EMERALD, "\u00a7aSell current page", "orders_sell_preview", List.of()));
@@ -19954,7 +18721,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         state.unitPrice = order.unitPrice();
         state.pendingAmount = 0;
         state.pendingItems.clear();
-        Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_ORDER_DELIVER);
+        Inventory inv = MenuLock.create((int)27, (String)TITLE_ORDER_DELIVER, slot -> slot < 27);
         player.openInventory(inv);
     }
 
@@ -20067,7 +18834,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     this.openOrdersMenu(player);
                     return;
                 }
-                Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_ORDER_DELIVER_CONFIRM);
+                Inventory inv = MenuLock.create((int)27, (String)TITLE_ORDER_DELIVER_CONFIRM);
                 ItemStack preview = new ItemStack(order.material(), Math.max(1, Math.min(deliverable, order.material().getMaxStackSize())));
                 ItemMeta meta = preview.getItemMeta();
                 ArrayList<String> lore = new ArrayList<String>();
@@ -20867,7 +19634,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     player.sendMessage("§cYou have reached your open order limit (§f" + orderCap + "§c). Escrow refunded."));
                 return;
             }
-            String sql = "INSERT INTO order_listings (creator_uuid,item_key,amount_total,amount_filled,unit_price,status,expires_at) VALUES (?,?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 80 DAY))";
+            String sql = "INSERT INTO order_listings (creator_uuid,item_key,amount_total,amount_filled,unit_price,status,expires_at) VALUES (?,?,?,?,?,'ACTIVE',TIMESTAMPADD(DAY, 80, NOW()))";
             try (Connection conn = this.openSyncConnection();
                  PreparedStatement ps = conn.prepareStatement(sql);){
                 ps.setString(1, uuid.toString());
@@ -20979,7 +19746,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     this.openOrdersMyMenu(player);
                     return;
                 }
-                Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_ORDERS_DELIVERIES);
+                Inventory inv = MenuLock.create((int)54, (String)TITLE_ORDERS_DELIVERIES);
                 // Expand each delivery into one-stack-per-slot units (blocks -> 64, pearls -> 16,
                 // totems -> 1, etc.) so the page shows the real quantity as stacks instead of piling a
                 // whole delivery into a single slot. Clicking any unit claims that entire delivery.
@@ -21034,7 +19801,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.runAsyncTask(() -> {
             List<AhListingEntry> mine = this.queryAhMyListings(player.getUniqueId(), state.page);
             this.runOnPlayerThread(player, () -> {
-                Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_AH_MY);
+                Inventory inv = MenuLock.create((int)54, (String)TITLE_AH_MY);
                 // Tiered slot grid: active listings fill from slot 0, then GRAY "empty" slots up to
                 // the rank cap (click to sell), then RED locked slots (unlock with Pizza+/Pizza++).
                 int cap = this.marketSlotCap(player);
@@ -21053,7 +19820,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.runAsyncTask(() -> {
             List<AhTxEntry> tx = this.queryAhTransactions(player.getUniqueId(), state.page);
             this.runOnPlayerThread(player, () -> {
-                Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_AH_TX);
+                Inventory inv = MenuLock.create((int)54, (String)TITLE_AH_TX);
                 int slot = 0;
                 int start = Math.max(0, (state.page - 1) * 45);
                 int end = Math.min(tx.size(), start + 45);
@@ -21079,7 +19846,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openAhSellInsert(Player player) {
-        Inventory inv = Bukkit.createInventory(null, (int)9, (String)TITLE_AH_SELL);
+        Inventory inv = MenuLock.create((int)9, (String)TITLE_AH_SELL, slot -> slot == 4);
         inv.setItem(0, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7lCancel", "ah_sell_cancel", List.of()));
         inv.setItem(3, this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", "ah_sell_spacer", List.of()));
         inv.setItem(5, this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", "ah_sell_spacer", List.of()));
@@ -21102,7 +19869,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         double floor = this.worthFloorFor(state.item);
-        Inventory inv = Bukkit.createInventory(null, (int)27, (String)TITLE_AH_CONFIRM);
+        Inventory inv = MenuLock.create((int)27, (String)TITLE_AH_CONFIRM);
         ItemStack preview = state.item.clone();
         ItemMeta meta = preview.getItemMeta();
         ArrayList<String> lore = meta.hasLore() ? new ArrayList<String>(meta.getLore()) : new ArrayList<String>();
@@ -21179,7 +19946,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 });
                 return;
             }
-            String sql = "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?, 'ACTIVE', DATE_ADD(NOW(), INTERVAL 7 DAY))";
+            String sql = "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?, 'ACTIVE', TIMESTAMPADD(DAY, 7, NOW()))";
             try (Connection conn = this.openSyncConnection();
                  PreparedStatement ps = conn.prepareStatement(sql);){
                 ps.setString(1, player.getUniqueId().toString());
@@ -21312,41 +20079,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         catch (Exception ex) {
             this.getLogger().warning("Failed querying orders: " + ex.getMessage());
-        }
-        return out;
-    }
-
-    private List<OrderItemTypeEntry> queryOrderItemTypes(OrdersViewState state) {
-        ArrayList<OrderItemTypeEntry> out = new ArrayList<OrderItemTypeEntry>();
-        String sortSql = switch (state.sort) {
-            case "Best price" -> "MAX(unit_price) DESC";
-            case "Most orders" -> "COUNT(*) DESC";
-            case "Most remaining" -> "SUM(GREATEST(0, amount_total-amount_filled)) DESC";
-            default -> "MAX(created_at) DESC";
-        };
-        StringBuilder sql = new StringBuilder(
-            "SELECT item_key, COUNT(*) AS cnt, SUM(GREATEST(0, amount_total-amount_filled)) AS rem, MAX(unit_price) AS best " +
-            "FROM order_listings WHERE status='ACTIVE' AND amount_filled < amount_total " +
-            "AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) ");
-        if (state.search != null && !state.search.isBlank()) {
-            sql.append("AND LOWER(item_key) LIKE ? ");
-        }
-        sql.append("GROUP BY item_key ORDER BY ").append(sortSql).append(" LIMIT 450");
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
-            if (state.search != null && !state.search.isBlank()) {
-                ps.setString(1, "%" + state.search.toLowerCase(Locale.ROOT) + "%");
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    Material mat = Material.matchMaterial(rs.getString(1));
-                    if (mat == null) continue;
-                    if (!this.matchesUiCategory(mat, state.filter)) continue;
-                    out.add(new OrderItemTypeEntry(mat, rs.getInt(2), rs.getLong(3), rs.getDouble(4)));
-                }
-            }
-        } catch (Exception ex) {
-            this.getLogger().warning("Failed querying order item types: " + ex.getMessage());
         }
         return out;
     }
@@ -21724,7 +20456,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     final long fId = listingId;
                     this.runOnPlayerThread(player, () -> {
                         if (!player.isOnline()) return;
-                        Inventory inv = Bukkit.createInventory(null, 27, TITLE_AH_BUY_CONFIRM);
+                        Inventory inv = MenuLock.create(27, TITLE_AH_BUY_CONFIRM);
                         ItemStack cancelBtn = this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "§c§lCancel", "ah_buy_cancel", List.of());
                         ItemStack confirmBtn = this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE, "§a§lConfirm Purchase", "ah_buy_confirm", List.of(
                             "§7Price: §a$" + this.fmtMoney(fPrice)
@@ -21988,7 +20720,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.runAsyncTask(() -> {
             List<AhListingEntry> listings = this.queryAhMyListings(target, 1);
             this.runOnPlayerThread(admin, () -> {
-                Inventory inv = Bukkit.createInventory(null, 54, TITLE_AH_ADMIN);
+                Inventory inv = MenuLock.create(54, TITLE_AH_ADMIN);
                 int slot = 0;
                 for (AhListingEntry entry : listings) {
                     if (slot >= 45) break;
@@ -22363,31 +21095,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return uuid.substring(0, Math.min(8, uuid.length()));
     }
 
-    private int countInventoryMaterial(Player player, Material material) {
-        int total = 0;
-        for (ItemStack stack : player.getInventory().getStorageContents()) {
-            if (stack == null || stack.getType() != material) continue;
-            total += stack.getAmount();
-        }
-        return total;
-    }
-
-    private void removeInventoryMaterial(Player player, Material material, int amount) {
-        int remaining = amount;
-        ItemStack[] contents = player.getInventory().getStorageContents();
-        for (int i = 0; i < contents.length && remaining > 0; ++i) {
-            ItemStack stack = contents[i];
-            if (stack == null || stack.getType() != material) continue;
-            int take = Math.min(remaining, stack.getAmount());
-            stack.setAmount(stack.getAmount() - take);
-            if (stack.getAmount() <= 0) {
-                contents[i] = null;
-            }
-            remaining -= take;
-        }
-        player.getInventory().setStorageContents(contents);
-    }
-
     private String capitalize(String s) {
         if (s == null || s.isEmpty()) {
             return s;
@@ -22423,7 +21130,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (!viewer.isOnline()) return;
                 StatsSnapshot liveStats = (liveTarget != null && liveTarget.isOnline()) ? this.mergeLiveHudStats(liveTarget, stats) : stats;
                 if (this.useDialogUi(viewer)) { this.openStatsDialog(viewer, targetName, liveStats, false); return; }
-                Inventory inv = Bukkit.createInventory(null, 36, TITLE_STATS + " — " + targetName);
+                Inventory inv = MenuLock.create(36, TITLE_STATS + " — " + targetName);
                 inv.setItem(11, this.buildStatItem(Material.EMERALD,        "Money",         this.formatCompactNumber(liveStats.money),          "Current balance"));
                 inv.setItem(12, this.buildStatItem(Material.AMETHYST_SHARD, "Shards",        this.formatCompactNumber(liveStats.shards),          "Shard currency"));
                 inv.setItem(13, this.buildStatItem(Material.NETHERITE_SWORD, "§cKills",       this.formatCompactNumber(liveStats.kills),           "Players defeated"));
@@ -22453,7 +21160,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 StatsSnapshot liveStats = this.mergeLiveHudStats(player, stats);
                 if (this.useDialogUi(player)) { this.openStatsDialog(player, player.getName(), liveStats, false); return; }
                 // 9x4: row1 = 5 primary stats centered, row2 = 5 secondary stats centered
-                Inventory inv = Bukkit.createInventory(null, 36, TITLE_STATS);
+                Inventory inv = MenuLock.create(36, TITLE_STATS);
                 inv.setItem(11, this.buildStatItem(Material.EMERALD,        "Money",         this.formatCompactNumber(liveStats.money),          "Current balance"));
                 inv.setItem(12, this.buildStatItem(Material.AMETHYST_SHARD, "Shards",        this.formatCompactNumber(liveStats.shards),          "Shard currency"));
                 inv.setItem(13, this.buildStatItem(Material.NETHERITE_SWORD, "§cKills",       this.formatCompactNumber(liveStats.kills),           "Players defeated"));
@@ -23034,7 +21741,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (!player.isOnline()) {
                     return;
                 }
-                Inventory inv = Bukkit.createInventory(null, (int)54, (String)TITLE_BALTOP);
+                Inventory inv = MenuLock.create((int)54, (String)TITLE_BALTOP);
                 for (int i = 0; i < top.size() && i < 45; ++i) {
                     BalanceLookupResult entry = (BalanceLookupResult)top.get(i);
                     ItemStack head = this.createPlayerHead(entry.uuid().toString());
@@ -23067,7 +21774,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             DialogCompat.show(player, dialog);
             return;
         }
-        Inventory inv = Bukkit.createInventory(null, 27, "§cKill Confirmation");
+        Inventory inv = MenuLock.create(27, "§cKill Confirmation");
         inv.setItem(13, this.namedWithLore(Material.SKELETON_SKULL, "§fYou", "kill_item", List.of()));
         inv.setItem(11, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "§cCancel", "kill_cancel", List.of()));
         inv.setItem(15, this.namedWithLore(Material.LIME_STAINED_GLASS_PANE, "§aConfirm", "kill_confirm", List.of()));
@@ -23225,7 +21932,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             List<BalanceLookupResult> top = this.queryLeaderboard(cat, 45);
             this.runOnPlayerThread(player, () -> {
                 if (!player.isOnline()) return;
-                Inventory inv = Bukkit.createInventory(null, 54, "§fTop " + cat.title().replace("/", ""));
+                Inventory inv = MenuLock.create(54, "§fTop " + cat.title().replace("/", ""));
                 for (int i = 0; i < top.size() && i < 45; ++i) {
                     BalanceLookupResult entry = top.get(i);
                     ItemStack head = this.createPlayerHead(entry.uuid().toString());
@@ -23265,7 +21972,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
                 this.runOnPlayerThread(player, () -> {
                     String displayTeamName = teamName != null ? "§b" + teamName : "Unknown";
-                    Inventory inv = Bukkit.createInventory(null, 54, "§fTeam (" + displayTeamName + "§f)");
+                    Inventory inv = MenuLock.create(54, "§fTeam (" + displayTeamName + "§f)");
                     int startIdx = page * 45;
                     int endIdx = Math.min(startIdx + 45, members.size());
                     int slot = 0;
@@ -23316,7 +22023,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private java.util.List<TeamMemberEntry> loadTeamMembersWithRoles(java.util.UUID playerUuid) {
         java.util.List<TeamMemberEntry> members = new java.util.ArrayList<>();
-        String sql = "SELECT tm.member_uuid, COALESCE(p.username, tm.member_uuid) AS uname, tm.role FROM team_members tm JOIN team_members tm2 ON tm.team_id = tm2.team_id LEFT JOIN players p ON p.uuid = tm.member_uuid WHERE tm2.member_uuid=? ORDER BY FIELD(tm.role,'OWNER','OFFICER','MEMBER'), uname";
+        String sql = "SELECT tm.member_uuid, COALESCE(p.username, tm.member_uuid) AS uname, tm.role FROM team_members tm JOIN team_members tm2 ON tm.team_id = tm2.team_id LEFT JOIN players p ON p.uuid = tm.member_uuid WHERE tm2.member_uuid=? ORDER BY CASE tm.role WHEN 'OWNER' THEN 1 WHEN 'OFFICER' THEN 2 WHEN 'MEMBER' THEN 3 ELSE 4 END, uname";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, playerUuid.toString());
@@ -23329,39 +22036,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.getLogger().warning("Failed loading team members with roles: " + ex.getMessage());
         }
         return members;
-    }
-
-    private java.util.List<String> loadTeamMembers(java.util.UUID playerUuid) {
-        java.util.List<String> members = new java.util.ArrayList<>();
-        String sql = "SELECT tm.member_uuid FROM team_members tm JOIN team_members tm2 ON tm.team_id = tm2.team_id WHERE tm2.member_uuid=?";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, playerUuid.toString());
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    members.add(rs.getString("member_uuid"));
-                }
-            }
-        } catch (Exception ex) {
-            this.getLogger().warning("Failed loading team members: " + ex.getMessage());
-        }
-        return members;
-    }
-
-    private java.util.UUID getTeamIdForPlayer(java.util.UUID playerUuid) {
-        String sql = "SELECT team_id FROM team_members WHERE member_uuid=? LIMIT 1";
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, playerUuid.toString());
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return java.util.UUID.fromString(rs.getString("team_id"));
-                }
-            }
-        } catch (Exception ex) {
-            this.getLogger().warning("Failed loading team id: " + ex.getMessage());
-        }
-        return null;
     }
 
     private ItemStack createPlayerHead(String uuidString) {
@@ -23396,7 +22070,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             items.sort((a, b) -> a.getKey().name().compareTo(b.getKey().name()));
         }
         int totalPages = Math.max(1, (int)Math.ceil(items.size() / 45.0));
-        Inventory inv = Bukkit.createInventory(null, 54, this.brandSectionHex("primary") + "Item Worth (Page " + (page + 1) + "/" + totalPages + ")");
+        Inventory inv = MenuLock.create(54, this.brandSectionHex("primary") + "Item Worth (Page " + (page + 1) + "/" + totalPages + ")");
         int startIdx = page * 45;
         int endIdx = Math.min(startIdx + 45, items.size());
         int slot = 0;
@@ -23436,7 +22110,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.runAsyncTask(() -> {
             Map<String, Integer> progress = this.loadSellMultiProgress(player.getUniqueId());
             this.runOnPlayerThread(player, () -> {
-                Inventory inv = Bukkit.createInventory(null, 27, "§fSell Multiplier");
+                Inventory inv = MenuLock.create(27, "§fSell Multiplier");
                 // All 9 items in row 1 (middle row): slots 9-17
                 inv.setItem(9, this.createSellMultiCategoryItem("Crops", Material.WHEAT, "crops", progress.getOrDefault("crops", 0)));
                 inv.setItem(10, this.createSellMultiCategoryItem("Ores", Material.DIAMOND, "ores", progress.getOrDefault("ores", 0)));
@@ -23502,7 +22176,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             int level = this.loadSellMultiLevel(player.getUniqueId(), categoryKey);
             double earned = this.loadSellMultiEarned(player.getUniqueId(), categoryKey);
             this.runOnPlayerThread(player, () -> {
-                Inventory inv = Bukkit.createInventory(null, 54, "§f" + this.getCategoryDisplayName(categoryKey) + " Progress");
+                Inventory inv = MenuLock.create(54, "§f" + this.getCategoryDisplayName(categoryKey) + " Progress");
                 int[] snakePath = this.generateSnakePath();
                 for (int i = 0; i < 20 && i < snakePath.length; i++) {
                     inv.setItem(snakePath[i], this.createProgressionPane(i, level, earned));
@@ -23982,21 +22656,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    private static final class HomesGuiState {
-        private final Map<String, HomeRecord> homes;
-        private final TeamHomeRecord teamHome;
-        private final boolean canSetTeamHome;
-
-        private HomesGuiState(Map<String, HomeRecord> homes, TeamHomeRecord teamHome, boolean canSetTeamHome) {
-            this.homes = homes;
-            this.teamHome = teamHome;
-            this.canSetTeamHome = canSetTeamHome;
-        }
-
-        private int claimedHomes() {
-            return this.homes.size();
-        }
-    }
 
     private static final class ParsedAmount {
         private final double value;
@@ -24169,8 +22828,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    private record OrderItemTypeEntry(Material material, int orderCount, long totalRemaining, double bestPrice) {}
-
     private static final class OrderBuilderState {
         private Material material;
         private long amount;
@@ -24258,7 +22915,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 String targetRole = this.getTeamRole(conn, java.util.UUID.fromString(targetUuidStr), teamId);
                 String targetName = this.playerNameForUuid(targetUuidStr);
                 this.runOnPlayerThread(viewer, () -> {
-                    Inventory inv = Bukkit.createInventory(null, 27, "§bManage: " + targetName);
+                    Inventory inv = MenuLock.create(27, "§bManage: " + targetName);
                     ItemStack head = this.createPlayerHead(targetUuidStr);
                     if (head == null) head = new ItemStack(Material.PLAYER_HEAD);
                     ItemMeta hm = head.getItemMeta();
@@ -24459,7 +23116,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             double variance = 0.85 + this.ecoRandom.nextDouble() * 0.3;
             double finalPrice = Math.round(price * variance);
             try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 30 DAY))")) {
+                    "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',TIMESTAMPADD(DAY, 30, NOW()))")) {
                 for (int i = 0; i < toPost; i++) {
                     ps.setString(1, SERVER_UUID);
                     ps.setBytes(2, this.serializeItem(book));
@@ -24480,7 +23137,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // per-variant caps work via the same GROUP BY item_key counting.
     private boolean postServerAhItem(Connection conn, ItemStack item, String itemKey, double price) {
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 30 DAY))")) {
+                "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',TIMESTAMPADD(DAY, 30, NOW()))")) {
             ps.setString(1, SERVER_UUID);
             ps.setBytes(2, this.serializeItem(item));
             ps.setString(3, itemKey);
@@ -24699,7 +23356,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             "WHERE ol.creator_uuid != ? AND ol.status='ACTIVE' " +
             "AND (ol.expires_at IS NULL OR ol.expires_at > CURRENT_TIMESTAMP) " +
             "AND ol.amount_filled < ol.amount_total " +
-            "AND ol.created_at < DATE_SUB(NOW(), INTERVAL 5 MINUTE) " +
+            "AND ol.created_at < TIMESTAMPADD(MINUTE, -5, NOW()) " +
             "ORDER BY ol.unit_price DESC LIMIT ?";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(deliverSql)) {
@@ -24794,7 +23451,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void postServerAhListing(Connection conn, Material mat, double price, int amount) {
         try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 30 DAY))")) {
+                "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',TIMESTAMPADD(DAY, 30, NOW()))")) {
             ItemStack item = new ItemStack(mat, Math.max(1, amount));
             ps.setString(1, SERVER_UUID);
             ps.setBytes(2, this.serializeItem(item));
@@ -24915,7 +23572,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     double variance = 0.85 + this.ecoRandom.nextDouble() * 0.3;
                     double finalPrice = Math.max(100.0, Math.round(basePrice * priceMult * variance));
                     try (PreparedStatement ps = conn.prepareStatement(
-                            "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',DATE_ADD(NOW(), INTERVAL 30 DAY))")) {
+                            "INSERT INTO auction_listings (seller_uuid,item_blob,item_key,price,status,expires_at) VALUES (?,?,?,?,'ACTIVE',TIMESTAMPADD(DAY, 30, NOW()))")) {
                         ps.setString(1, SERVER_UUID);
                         ps.setBytes(2, this.serializeItem(armor));
                         ps.setString(3, key);
@@ -25076,31 +23733,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 });
             }
             default -> p.sendMessage("§cUnknown subcommand. Use /ecobot for help.");
-        }
-    }
-
-    /**
-     * Whether {@code target} auto-accepts a TPA from {@code requester}. Two independent ways in:
-     *
-     *   - the global "tpa_auto_accept" setting (/tpauto), which accepts from everyone; or
-     *   - the per-follow auto_accept_tpa toggle, which accepts only from people the target follows
-     *     and is set from the relationship dialog ("Auto Accept TPAs"). This is the one that was
-     *     stored and shown but never consulted.
-     *
-     * Direction matches the privacyAllows per-relationship override: the toggle lives on the
-     * TARGET's follow row toward the REQUESTER (follower_uuid=target, target_uuid=requester), i.e.
-     * "I follow you, and I auto-accept your teleport requests".
-     */
-    private boolean shouldAutoAcceptTpa(UUID target, UUID requester) {
-        if (target == null || requester == null) return false;
-        if (this.isSettingEnabledCached(target, "tpa_auto_accept")) return true;
-        try (Connection conn = this.openSyncConnection()) {
-            // getFollowSetting is already false when no follow row exists, so this is true only
-            // when the target follows the requester and left the toggle on.
-            return this.getFollowSetting(conn, target, requester, "auto_accept_tpa");
-        } catch (Exception ex) {
-            this.getLogger().warning("shouldAutoAcceptTpa failed: " + ex.getMessage());
-            return false; // fail closed: never auto-teleport on a DB error
         }
     }
 
@@ -25369,7 +24001,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             recipient.sendActionBar(Component.text("§cRequester is no longer online"));
             return;
         }
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_TPA_CONFIRM);
+        Inventory inv = MenuLock.create(27, TITLE_TPA_CONFIRM);
         // Determine who will move and where
         boolean isTpa = "tpa".equals(request.type());
         Player mover = isTpa ? requester : recipient;
@@ -25438,11 +24070,6 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.handleTpaDenyCommand(recipient, null);
             }
         }
-    }
-
-    // ---- Hotbar helper (all player feedback goes through this) ----
-    private void hotbar(Player p, String legacyMsg) {
-        p.sendActionBar(this.legacyColorize(legacyMsg));
     }
 
     private void hotbarWithSound(Player p, String legacyMsg, Sound sound, float vol, float pitch) {
@@ -25579,7 +24206,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void renderBountyGui(Player p, java.util.List<BountyEntry> entries, int page, String sort, String search) {
         if (!p.isOnline()) return;
-        Inventory inv = Bukkit.createInventory(null, 54, TITLE_BOUNTY);
+        Inventory inv = MenuLock.create(54, TITLE_BOUNTY);
         int start = Math.max(0, (page - 1) * 45);
         int end = Math.min(entries.size(), start + 45);
         for (int i = start; i < end; ++i) {
@@ -25678,12 +24305,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openSuspiciousPlayersGui(Player viewer, int page) {
-        if (this.useDialogUi(viewer)) {
-            this.openSuspiciousPlayersDialog(viewer, page);
-            return;
-        }
         this.runAsyncTask(() -> {
-            java.util.List<SuspiciousPlayerEntry> allSuspicious = this.loadSuspiciousPlayers(500);
+            java.util.List<SuspiciousPlayerEntry> allSuspicious = this.loadSuspiciousPlayers(Integer.MAX_VALUE);
             // Per-UUID breakdown of check types with counts, top-first.
             java.util.Map<String, java.util.List<String>> flagBreakdown = this.loadSuspiciousFlagBreakdown();
             final int itemsPerPage = 45;
@@ -25697,7 +24320,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.runOnPlayerThread(viewer, () -> {
                 if (!viewer.isOnline()) return;
 
-                Inventory inv = Bukkit.createInventory(null, 54, "§cSuspicious Players");
+                Inventory inv = MenuLock.create(54, "§cSuspicious Players");
 
                 if (!pageEntries.isEmpty()) {
                     int slot = 0;
@@ -25716,10 +24339,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                             lore.add("§7Latest: §f" + entry.lastViolationType());
                         } else {
                             lore.add("§7Flagged for:");
-                            int shown = 0;
                             for (String line : bd) {
                                 lore.add("  §8• §f" + line);
-                                if (++shown >= 5) break;
                             }
                         }
                         lore.add("");
@@ -25742,6 +24363,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
 
                 inv.setItem(49, this.namedWithLore(Material.REDSTONE_BLOCK, "§aReload", "sus_reload", List.of("§7Refresh suspicious player list")));
+                inv.setItem(51, this.namedWithLore(Material.COMPASS, "§fSearch Player", "sus_search",
+                    List.of("§7Look up a player's flag history")));
 
                 if (!allSuspicious.isEmpty() && finalPage < totalPages) {
                     inv.setItem(53, this.namedWithLore(Material.ARROW, "§aNext", "sus_next", List.of()));
@@ -25755,9 +24378,59 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
+    private void openSuspiciousPlayerByName(Player viewer, String name) {
+        String query = name == null ? "" : name.trim();
+        if (query.isEmpty() || query.length() > 36) {
+            viewer.sendMessage("§cEnter a valid player name or UUID.");
+            return;
+        }
+        this.runAsyncTask(() -> {
+            String sql = "SELECT player_uuid FROM anticheat_violations "
+                + "WHERE reviewed = 0 AND (LOWER(player_name) = LOWER(?) OR player_uuid = ?) "
+                + "ORDER BY reported_at DESC LIMIT 1";
+            try (Connection conn = this.openSyncConnection();
+                 PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, query);
+                ps.setString(2, query);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String uuid = rs.getString(1);
+                        this.runOnPlayerThread(viewer, () -> {
+                            if (viewer.isOnline()) this.openSuspiciousPlayerDetailGui(viewer, uuid);
+                        });
+                    } else {
+                        this.runOnPlayerThread(viewer, () -> viewer.sendMessage("§cNo undismissed flags found for that player."));
+                    }
+                }
+            } catch (Exception ex) {
+                this.getLogger().warning("Failed looking up suspect: " + ex.getMessage());
+                this.runOnPlayerThread(viewer, () -> viewer.sendMessage("§cSuspect search is unavailable."));
+            }
+        });
+    }
+
+    private void openSuspiciousSearchDialog(Player viewer) {
+        List<DialogInput> inputs = List.of(DialogInput.text("player",
+            Component.text("Player name", NamedTextColor.GRAY)).width(240).maxLength(36).build());
+        ActionButton search = ActionButton.builder(Component.text("Search", NamedTextColor.WHITE)).width(150)
+            .action(DialogAction.customClick((view, audience) -> {
+                if (audience instanceof Player player) {
+                    String query = view.getText("player");
+                    this.runOnPlayerThread(player, () -> this.openSuspiciousPlayerByName(player, query));
+                }
+            }, ClickCallback.Options.builder().build())).build();
+        ActionButton back = this.dialogButton(Component.text("Back", NamedTextColor.GRAY), null, 150,
+            this::openSuspiciousPlayersGui);
+        Dialog dialog = this.buildDialog(Component.text("Search Suspects", NamedTextColor.WHITE),
+            List.of(DialogBody.plainMessage(Component.text("Find retained flags for a player.", NamedTextColor.GRAY))),
+            inputs, DialogType.confirmation(search, back));
+        DialogCompat.show(viewer, dialog);
+    }
+
     private void openSuspiciousPlayerDetailGui(Player viewer, String targetUuid) {
         this.runAsyncTask(() -> {
-            String sql = "SELECT player_uuid, player_name FROM anticheat_violations WHERE player_uuid = ? LIMIT 1";
+        java.util.List<String> reasons = this.loadSuspiciousFlagBreakdown().getOrDefault(targetUuid, java.util.List.of());
+        String sql = "SELECT player_uuid, player_name FROM anticheat_violations WHERE player_uuid = ? AND reviewed = 0 LIMIT 1";
             try (Connection conn = this.openSyncConnection();
                  PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, targetUuid);
@@ -25770,7 +24443,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
                     this.runOnPlayerThread(viewer, () -> {
                         if (!viewer.isOnline()) return;
-                        Inventory inv = Bukkit.createInventory(null, 27, "§c" + playerName + " - Details");
+                        Inventory inv = MenuLock.create(27, "§c" + playerName + " - Details");
+                        inv.setItem(4, this.namedWithLore(Material.BOOK, "§fWhy this player is listed", null,
+                            reasons.isEmpty() ? List.of("§7No active flag summary") : reasons));
 
                         // Teleport button
                         inv.setItem(11, this.namedWithLore(Material.ENDER_PEARL, "§aTeleport to Player", "sus_detail_tp:" + targetUuid, List.of("§7Click to teleport to this player")));
@@ -25780,7 +24455,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
                         // Clear flags button (opens confirm)
                         inv.setItem(15, this.namedWithLore(Material.BARRIER, "§eClear All Flags", "sus_detail_clear:" + targetUuid,
-                            List.of("§7Remove this player from the", "§7suspicious list (false-positive).", "§7Click to confirm.")));
+                            List.of("§7Dismiss active flags while", "§7retaining the audit history.", "§7Click to confirm.")));
 
                         // Back button
                         inv.setItem(22, this.namedWithLore(Material.ARROW, "§7Back", "sus_detail_back", List.of()));
@@ -25798,9 +24473,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // sorted by count desc — used to enrich the /sus list lore.
     private java.util.Map<String, java.util.List<String>> loadSuspiciousFlagBreakdown() {
         java.util.Map<String, java.util.List<String>> out = new java.util.HashMap<>();
-        String sql = "SELECT player_uuid, violation_type, COUNT(*) c FROM anticheat_violations "
-            + "WHERE reported_at > DATE_SUB(NOW(), INTERVAL 7 DAY) "
-            + "GROUP BY player_uuid, violation_type ORDER BY player_uuid, c DESC";
+        String reason = "COALESCE(NULLIF(check_name, ''), violation_type)";
+        String sql = "SELECT player_uuid, " + reason + ", COUNT(*) c FROM anticheat_violations "
+            + "WHERE reviewed = 0 "
+            + "GROUP BY player_uuid, " + reason + " ORDER BY player_uuid, c DESC";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
@@ -25821,19 +24497,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void openSuspiciousClearConfirmGui(Player viewer, String targetUuid, String targetName) {
         this.runOnPlayerThread(viewer, () -> {
             if (!viewer.isOnline()) return;
-            Inventory inv = Bukkit.createInventory(null, 27, "§cClear flags?");
+            Inventory inv = MenuLock.create(27, "§cClear flags?");
             ItemStack head = this.createPlayerHead(targetUuid);
             if (head == null) head = new ItemStack(Material.PLAYER_HEAD);
             ItemMeta hm = head.getItemMeta();
             hm.setDisplayName("§e" + targetName);
             hm.setLore(java.util.List.of(
                 "§7All anticheat violations for",
-                "§7this player will be deleted.",
-                "§7This cannot be undone."));
+                "§7this player will be dismissed.",
+                "§7The history will be retained."));
             head.setItemMeta(hm);
             inv.setItem(13, head);
             inv.setItem(11, this.namedWithLore(Material.LIME_WOOL, "§aConfirm Clear",
-                "sus_clear_yes:" + targetUuid, java.util.List.of("§7Delete all flags for this player.")));
+                "sus_clear_yes:" + targetUuid, java.util.List.of("§7Dismiss all active flags for this player.")));
             inv.setItem(15, this.namedWithLore(Material.RED_WOOL, "§cCancel",
                 "sus_clear_no:" + targetUuid, java.util.List.of("§7Return to the detail view.")));
             viewer.openInventory(inv);
@@ -25844,7 +24520,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void openSuspiciousPlayersDialog(Player viewer, int page) {
         this.runAsyncTask(() -> {
-            java.util.List<SuspiciousPlayerEntry> all = this.loadSuspiciousPlayers(500);
+            java.util.List<SuspiciousPlayerEntry> all = this.loadSuspiciousPlayers(Integer.MAX_VALUE);
             java.util.Map<String, java.util.List<String>> breakdown = this.loadSuspiciousFlagBreakdown();
             final int per = 14;
             final int totalPages = all.isEmpty() ? 1 : (int) Math.ceil((double) all.size() / per);
@@ -25919,10 +24595,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         ActionButton confirm = this.dialogButton(Component.text("Confirm Clear", NamedTextColor.RED), null, 150, p -> {
             DialogCloseCompat.close(p);
             this.runAsyncTask(() -> {
-                int deleted = this.clearSuspiciousFlags(targetUuid);
+                int dismissed = this.clearSuspiciousFlags(targetUuid, p.getUniqueId().toString());
                 this.runOnPlayerThread(p, () -> {
-                    p.sendActionBar(Component.text(deleted < 0
-                        ? "§cFailed to clear flags." : "§aCleared " + deleted + " flag(s)."));
+                    p.sendActionBar(Component.text(dismissed < 0
+                        ? "§cFailed to clear flags." : "§aDismissed " + dismissed + " flag(s); history retained."));
                     this.openSuspiciousPlayersDialog(p, 1);
                 });
             });
@@ -25930,7 +24606,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         ActionButton cancel = this.dialogButton(Component.text("Cancel", NamedTextColor.GRAY), null, 150,
             p -> this.openSuspiciousPlayerDetailDialog(p, targetUuid, name));
         Dialog dialog = this.buildDialog(Component.text("Clear flags?", DIALOG_BRAND),
-            List.of(DialogBody.plainMessage(Component.text("Delete ALL anticheat flags for " + name + "? This cannot be undone.", NamedTextColor.GRAY))),
+            List.of(DialogBody.plainMessage(Component.text("Dismiss all active anticheat flags for " + name + "? History will be retained.", NamedTextColor.GRAY))),
             List.of(), DialogType.confirmation(confirm, cancel));
         DialogCompat.show(viewer, dialog);
     }
@@ -26264,7 +24940,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (!DialogCompat.show(p, dialog)) this.openManageLegacy(p);
     }
     private void openManageLegacy(Player p) {
-        Inventory inventory = Bukkit.createInventory(null, 54, TITLE_ADMIN);
+        Inventory inventory = MenuLock.create(54, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, "§8", null, List.of());
         for (int slot = 0; slot < inventory.getSize(); slot++) inventory.setItem(slot, filler);
         inventory.setItem(10, this.namedWithLore(Material.REDSTONE_BLOCK, "§cMaintenance ON", "adm_maint_on", List.of()));
@@ -26284,7 +24960,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // ===== Legacy (inventory) server console for Bedrock / pre-1.21.6 clients =====
     private void openAdminLegacy(Player p) {
-        Inventory inv = Bukkit.createInventory(null, 54, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(54, TITLE_ADMIN);
         inv.setItem(10, this.namedWithLore(Material.REDSTONE_BLOCK, "§cMaintenance ON", "adm_maint_on", List.of("§7Close the server")));
         inv.setItem(11, this.namedWithLore(Material.EMERALD_BLOCK, "§aMaintenance OFF", "adm_maint_off", List.of("§7Reopen the server")));
         inv.setItem(13, this.namedWithLore(Material.END_PORTAL_FRAME, "§fThe End: " + (this.endRtpClosed ? "§cCLOSED" : "§aOPEN"), "adm_end", List.of("§7Click to toggle")));
@@ -26312,7 +24988,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openAdminLegacyConfirm(Player p, boolean restart) {
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(27, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         inv.setItem(13, this.namedWithLore(Material.BARRIER, restart ? "§cRestart Server?" : "§cStop Server?", null,
@@ -26334,7 +25010,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openAdminLegacyEconomy(Player p) {
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(27, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         inv.setItem(10, this.namedWithLore(Material.GOLD_INGOT, "§fGive Money", "adm_e_givemoney", List.of("§7Type: <player> <amount>")));
@@ -26348,7 +25024,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openAdminLegacyPlayers(Player p) {
-        Inventory inv = Bukkit.createInventory(null, 54, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(54, TITLE_ADMIN);
         int slot = 0;
         for (Player t : Bukkit.getOnlinePlayers()) {
             if (slot >= 45) break;
@@ -26366,7 +25042,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openAdminLegacyPlayerActions(Player p, String uuid, String name) {
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(27, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         inv.setItem(10, this.namedWithLore(Material.ENDER_PEARL, "§fTeleport To", "adm_pa_tp:" + uuid, List.of()));
@@ -26390,7 +25066,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         boolean rtpOff = this.rtpDisabledWorlds.contains(wn);
         boolean pvp = w.getPVP();
         boolean mobs = Boolean.TRUE.equals(w.getGameRuleValue(org.bukkit.GameRule.DO_MOB_SPAWNING));
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(27, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         inv.setItem(10, this.namedWithLore(disabled ? Material.BARRIER : Material.GRASS_BLOCK, (disabled ? "§cAccess: DISABLED" : "§aAccess: OPEN"), "adm_w_access:" + wn, List.of("§7Click to toggle + evacuate")));
@@ -26409,7 +25085,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openAdminLegacyWorlds(Player p) {
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(27, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         int slot = 10;
@@ -26430,7 +25106,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         {"sell.enchant_level_multiplier", "Sell enchant mult", "1.0"}};
 
     private void openAdminLegacyTuning(Player p) {
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(27, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         int slot = 10;
@@ -26443,7 +25119,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openAdminLegacyData(Player p) {
-        Inventory inv = Bukkit.createInventory(null, 27, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(27, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         inv.setItem(10, this.namedWithLore(Material.CHEST, "§fInventory Inspect", "adm_d_invsee", List.of("§7Type: <player>")));
@@ -26464,7 +25140,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             org.bukkit.GameRule.NATURAL_REGENERATION, org.bukkit.GameRule.DO_IMMEDIATE_RESPAWN, org.bukkit.GameRule.KEEP_INVENTORY,
             org.bukkit.GameRule.DO_TILE_DROPS, org.bukkit.GameRule.DISABLE_RAIDS, org.bukkit.GameRule.SHOW_DEATH_MESSAGES,
             org.bukkit.GameRule.DO_DAYLIGHT_CYCLE, org.bukkit.GameRule.DO_WEATHER_CYCLE);
-        Inventory inv = Bukkit.createInventory(null, 54, TITLE_ADMIN);
+        Inventory inv = MenuLock.create(54, TITLE_ADMIN);
         ItemStack filler = this.namedWithLore(Material.GRAY_STAINED_GLASS_PANE, " ", null, List.of());
         for (int i = 0; i < 54; i++) inv.setItem(i, filler);
         int slot = 0;
@@ -27374,6 +26050,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         final int count = moveIds.size();
         if (count == 0) {
             this.getLogger().warning("[LimboMaint] No online player could be prepared; restart aborted.");
+            this.limboMaintenanceRunning.set(false);
             if (by instanceof Player pl) pl.sendMessage(this.legacyColorize("&cMaintenance could not start safely. Check the server log."));
             return;
         }
@@ -27398,6 +26075,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         holder[0] = PlatformScheduler.globalRepeating(this, () -> {
             int current = elapsed.addAndGet(10);
             boolean empty = Bukkit.getOnlinePlayers().isEmpty();
+            if (!empty && current == 200) {
+                // A transfer can be refused while the proxy is busy; ask once more for anyone still here.
+                String limbo = this.settings.getString("limbo.server-name", "limbo");
+                for (Player p : Bukkit.getOnlinePlayers()) {
+                    try { this.connectToServer(p, limbo); } catch (Exception ignored) {}
+                }
+            }
             if (empty || current >= 400) {   // 400 ticks = 20s timeout
                 if (holder[0] != null) holder[0].cancel();
                 this.getLogger().info("[LimboMaint] " + (empty ? "all players moved off" : "20s timeout") + " — saving + restarting SMP.");
@@ -27466,8 +26150,25 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         String sub = args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "status";
         switch (sub) {
             case "start", "on" -> {
-                sender.sendMessage(this.legacyColorize("&#00BFFFStarting limbo maintenance…"));
-                this.startLimboMaintenance(sender);
+                if (!this.limboMaintenanceRunning.compareAndSet(false, true)) {
+                    sender.sendMessage(this.legacyColorize("&7Limbo maintenance is already starting."));
+                    return;
+                }
+                sender.sendMessage(this.legacyColorize("&7Checking the limbo, database and relaunch script..."));
+                boolean playersOnline = !Bukkit.getOnlinePlayers().isEmpty();
+                this.runAsyncTask(() -> {
+                    String problem = this.limboMaintenancePreflight(playersOnline);
+                    PlatformScheduler.globalNow(this, () -> {
+                        if (problem != null) {
+                            this.limboMaintenanceRunning.set(false);
+                            this.getLogger().warning("[LimboMaint] not started: " + problem);
+                            sender.sendMessage(this.legacyColorize("&cMaintenance not started: " + problem + ". Nothing was changed."));
+                            return;
+                        }
+                        sender.sendMessage(this.legacyColorize("&#00BFFFStarting limbo maintenance…"));
+                        this.startLimboMaintenance(sender);
+                    });
+                });
             }
             case "stop", "off" -> {
                 this.runAsyncTask(() -> {
@@ -27483,6 +26184,33 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             default -> sender.sendMessage(this.legacyColorize(
                 "&7Online: &f" + Bukkit.getOnlinePlayers().size() + "&7. Usage: &#00BFFF/limbomaint <start|stop|status>"));
+        }
+    }
+
+    private final java.util.concurrent.atomic.AtomicBoolean limboMaintenanceRunning = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * Everything a full-stop maintenance depends on, checked before anything is stopped: the relaunch script that
+     * brings this server back, the database the limbo and the return signal run through, and (with players online)
+     * a limbo that is actually running, from the heartbeat it writes to limbo_control. Returns null when safe.
+     */
+    private String limboMaintenancePreflight(boolean playersOnline) {
+        String relaunch = this.settings.getString("scripts.relaunch", "scripts/admin-restart.sh");
+        File script = new File(relaunch);
+        if (!script.isAbsolute()) script = new File(System.getProperty("user.dir"), relaunch);
+        if (!script.isFile()) return "the relaunch script " + relaunch + " is missing";
+        try (Connection c = this.openSyncConnection();
+             PreparedStatement ps = c.prepareStatement(
+                 "SELECT TIMESTAMPDIFF(SECOND, limbo_seen_at, CURRENT_TIMESTAMP) FROM limbo_control WHERE id=1");
+             ResultSet rs = ps.executeQuery()) {
+            if (!playersOnline) return null;
+            if (!rs.next()) return "the limbo has never checked in";
+            long age = rs.getLong(1);
+            if (rs.wasNull()) return "the limbo has never checked in";
+            if (age > 20L) return "the limbo has not checked in for " + age + "s";
+            return null;
+        } catch (Exception ex) {
+            return "the database is unreachable (" + ex.getMessage() + ")";
         }
     }
 
@@ -27579,12 +26307,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         DialogCompat.show(p, dialog);
     }
 
-    // Bulk-delete all anticheat violations for a player (false-positive cleanup).
-    private int clearSuspiciousFlags(String targetUuid) {
-        String sql = "DELETE FROM anticheat_violations WHERE player_uuid = ?";
+    // Review active anticheat violations without destroying the event history.
+    private int clearSuspiciousFlags(String targetUuid, String reviewerUuid) {
+        String sql = "UPDATE anticheat_violations SET reviewed = 1, reviewed_at = NOW(), "
+            + "reviewed_by = ?, action_taken = 'DISMISSED' WHERE player_uuid = ? AND reviewed = 0";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, targetUuid);
+            ps.setString(1, reviewerUuid);
+            ps.setString(2, targetUuid);
             return ps.executeUpdate();
         } catch (Exception ex) {
             this.getLogger().warning("Failed clearing suspicious flags for " + targetUuid + ": " + ex.getMessage());
@@ -27594,7 +26324,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private java.util.List<SuspiciousPlayerEntry> loadSuspiciousPlayers(int limit) {
         java.util.List<SuspiciousPlayerEntry> results = new java.util.ArrayList<>();
-        String sql = "SELECT player_uuid, player_name, COUNT(*) as violation_count, violation_type, severity, SUM(vl_points) as total_vl, MAX(severity) as max_severity FROM anticheat_violations WHERE reported_at > DATE_SUB(NOW(), INTERVAL 7 DAY) GROUP BY player_uuid ORDER BY violation_count DESC, total_vl DESC LIMIT ?";
+        String sql = "SELECT player_uuid, MAX(player_name) as player_name, COUNT(*) as violation_count, "
+            + "MAX(violation_type) as violation_type, MAX(severity) as severity, "
+            + "SUM(vl_points) as total_vl, MAX(severity) as max_severity "
+            + "FROM anticheat_violations WHERE reviewed = 0 GROUP BY player_uuid "
+            + "ORDER BY violation_count DESC, total_vl DESC LIMIT ?";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, limit);
@@ -27878,8 +26612,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             String uuidStr = targetUuid.toString();
             java.util.List<String[]> entries = new java.util.ArrayList<>();
-            // Orders created
-            String orderSql = "SELECT 'ORDER_CREATE', item_key, amount_total, unit_price, amount_total * unit_price, logged_at FROM transaction_audit_log WHERE player_uuid=? ORDER BY logged_at DESC LIMIT 100";
+            // Audited market events (sales, purchases, orders) for this player.
+            String orderSql = "SELECT event_type, item_key, amount, unit_price, total_price, logged_at FROM transaction_audit_log WHERE player_uuid=? ORDER BY logged_at DESC LIMIT 100";
             try (Connection conn = this.openSyncConnection();
                  PreparedStatement ps = conn.prepareStatement(orderSql)) {
                 ps.setString(1, uuidStr);

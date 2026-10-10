@@ -7,6 +7,7 @@ import com.velocitypowered.api.event.connection.LoginEvent;
 import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.ServerPreConnectEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
+import com.velocitypowered.api.event.proxy.ProxyPingEvent;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
@@ -58,6 +59,9 @@ public class PizzaProxyGuard {
      * constructs and registers. See ChatRelay for what it handles.
      */
     private ChatRelay chatRelay;
+    private Admission admission;
+    private Screens screens = new Screens(new Properties());
+    private Properties config = new Properties();
 
     /** Backends currently flagged in maintenance_state, refreshed on a timer. */
     private volatile Set<String> maintenanceUnits = Set.of();
@@ -76,7 +80,6 @@ public class PizzaProxyGuard {
     private String[] devAllowedPermissions = { "pizzasmp.dev.access", "group.dev", "group.admin", "group.sradmin" };
     private String devDenyMessage =
         "&fWe don't know what happened here, but it looks like you attempted to connect to a server that doesn't exist";
-    private String emergencyMessage = "&cWe've encountered an issue while trying to connect you to {server}";
     /** Datacentre/region code shown in player-facing process names (goliath2-NY). */
     private String regionCode = "NY";
 
@@ -108,12 +111,21 @@ public class PizzaProxyGuard {
         // is up, which during maintenance is exactly what it is not.
         this.proxy.getScheduler().buildTask(this, this::pollMaintenance)
             .delay(2, TimeUnit.SECONDS).repeat(5, TimeUnit.SECONDS).schedule();
+        // Optional: while maintenance.flag exists, players already online (not bypassed) are disconnected too.
+        if (Boolean.parseBoolean(this.config.getProperty("maintenance.evict-online", "false").trim())) {
+            this.proxy.getScheduler().buildTask(this, this::evictDuringLockout)
+                .delay(2, TimeUnit.SECONDS).repeat(2, TimeUnit.SECONDS).schedule();
+        }
         // Bring up the chat relay and register it as a listener in its own right so its
         // @Subscribe methods fire. It needs `this` because Velocity keys scheduled tasks
         // and channel registration on the registered plugin instance, not on the helper.
         this.chatRelay = new ChatRelay(this, this.proxy, this.logger, this.dataDir);
         this.proxy.getEventManager().register(this, this.chatRelay);
         this.chatRelay.onProxyInit(event);
+        if (Boolean.parseBoolean(this.config.getProperty("admission.enabled", "true").trim())) {
+            this.admission = new Admission(this, this.proxy, this.logger, this.chatRelay, this.screens, this.smpServerName, this.config);
+            this.admission.start();
+        }
         this.logger.info("PizzaProxyGuard active: backend='{}', fallback='{}', chat relay on.",
             this.smpServerName, this.limboServerName);
     }
@@ -159,8 +171,12 @@ public class PizzaProxyGuard {
         String fromServer = event.getServer() != null ? event.getServer().getServerInfo().getName() : "";
         // Player was kicked mid-connect (the SMP refused / died during handshake): don't dump to limbo.
         if (event.kickedDuringServerConnect()) {
-            if (this.smpServerName.equalsIgnoreCase(fromServer)) {
-                event.setResult(KickedFromServerEvent.DisconnectPlayer.create(this.maintenanceComponent()));
+            if (this.smpServerName.equalsIgnoreCase(fromServer) && event.getPlayer().getCurrentServer().isEmpty()) {
+                // A new player the backend turned away: show its own reason when it gave one (a ban, a data
+                // failsafe), otherwise our screen.
+                Component reason = event.getServerKickReason().orElse(null);
+                event.setResult(KickedFromServerEvent.DisconnectPlayer.create(
+                    reason != null ? reason : this.screens.unavailable(this.prettyServerName(fromServer))));
             }
             return;
         }
@@ -173,6 +189,16 @@ public class PizzaProxyGuard {
             : net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
                 .serialize(reason).toLowerCase(Locale.ROOT).trim();
         if (this.isShutdownReason(reasonText)) {
+            if (!Boolean.parseBoolean(this.config.getProperty("kick-fallback-to-limbo", "true").trim())) {
+                // No implicit holding: a backend that goes away disconnects its players. Deliberate holds move
+                // players to the limbo explicitly before the backend stops.
+                event.setResult(KickedFromServerEvent.DisconnectPlayer.create(this.maintenanceLockout()
+                    ? this.maintenanceComponent()
+                    : reasonText.isEmpty() || reasonText.contains("connection") || reasonText.contains("problem")
+                        ? this.screens.unavailable(this.prettyServerName(fromServer))
+                        : this.screens.restarting()));
+                return;
+            }
             // Clean shutdown / maintenance: preserve the limbomaint hold by redirecting to limbo.
             RegisteredServer limbo = this.proxy.getServer(this.limboServerName).orElse(null);
             if (limbo != null) {
@@ -182,14 +208,13 @@ public class PizzaProxyGuard {
         }
         // A real moderation kick / ban reached the backend: disconnect the player with that reason
         // instead of letting them slip into limbo.
-        event.setResult(KickedFromServerEvent.DisconnectPlayer.create(
-            reason != null ? reason : Component.text("You were removed from the server.")));
+        event.setResult(KickedFromServerEvent.DisconnectPlayer.create(reason != null ? reason : this.screens.removed()));
     }
 
     /** Refresh maintenance state from the shared DB. targets_csv is a generic list of
      *  unit names, so under distributed Folia these become process/slice ids unchanged. */
     private void pollMaintenance() {
-        if (this.chatRelay == null) return;
+        if (this.chatRelay == null || !this.chatRelay.databaseConfigured()) return;
         try (Connection c = this.chatRelay.openConnection();
              PreparedStatement ps = c.prepareStatement(
                  "SELECT active, targets_csv, message FROM maintenance_state WHERE id=1 LIMIT 1");
@@ -327,6 +352,13 @@ public class PizzaProxyGuard {
         return this.dataDir.resolve("maintenance.flag").toFile().isFile();
     }
 
+    private void evictDuringLockout() {
+        if (!this.maintenanceLockout()) return;
+        for (Player player : this.proxy.getAllPlayers()) {
+            if (!this.isBypassed(player.getUsername())) player.disconnect(this.maintenanceComponent());
+        }
+    }
+
     /** A username on any non-comment line of maintenance.flag (comma-separated) may still connect. */
     private boolean isBypassed(String username) {
         if (username == null || username.isEmpty()) return false;
@@ -344,9 +376,31 @@ public class PizzaProxyGuard {
     }
 
     private Component maintenanceComponent() {
-        String msg = this.maintenanceMotd == null || this.maintenanceMotd.isBlank()
-            ? this.maintenanceMessage : this.maintenanceMotd;
-        return AMP.deserialize(msg);
+        String file = this.maintenanceLockout() ? this.maintenanceMotdFile() : null;
+        String msg = file != null ? file
+            : this.maintenanceMotd == null || this.maintenanceMotd.isBlank() ? this.maintenanceMessage : this.maintenanceMotd;
+        return this.screens.maintenance(msg);
+    }
+
+    /** plugins/pizzaproxyguard/maintenance.motd (legacy & codes), or null when absent or empty. */
+    private String maintenanceMotdFile() {
+        try {
+            java.nio.file.Path file = this.dataDir.resolve("maintenance.motd");
+            if (!java.nio.file.Files.isRegularFile(file)) return null;
+            String text = java.nio.file.Files.readString(file).trim();
+            return text.isEmpty() ? null : text;
+        } catch (java.io.IOException e) {
+            return null;
+        }
+    }
+
+    /** During the maintenance lockout the server list shows the maintenance message instead of the normal MOTD. */
+    @Subscribe
+    public void onPing(ProxyPingEvent event) {
+        if (!this.maintenanceLockout()) return;
+        String text = this.maintenanceMotdFile();
+        Component description = AMP.deserialize(text != null ? text : "&7Under maintenance. Please try again soon.");
+        event.setPing(event.getPing().asBuilder().description(description).build());
     }
 
     /**
@@ -367,12 +421,12 @@ public class PizzaProxyGuard {
             case "maintenance" -> 4;
             default -> 0;
         };
-        return "goliath" + id + "-" + this.regionCode;
+        return id == 0 ? "the server" : "goliath" + id + "-" + this.regionCode;
     }
 
     /** Tier 3 emergency disconnect text. */
     private Component emergencyComponent(String server) {
-        return AMP.deserialize(this.emergencyMessage.replace("{server}", prettyServerName(server)));
+        return this.screens.unavailable(prettyServerName(server));
     }
 
     private void loadConfig() {
@@ -388,7 +442,28 @@ public class PizzaProxyGuard {
                     + "# Use & color codes and \\n for newlines.\n"
                     + "maintenance-message=" + this.maintenanceMessage.replace("\n", "\\n") + "\n"
                     + "# Comma-separated substrings that mark a kick as a normal shutdown (fall to limbo).\n"
-                    + "shutdown-reasons=server closed,shutdown,restart,maintenance,closed\n");
+                    + "shutdown-reasons=server closed,shutdown,restart,maintenance,closed\n"
+                    + "# While plugins/pizzaproxyguard/maintenance.flag exists, also disconnect players already online\n"
+                    + "# (usernames listed in the flag file are exempt).\n"
+                    + "maintenance.evict-online=false\n"
+                    + "# false: a backend that shuts down or drops its players disconnects them (restarting or connection lost\n"
+                    + "# screen) instead of sending them to limbo-server.\n"
+                    + "kick-fallback-to-limbo=true\n"
+                    + "# Admission: new players and switches onto smp-server wait (their login just takes longer) while the\n"
+                    + "# backend is down or booting, the database is unreachable, their data is still held by another server,\n"
+                    + "# or max-concurrent players are already joining. A slot frees settle-seconds after a player has joined.\n"
+                    + "admission.enabled=true\n"
+                    + "admission.max-concurrent=3\n"
+                    + "admission.settle-seconds=6\n"
+                    + "# Logins wait at most login-wait-seconds (25 max, inside the client timeout); switches switch-wait-seconds.\n"
+                    + "admission.login-wait-seconds=20\n"
+                    + "admission.switch-wait-seconds=60\n"
+                    + "# Comma-separated usernames that skip admission.\n"
+                    + "admission.bypass=\n"
+                    + "# Disconnect screens: brand line, accent colour and an optional support line (for example a Discord link).\n"
+                    + "screen.brand=\n"
+                    + "screen.color=#00BFFF\n"
+                    + "screen.support=\n");
                 return;
             }
             Properties props = new Properties();
@@ -396,6 +471,8 @@ public class PizzaProxyGuard {
             this.smpServerName = props.getProperty("smp-server", this.smpServerName).trim();
             this.limboServerName = props.getProperty("limbo-server", this.limboServerName).trim();
             this.maintenanceMessage = props.getProperty("maintenance-message", this.maintenanceMessage).replace("\\n", "\n");
+            this.config = props;
+            this.screens = new Screens(props);
             String needles = props.getProperty("shutdown-reasons", "");
             if (!needles.isBlank()) {
                 String[] parts = needles.toLowerCase(Locale.ROOT).split(",");
