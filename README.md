@@ -1,7 +1,7 @@
 # SMP-Core
 
 A plugin suite for survival servers on Paper: a player-driven economy, quality-of-life commands, duels, and staff
-tooling, for a single server or a Velocity network. MIT licensed.
+tooling, for a single server or a Velocity network. Apache 2.0 licensed.
 
 Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG.md).
 
@@ -112,4 +112,4 @@ decompiler structure and are cleaned up as they are touched.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Maintained by FolksyPizza.
+Apache 2.0. See [LICENSE](LICENSE). Maintained by FolksyPizza.

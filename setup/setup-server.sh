@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================================
 # SMP-Core suite — interactive server setup / re-brand installer.
-# Copyright (c) 2025-2026 William W. / FolksyPizza. MIT License.
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 #
 # What it does (all interactive, with sane defaults):
 #   1. picks/downloads the Paper build you want (or uses the bundled one)
@@ -57,7 +58,7 @@ echo "==== $(basename "$0") — brand + provision a server from the SMP-Core sui
 accept_legal(){
   local lic="$ROOT/LICENSE"
   echo
-  echo "${C_OK}This software is open source under the MIT License.${C_OFF}"
+  echo "${C_OK}This software is open source under the Apache License, Version 2.0.${C_OFF}"
   [ -f "$lic" ] && echo "  License: $lic"
   echo "  Use it for anything, including commercial work. Keep the license file."
   echo "  You must also comply with the Mojang EULA to run a Minecraft server."

@@ -1,0 +1,6 @@
+SMP-Core
+Copyright 2025-2026 William W. (FolksyPizza)
+
+PizzaProxyGuard bundles MariaDB Connector/J 3.5.4 under the LGPL-2.1.
+Source: https://github.com/mariadb-corporation/mariadb-connector-j/tree/3.5.4
+The driver license is included as META-INF/mariadb-connector-j-LICENSE.

@@ -4,7 +4,7 @@ import java.time.ZoneOffset;
 /*
  * PunishDropPlugin — part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Licensed under the MIT License (see LICENSE). No feature is gated or paid.
+ * Licensed under the Apache License, Version 2.0 (see LICENSE). No feature is gated or paid.
  */
 
 import java.nio.file.AtomicMoveNotSupportedException;

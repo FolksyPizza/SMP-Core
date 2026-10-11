@@ -83,6 +83,7 @@ Changes since 1.0.0-beta.
   readiness file (`admission.ready-file`) so admission works without a network database.
 
 ### Changed
+- License changed from MIT to Apache 2.0. Releases before 1.0.0 remain under MIT.
 - Every permission the suite checks for its own features uses the `pizzasmp.` prefix. Renamed: `sethome.use` to
   `pizzasmp.home.use`, `sethome.admin` to `pizzasmp.home.admin`, `sethome.maxhomes.5` to `pizzasmp.homes.5`,
   `essentials.eco` (and its `give`, `take`, `set`, `reset` nodes) to `pizzasmp.admin.eco`, and `essentials.fly` to

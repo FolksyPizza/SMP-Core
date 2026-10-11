@@ -1,4 +1,5 @@
-// Copyright (c) 2025-2026 William W. (FolksyPizza). MIT License.
+// Copyright (c) 2025-2026 William W. (FolksyPizza).
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
 // SMP-Core build: one jar per plugin, from a clean clone, with dependencies from public repositories.
 //
 //   ./gradlew build    compiles every plugin; jars land in build/dist/
@@ -116,6 +117,10 @@ subprojects {
 
     tasks.named<Jar>("jar") {
         archiveFileName.set("${project.name}.jar")
+        from(rootProject.files("LICENSE", "NOTICE")) { into("META-INF") }
+        if (project.name in velocityPlugins) {
+            from(rootProject.file("licenses/mariadb-connector-j-LICENSE")) { into("META-INF") }
+        }
         manifest {
             attributes("Implementation-Version" to suiteVersion, "Build-Commit" to buildCommit)
         }
