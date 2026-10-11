@@ -11,6 +11,10 @@ All notable changes to SMP-Core are documented here. The format is based on
 Changes since 1.0.0-beta.
 
 ### Added
+- A Gradle build that works from a clean clone: `./gradlew build` compiles every plugin with dependencies from public
+  repositories and collects the jars in `build/dist/`.
+- Continuous integration: every push and pull request builds the suite and boots it on Paper, failing on any plugin
+  error (`tools/ci/boot-check.sh`).
 - `/sus` opens the inventory review panel by default; its Search button opens a player-name dialog on supported
   Java clients, while `/sus <player>` provides direct lookup on Java and Bedrock. Suspect summaries group retained
   flags by check name, so staff can see reasons such as FastBreak rather than a generic anticheat label.

@@ -76,10 +76,15 @@ HappyLand gets HappyLand+ and HappyLand++).
 
 ## Building
 
-Prebuilt jars are on the Releases page. A build that works from a clean clone is planned
-([UPCOMING.md](UPCOMING.md)). Until then, each plugin compiles with `javac --release 21` against Paper 1.21.11 and
-the plugins it depends on (ProtocolLib, Vault, LuckPerms; PizzaProxyGuard against Velocity). Plugins that import
-`dev.pizzasmp.common` compile the `PizzaCommon/src` sources together with their own.
+Prebuilt jars are on the Releases page. To build from source you need Java 21 or newer; Gradle comes with the
+wrapper and fetches every dependency from public repositories:
+
+```sh
+./gradlew build
+```
+
+The jars land in `build/dist/`. `tools/ci/boot-check.sh` starts a throwaway Paper server with them and fails on any
+plugin error; CI runs both on every push and pull request.
 
 ## Status
 

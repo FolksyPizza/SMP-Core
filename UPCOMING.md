@@ -6,7 +6,6 @@ Planned work for SMP-Core. This is direction, not a commitment or a schedule. Op
 
 | Item | Summary |
 | --- | --- |
-| Portable build | One build that works from a clean clone, with dependencies resolved from public repositories. |
 | Version range | Paper 26.x (built and tested on Java 25), and a player choice of inventory menus over dialogs. 1.0.0 is tested on Paper 1.21.11. |
 
 ## Later

@@ -9,7 +9,9 @@
 # Built plugin jars are published on GitHub Releases, not committed to the tree.
 # Delete this line if you would rather commit jars directly.
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 dist/
+.gradle/
 
 # OS / editor noise
 .DS_Store
