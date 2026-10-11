@@ -80,6 +80,7 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
    private PlatformScheduler.TaskHandle dupeSweepTask;
 
    public void onEnable() {
+      dev.pizzasmp.common.SuiteBanner.print(this);
       this.saveDefaultConfig();
       this.offenseLogPath = this.getDataFolder().toPath().resolve("offenses.log");
       dev.pizzasmp.common.SuiteStorage storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "ruleguard");

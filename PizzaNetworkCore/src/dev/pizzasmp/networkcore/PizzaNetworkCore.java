@@ -915,6 +915,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private record SpectateCandidate(Player player, UUID id, String name) { }
 
     public void onEnable() {
+        dev.pizzasmp.common.SuiteBanner.print(this);
         this.notificationLifecycleGeneration = this.notificationGenerationSequence.incrementAndGet();
         this.notificationPollingActive = true;
         this.saveDefaultConfig();

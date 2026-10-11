@@ -30,7 +30,7 @@ val velocityApi = "com.velocitypowered:velocity-api:3.5.1"
 // Plugins that compile the shared PizzaCommon sources into their own jar.
 val usesCommon = setOf(
     "PizzaAdminTools", "PizzaChatGuard", "PizzaEnderchest", "PizzaLimbo", "PizzaNetworkCore",
-    "PizzaPunishment", "PizzaRuleGuard", "PizzaTune",
+    "PizzaPunishment", "PizzaRuleGuard", "PizzaSpawnRules", "PizzaTune",
 )
 
 // One suite version: every plugin descriptor must carry the same version.

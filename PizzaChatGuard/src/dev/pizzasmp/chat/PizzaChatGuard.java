@@ -213,6 +213,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        dev.pizzasmp.common.SuiteBanner.print(this);
         saveDefaultConfig();
         if (getConfig().getBoolean("chat-log.enabled", true)) {
             chatLog = new ChatLog(getDataFolder(), getConfig().getInt("chat-log.retention-days", 90), getLogger());

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="220" viewBox="0 0 960 220" role="img" aria-label="SMP-Core">
+  <title>SMP-Core</title>
+  <g transform="translate(60 30)" stroke="#0D1117" stroke-width="3" stroke-linejoin="round">
+    <path d="M80 0 L160 40 L80 80 L0 40 Z" fill="#7FA7D9"/>
+    <path d="M0 40 L80 80 L80 160 L0 120 Z" fill="#3D6BA8"/>
+    <path d="M160 40 L80 80 L80 160 L160 120 Z" fill="#2A4F80"/>
+    <path d="M40 20 L120 60 M120 20 L40 60" stroke-width="2" opacity="0.35"/>
+  </g>
+  <text x="260" y="118" font-family="Inter, 'Segoe UI', -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="88" font-weight="700" fill="#E6EDF3">SMP-Core</text>
+  <text x="264" y="166" font-family="Inter, 'Segoe UI', -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="26" fill="#9198A1">A plugin suite for survival servers on Paper</text>
+</svg>

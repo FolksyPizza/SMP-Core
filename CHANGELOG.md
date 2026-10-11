@@ -16,6 +16,8 @@ Changes since 1.0.0-beta.
 - `pizzasmp.chatguard.owner` marks a player as the owner for ChatGuard, independent of group names.
 - Every permission the suite checks is declared in its `plugin.yml`, so permission plugins list it with its
   intended default.
+- A startup banner: the first SMP-Core plugin to enable prints the suite version, license and installed modules,
+  once per server start.
 - A Gradle build that works from a clean clone: `./gradlew build` compiles every plugin with dependencies from public
   repositories and collects the jars in `build/dist/`.
 - Continuous integration: every push and pull request builds the suite and boots it on Paper, failing on any plugin
@@ -136,7 +138,9 @@ Changes since 1.0.0-beta.
   server's tier names. Without `branding.yml`, the short name and tiers default to the neutral brand.
 - Items dragged into a PizzaPunishment moderation menu were lost when it closed; drags into those menus are now
   blocked like clicks.
-- PizzaSpawnRules no longer declares Folia support: it schedules through the Bukkit scheduler, which fails on Folia.
+- PizzaSpawnRules declared Folia support but scheduled through the Bukkit scheduler, which fails on Folia. It now
+  uses Paper's global region and player schedulers (no plugin in the suite uses the Bukkit scheduler) and no longer
+  declares Folia support, since its zone checks read players from the global tick.
 - Server switches no longer race the final save. The server a player is on holds their state row and releases it
   in the same write as the final save; the next server waits for that release (or for the hold to expire after a
   crash) before loading.

@@ -10,6 +10,7 @@ Planned work for SMP-Core. This is direction, not a commitment or a schedule. Op
 | Network homes | `/home` and `/homes` for homes in a world on another backend: transfer first, then teleport (network support is in beta) |
 | Storage | Move home and SuiteStorage reads and writes off the main thread |
 | Paper API | Cross-server RTP arrival on `AsyncPlayerSpawnLocationEvent` instead of the deprecated `PlayerSpawnLocationEvent` |
+| Hub configuration | PizzaSpawnRules role, protected zone and lobby spawn in its config instead of fixed ports and coordinates |
 
 ## Later
 

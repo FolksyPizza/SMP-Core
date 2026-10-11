@@ -1,3 +1,17 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img alt="SMP-Core" src="assets/banner-light.svg" width="640">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://github.com/FolksyPizza/SMP-Core/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/FolksyPizza/SMP-Core"></a>
+  <a href="https://github.com/FolksyPizza/SMP-Core/actions/workflows/build.yml"><img alt="Build" src="https://github.com/FolksyPizza/SMP-Core/actions/workflows/build.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
+  <img alt="Paper 1.21.11" src="https://img.shields.io/badge/Paper-1.21.11-informational">
+</p>
+
 # SMP-Core
 
 A plugin suite for survival servers on Paper: a player-driven economy, quality-of-life commands, duels, and staff
@@ -5,7 +19,7 @@ tooling, for a single server or a Velocity network. Apache 2.0 licensed.
 
 Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG.md).
 
-- 10 plugins and a shared library, about 49,000 lines of Java, plus two datapacks
+- 10 plugins and a shared library, about 51,000 lines of Java, plus two datapacks
 - More than 100 commands ([COMMANDS.md](COMMANDS.md))
 - Built and tested on Paper 1.21.11, where it has run in production
 
@@ -20,10 +34,10 @@ Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG
 | PizzaRuleGuard | Rule enforcement and abuse detection |
 | EnderchestExpander | 54-slot ender chests with persistent storage and staff inspection (`/endersee`) |
 | PizzaTune | Live view-distance and chunk-rate tuning |
-| PizzaSpawnRules | Hub protections and double jump. Hub servers only: its zone grants flight |
+| PizzaSpawnRules | Hub protections and double jump around 0,0. Active only on server port 25566 (hub) or 25569 (maintenance mirror); idle elsewhere |
 | PizzaLimbo | Limbo backend that holds players during maintenance (proxy networks) |
 | PizzaProxyGuard | Velocity plugin: holds new joins while the backend is down and turns moderation kicks into clean disconnects |
-| PizzaCommon | Shared library compiled into the plugins that use it: storage and a scheduler facade |
+| PizzaCommon | Shared library compiled into the plugins that use it: storage, menu locking, the startup banner and a facade over Paper's schedulers |
 
 ## Requirements
 

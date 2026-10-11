@@ -24,7 +24,7 @@ import org.bukkit.event.entity.*;
 import org.bukkit.event.player.*;
 import org.bukkit.event.player.PlayerInteractAtEntityEvent;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitTask;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.util.Vector;
 
 import java.util.Map;
@@ -61,6 +61,7 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
 
     @Override
     public void onEnable() {
+        dev.pizzasmp.common.SuiteBanner.print(this);
         saveDefaultConfig();
         int port = Bukkit.getPort();
         if (port != 25566 && port != 25569) {
@@ -74,11 +75,12 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
         Bukkit.getPluginManager().registerEvents(this, this);
         enforceWorldRules();
         // World instances are not guaranteed to be available during onEnable.
-        Bukkit.getScheduler().runTaskLater(this, this::runSpawnCleanupPass, 20L);
-        Bukkit.getScheduler().runTaskTimer(this, this::enforceWorldRules, 1L, 200L);
-        Bukkit.getScheduler().runTaskTimer(this, this::ensureNpcStations, 40L, 200L);
+        var global = getServer().getGlobalRegionScheduler();
+        global.runDelayed(this, task -> runSpawnCleanupPass(), 20L);
+        global.runAtFixedRate(this, task -> enforceWorldRules(), 1L, 200L);
+        global.runAtFixedRate(this, task -> ensureNpcStations(), 40L, 200L);
         // Keep client flight permission synced so double-jump never gets stuck.
-        Bukkit.getScheduler().runTaskTimer(this, () -> {
+        global.runAtFixedRate(this, task -> {
             for (Player p : Bukkit.getOnlinePlayers()) {
                 updateDoubleJumpState(p);
             }
@@ -342,13 +344,13 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
         e.joinMessage(null);
-        Bukkit.getScheduler().runTask(this, () -> {
+        e.getPlayer().getScheduler().run(this, task -> {
             Player p = e.getPlayer();
             // Join location policy is handled by PizzaNetworkCore sync rules.
             p.setFallDistance(0f);
             p.setFireTicks(0);
             updateDoubleJumpState(p);
-        });
+        }, null);
     }
 
     @EventHandler
@@ -365,7 +367,7 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
         if (w == null) return;
         Location spawn = lobbySpawn(w);
         e.setRespawnLocation(spawn);
-        Bukkit.getScheduler().runTask(this, () -> {
+        e.getPlayer().getScheduler().run(this, task -> {
             Player p = e.getPlayer();
             if (!p.isOnline()) return;
             p.teleport(spawn);
@@ -375,7 +377,7 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
             p.setFoodLevel(20);
             p.setSaturation(20.0f);
             p.setExhaustion(0.0f);
-        });
+        }, null);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -583,7 +585,7 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
         if (command == null || command.isBlank()) {
             return;
         }
-        Bukkit.getScheduler().runTask(this, () -> Bukkit.dispatchCommand(player, command));
+        player.getScheduler().run(this, task -> Bukkit.dispatchCommand(player, command), null);
     }
 
     // Silent, unlimited double jump inside spawn. No cooldown, no messages, no sounds.
@@ -639,7 +641,7 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
         if (gateDebug) {
             getLogger().info("[gate-debug] stage=start uuid=" + uuid + " server_port=" + Bukkit.getPort() + " command=" + command);
         }
-        BukkitTask task = Bukkit.getScheduler().runTaskTimer(this, new Runnable() {
+        Runnable countdown = new Runnable() {
             private int secondsRemaining = 2;
 
             @Override
@@ -664,8 +666,12 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
                 live.sendActionBar("§7Teleporting in §9" + secondsRemaining + "§7s");
                 secondsRemaining--;
             }
-        }, 0L, 20L);
-        pendingGateTeleports.put(uuid, new PendingGateTeleport(task));
+        };
+        ScheduledTask task = player.getScheduler().runAtFixedRate(this, scheduled -> countdown.run(),
+            () -> pendingGateTeleports.remove(uuid), 1L, 20L);
+        if (task != null) {
+            pendingGateTeleports.put(uuid, new PendingGateTeleport(task));
+        }
     }
 
     private void cancelPendingGateTeleport(Player player, boolean notify) {
@@ -786,7 +792,7 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
 
     @EventHandler
     public void onTeleportDoubleJumpSync(PlayerTeleportEvent e) {
-        Bukkit.getScheduler().runTask(this, () -> updateDoubleJumpState(e.getPlayer()));
+        e.getPlayer().getScheduler().run(this, task -> updateDoubleJumpState(e.getPlayer()), null);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -809,23 +815,23 @@ public final class PizzaSpawnRulesPlugin extends JavaPlugin implements Listener 
         Vector jump = p.getLocation().getDirection().normalize().multiply(1.0).setY(0.72);
         p.setVelocity(jump);
 
-        Bukkit.getScheduler().runTask(this, () -> {
+        p.getScheduler().run(this, task -> {
             if (p.isOnline() && inProtectedZone(p.getLocation()) && supportsDoubleJump(p) && p.isOnGround()) {
                 p.setAllowFlight(true);
             }
-        });
-        Bukkit.getScheduler().runTaskLater(this, () -> {
+        }, null);
+        p.getScheduler().runDelayed(this, task -> {
             if (p.isOnline() && inProtectedZone(p.getLocation()) && supportsDoubleJump(p) && p.isOnGround()) {
                 p.setAllowFlight(true);
                 p.setFlying(false);
             }
-        }, 1L);
+        }, null, 1L);
     }
 
     private static final class PendingGateTeleport {
-        private final BukkitTask task;
+        private final ScheduledTask task;
 
-        private PendingGateTeleport(BukkitTask task) {
+        private PendingGateTeleport(ScheduledTask task) {
             this.task = task;
         }
     }

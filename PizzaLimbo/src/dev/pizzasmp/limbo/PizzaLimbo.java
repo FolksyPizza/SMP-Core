@@ -157,6 +157,7 @@ public final class PizzaLimbo extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        dev.pizzasmp.common.SuiteBanner.print(this);
         shuttingDown.set(false);
         lifecycleGeneration.incrementAndGet();
         this.saveDefaultConfig();

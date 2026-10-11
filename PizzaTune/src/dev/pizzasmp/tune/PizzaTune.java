@@ -36,6 +36,7 @@ public final class PizzaTune extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        dev.pizzasmp.common.SuiteBanner.print(this);
         getCommand("viewdistance").setExecutor(this);
         getCommand("chunkspeeds").setExecutor(this);
         getLogger().info("PizzaTune ready. /viewdistance and /chunkspeeds are live-tunable.");

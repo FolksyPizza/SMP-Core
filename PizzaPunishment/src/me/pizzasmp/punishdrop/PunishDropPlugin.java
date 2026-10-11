@@ -194,6 +194,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        dev.pizzasmp.common.SuiteBanner.print(this);
         shuttingDown = false;
         saveDefaultConfig();
         reloadConfig();

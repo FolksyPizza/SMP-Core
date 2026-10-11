@@ -623,6 +623,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     @Override
     public void onEnable() {
+        dev.pizzasmp.common.SuiteBanner.print(this);
         saveDefaultConfig();
         loadBranding();
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "admintools");

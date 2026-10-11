@@ -89,6 +89,7 @@ public final class EnderchestExpander extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        dev.pizzasmp.common.SuiteBanner.print(this);
         this.acceptingInspections = true;
         this.acceptingIo = true;
         this.enderchestFolder = this.getDataFolder().toPath().resolve("enderchests");
