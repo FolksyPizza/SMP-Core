@@ -1,7 +1,7 @@
 name: PizzaSpawnRules
 version: 1.0.0
 main: dev.pizzasmp.spawnrules.PizzaSpawnRulesPlugin
-api-version: '1.21'
+api-version: '1.21.7'
 authors: [FolksyPizza]
 description: Lobby spawn protections and silent unlimited double-jump
 commands:

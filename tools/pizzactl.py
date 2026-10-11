@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 """
-ExampleSMP Admin TUI — a terminal control panel for server admins.
+ExampleSMP Admin TUI: a terminal control panel for server admins.
 
 Modules:
   - Dashboard       : server status, online count, recent activity
@@ -447,7 +449,7 @@ def build_online():
                 names = tail[idx + 1].split("]: ")[-1] if "]: " in tail[idx + 1] else tail[idx + 1]
                 lines.append("Online: " + names)
         else:
-            lines.append("Could not parse online list — check console.")
+            lines.append("Could not parse online list: check console.")
     except Exception as e:
         lines.append(f"Error: {e}")
     lines.append("")
@@ -642,7 +644,7 @@ def run_maintenance(stdscr, sel):
                  "[f] Maintenance OFF   [s] Status   [m] Set MOTD",
                  "[w] Allow player during kick-maintenance",
                  "",
-                 "Future: MIRROR live-update (2nd server, same worlds) — deferred."]
+                 "Future: MIRROR live-update (2nd server, same worlds): deferred."]
         render_content(stdscr, sel, "Maintenance", lines, 0, "F/E/T frozen · o/f/s/m/w kick · ←/Esc back")
         k = stdscr.getch()
         if k in (27, curses.KEY_LEFT, ord("q")):
@@ -725,11 +727,11 @@ SECTIONS = [
     {"name": "Players",     "desc": "Look up any player by name (with autocomplete) → balance, shards, K/D, lifetime sell_earned, sell history, recent transactions, anticheat flags and punishment history.", "run": run_players},
     {"name": "Economy",     "desc": "Give / take / set a player's money and give shards (k/m/b/t). Shows the current balance and links to the full profile.", "run": run_economy},
     {"name": "Punishments", "desc": "View all active bans/mutes and issue ban / mute / kick, or unban+unmute, straight to the server console.", "run": run_punishments},
-    {"name": "Anticheat",   "desc": "Recent GrimAC flags (player, check, severity, VL points, server). These are hidden from in-game staff chat — review them here.", "run": run_anticheat},
+    {"name": "Anticheat",   "desc": "Recent GrimAC flags (player, check, severity, VL points, server). These are hidden from in-game staff chat: review them here.", "run": run_anticheat},
     {"name": "Audit",       "desc": "Transaction audit log. Pick a player for per-type totals + history, or leave blank for the recent server-wide feed. Identical events are collapsed (x12).", "run": run_audit},
     {"name": "Online",      "desc": "Query the live online player list from the console, plus recently-seen players from the database.", "run": run_online},
-    {"name": "Logs",        "desc": "Read latest.log — last 500 lines, or filter by any text (a player name, 'ERROR', a command). Press r to refresh live.", "run": run_logs},
-    {"name": "Maintenance", "desc": "FROZEN maintenance (custom): non-staff stay connected, see their last spot, can't move/interact, auto-released when you end it — for safe live updates. Plus the kennytv KICK maintenance (on/off/MOTD/whitelist).", "run": run_maintenance},
+    {"name": "Logs",        "desc": "Read latest.log: last 500 lines, or filter by any text (a player name, 'ERROR', a command). Press r to refresh live.", "run": run_logs},
+    {"name": "Maintenance", "desc": "FROZEN maintenance (custom): non-staff stay connected, see their last spot, can't move/interact, auto-released when you end it: for safe live updates. Plus the kennytv KICK maintenance (on/off/MOTD/whitelist).", "run": run_maintenance},
     {"name": "Server",      "desc": "Broadcast, save-all, whitelist, run any raw console command, or restart the server.", "run": run_server},
     {"name": "Quit",        "desc": "Exit the admin console.", "run": None},
 ]

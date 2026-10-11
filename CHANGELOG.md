@@ -18,6 +18,12 @@ Changes since 1.0.0-beta.
   intended default.
 - A startup banner: the first SMP-Core plugin to enable prints the suite version, license and installed modules,
   once per server start.
+- A documented `branding.yml` (name, tagline, region, Discord link, tier names, color palette and message tokens)
+  is written on first start; before, a fresh install had no branding file to edit. `/branding set` runs its
+  optional operator script only when the script exists.
+- `setup.sh`: one command creates a runnable server on macOS or Linux (Java 21 check, Paper, the plugins built or
+  downloaded, checksum-verified ProtocolLib and Vault, optional LuckPerms, the menu datapack, a brand profile and
+  `start.sh`). It replaces `setup/setup-server.sh`, which did not work from the published layout.
 - A Gradle build that works from a clean clone: `./gradlew build` compiles every plugin with dependencies from public
   repositories and collects the jars in `build/dist/`.
 - Continuous integration: every push and pull request builds the suite and boots it on Paper, failing on any plugin
@@ -90,6 +96,14 @@ Changes since 1.0.0-beta.
   readiness file (`admission.ready-file`) so admission works without a network database.
 
 ### Changed
+- Every plugin declares `api-version: '1.21.7'`, the first Paper release with the dialog API the suite uses. On
+  Paper 1.21.6 the plugins are refused with an API version message instead of failing with a missing class.
+- Region maintenance shows one green warning everywhere a held player sees it (PizzaNetworkCore's hold hotbar,
+  PizzaLimbo's hotbar and PizzaAdminTools' frozen notice): "WARNING: Your Region Is Undergoing Maintenance. Do Not
+  Teleport Or Your Location Will Be Lost." Existing `maintenance_hold.message` settings are kept.
+- Homes record the server they were set on (PizzaNetworkCore `sync.server-name`). On a network, `/home` to a home
+  on another backend names that server instead of teleporting to the same coordinates in this server's world.
+  Cross-server `/home` is not supported yet; homes from earlier versions carry no server and work as before.
 - Remaining legacy permission names are gone: `mycommand.punish`, `mycommand.unpunish`, `mycommand.forgive` and
   `mycommand.bancheck` (use `pizzasmp.punish`, `pizzasmp.unpunish`, `pizzasmp.forgive`, `pizzasmp.bancheck`),
   `maintenance.bypass` (use `pizzasmp.maintenance.stay`), and `pizzaruleguard.alerts` (now
@@ -133,6 +147,9 @@ Changes since 1.0.0-beta.
 - A fresh install had no sell prices, so `/sell` paid nothing. PizzaNetworkCore ships default prices and writes
   them to `plugins/PizzaNetworkCore/sell-prices.yml` on first start; `configs/sell/prices.yml` still overrides.
 - `pizzasmp.spawnedit` was declared by two plugins, which logged a warning at startup.
+- A fresh single-server install logged warnings for normal conditions: local file storage, no branding profiles,
+  the bundled shop and absent hub worlds. They are informational now; the storage warning remains on servers behind
+  a proxy, where unshared data matters. The shop message no longer names a script that is not part of the suite.
 - Subscription tier names follow `branding.yml` (`tiers.plus`, `tiers.plusplus`, otherwise the brand name plus
   "+" and "++") everywhere, including PizzaAdminTools' perks, subscription menus and messages, which showed one
   server's tier names. Without `branding.yml`, the short name and tiers default to the neutral brand.

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 # Install PlaceholderAPI expansions onto every Paper backend.
 #
 # WHY THIS EXISTS: the expansions directory was empty on every backend, so anything
-# needing a PAPI placeholder silently rendered as literal text — most visibly the TAB
+# needing a PAPI placeholder silently rendered as literal text: most visibly the TAB
 # rank prefixes (%luckperms_prefix%) and %player_ping%. Only PNC's own `pizzasmp`
 # expansion worked, because it self-registers in code.
 #
@@ -31,7 +33,7 @@ if ! timeout 60 curl -sSL -o "$JSON" "$CATALOGUE"; then
 fi
 # A valid catalogue is a JSON object; anything else means the API shape changed again.
 if ! python3 -c "import json,sys; d=json.load(open('$JSON')); sys.exit(0 if isinstance(d,dict) and d else 1)"; then
-  echo "ERROR: catalogue did not parse as a JSON object — the API shape may have changed." >&2
+  echo "ERROR: catalogue did not parse as a JSON object: the API shape may have changed." >&2
   exit 1
 fi
 
@@ -46,16 +48,16 @@ if key:
     print(vs[0].get('url','') if vs else '')
 " 2>/dev/null)"
   if [[ -z "$url" ]]; then
-    echo "  [skip] $name — not in catalogue"; continue
+    echo "  [skip] $name: not in catalogue"; continue
   fi
   out="$CACHE/Expansion-${name}.jar"
   if ! timeout 120 curl -sSL -o "$out" "$url"; then
-    echo "  [FAIL] $name — download failed"; rm -f "$out"; continue
+    echo "  [FAIL] $name: download failed"; rm -f "$out"; continue
   fi
   # Guard against the exact failure this script exists to prevent: verify it is a ZIP
   # (jars are zips), not JSON or an HTML error page.
   if ! file "$out" | grep -qi 'zip\|java archive'; then
-    echo "  [FAIL] $name — downloaded file is not a jar ($(file -b "$out" | cut -c1-40))"
+    echo "  [FAIL] $name: downloaded file is not a jar ($(file -b "$out" | cut -c1-40))"
     rm -f "$out"; continue
   fi
   echo "  [ok]   $name  ($(du -h "$out" | cut -f1))"

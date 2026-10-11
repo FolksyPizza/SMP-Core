@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 William W. (FolksyPizza).
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
 package dev.pizzasmp.plugins;
 
 import dev.pizzasmp.common.scheduler.PlatformScheduler;
@@ -51,8 +53,8 @@ import org.bukkit.util.io.BukkitObjectOutputStream;
 
 /**
  * Replaces the vanilla 9x3 (27-slot) ender chest with a 9x6 (54-slot) virtual inventory that is
- * persisted per player to a gzipped .dat file. Any way of opening an ender chest — the block, the
- * inventory-open event, or /ec | /enderchest | /endersee &lt;player&gt; — is redirected to the
+ * persisted per player to a gzipped .dat file. Any way of opening an ender chest: the block, the
+ * inventory-open event, or /ec | /enderchest | /endersee &lt;player&gt;: is redirected to the
  * expanded inventory.
  *
  * <p>The original source for this plugin was unavailable; this implementation was reconstructed

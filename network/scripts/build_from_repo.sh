@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 # Build every custom plugin from the repo's tools/ tree and stage the jars.
 #
 # AUTHORITY: SMP/tools/ is the source of truth. This script never edits that source and
@@ -27,7 +29,7 @@ fi
 [ -x "$JAVAC" ] || { echo "ERROR: no javac found. Set JAVA_HOME or put a JDK 21+ on PATH." >&2; exit 1; }
 G="$HOME/.gradle/caches/modules-2/files-2.1"
 
-[ -d "$TOOLS" ] || { echo "ERROR: $TOOLS not found — is the repo cloned at SMP/?" >&2; exit 1; }
+[ -d "$TOOLS" ] || { echo "ERROR: $TOOLS not found: is the repo cloned at SMP/?" >&2; exit 1; }
 
 find_jar() { find "$G/$1" -name "$2" 2>/dev/null | grep -v sources | head -1; }
 
@@ -60,7 +62,7 @@ fi
 
 BASE_CP="$PAPER_API:$VAULT_API:$HIKARI:$MARIADB:$PROTOCOLLIB:$DEPS_CP:$PLUGIN_CP"
 
-# PizzaProxyGuard is a VELOCITY plugin — it needs guice/@Inject, slf4j and the Velocity
+# PizzaProxyGuard is a VELOCITY plugin: it needs guice/@Inject, slf4j and the Velocity
 # API, none of which are on the Paper classpath above. Resolve those separately.
 VELOCITY_CP=""
 if [ -x "$ROOT/plugins-src/gradlew" ]; then
@@ -83,7 +85,7 @@ build() {
   if [ ${#SRCS[@]} -eq 0 ]; then echo "  [skip] $mod (no sources)"; return 0; fi
 
   if ! "$JAVAC" -proc:none -nowarn -cp "$BASE_CP${extra:+:$extra}" -d "$bin" "${SRCS[@]}" 2>"$OUT/$mod.log"; then
-    echo "  [FAIL] $mod — see $OUT/$mod.log"
+    echo "  [FAIL] $mod; see $OUT/$mod.log"
     grep -m5 'error:' "$OUT/$mod.log" | sed 's/^/         /'
     FAILED+=("$mod"); return 0
   fi
@@ -108,7 +110,7 @@ build() {
 echo "Building from $TOOLS"
 echo "  paper-api: $(basename "$PAPER_API")"
 
-# PizzaCommon is an embedded LIBRARY, not a plugin — it has no plugin.yml and is shaded
+# PizzaCommon is an embedded LIBRARY, not a plugin: it has no plugin.yml and is shaded
 # into the plugins that use it (currently only PizzaChatGuard, which imports
 # dev.pizzasmp.common.SuiteStorage). Build it first so it can go on their classpath.
 COMMON_BIN="$TOOLS/pizzacommon/bin"
@@ -118,7 +120,7 @@ if [ -d "$TOOLS/pizzacommon/src" ]; then
   if [ ${#COMMON_SRCS[@]} -gt 0 ] && "$JAVAC" -proc:none -nowarn -cp "$BASE_CP" -d "$COMMON_BIN" "${COMMON_SRCS[@]}" 2>"$OUT/pizzacommon.log"; then
     echo "  [lib]  pizzacommon ($(find "$COMMON_BIN" -name '*.class' | wc -l) classes)"
   else
-    echo "  [FAIL] pizzacommon — see $OUT/pizzacommon.log"; FAILED+=(pizzacommon)
+    echo "  [FAIL] pizzacommon; see $OUT/pizzacommon.log"; FAILED+=(pizzacommon)
   fi
 fi
 

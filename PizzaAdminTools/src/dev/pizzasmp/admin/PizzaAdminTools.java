@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 William W. (FolksyPizza).
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
 package dev.pizzasmp.admin;
 
 import io.papermc.paper.registry.data.dialog.ActionButton.Builder;
@@ -468,7 +470,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         "eworkbench",
         "eworld"
     );
-    // NOTE: "plugins"/"pl" intentionally NOT gated — /plugins must show the real Bukkit plugin list.
+    // NOTE: "plugins"/"pl" intentionally NOT gated: /plugins must show the real Bukkit plugin list.
     private static final Set<String> PLUGIN_ADMIN_COMMANDS = Set.of(
         "lp", "luckperms", "version", "ver", "about", "paper", "timings"
     );
@@ -489,7 +491,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private static String HOME_MENU_TITLE = "&8Homes";
     private static final String HOME_DELETE_TITLE = "&8Confirm Home Deletion";
     // Absolute slot ceiling (pizza++ tier). Per-player limits come from allowedHomes().
-    // NOTE: the current GUI still renders only the 5 BED_SLOTS — the GUI rework lands later;
+    // NOTE: the current GUI still renders only the 5 BED_SLOTS: the GUI rework lands later;
     // the data layer + /sethome|/delhome|/home <name> already honor the full tier limits.
     private static final int MAX_HOME_SLOTS = 27;
     // Tier permission nodes: default 3, pizza+ 9, pizza++ 27 (granted via LuckPerms on deploy).
@@ -597,7 +599,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
      * One-shot import of a legacy per-server file into shared storage.
      *
      * Only fires when shared storage holds nothing for that document and the old file has
-     * content, so it cannot clobber good shared data with a stale local copy — and running
+     * content, so it cannot clobber good shared data with a stale local copy, and running
      * it on several backends is safe, because the first one to import wins and the rest
      * find the document already populated. The file is left on disk untouched as a manual
      * fallback.
@@ -627,10 +629,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         saveDefaultConfig();
         loadBranding();
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "admintools");
-        if (!this.storage.isMysql()) {
-            getLogger().warning("[storage] running on local files: subscription tiers, staff mode and "
-                + "night vision will NOT be shared between backends. Configure a database (PizzaNetworkCore sync.database or storage.database) to share them.");
-        }
+        this.storage.logLocalFiles(this, "subscription tiers, staff mode and night vision will NOT be shared "
+            + "between backends.");
         initHomeStorage();
         registerCommand("gtp", true);
         registerCommand("homes", false);
@@ -667,7 +667,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         this.atrackRestoreModeKey = new org.bukkit.NamespacedKey(this, "atrack_restore_mode");
         this.atrackRestoreLocationKey = new org.bukkit.NamespacedKey(this, "atrack_restore_location");
         this.maintenanceRestoreInvulnerabilityKey = new org.bukkit.NamespacedKey(this, "maintenance_restore_invulnerable");
-        // Keep the green maintenance hotbar persistent (action bars fade after ~3s) — refresh every 2s.
+        // Keep the green maintenance hotbar persistent (action bars fade after ~3s): refresh every 2s.
         PlatformScheduler.globalRepeating(this, () -> {
             if (!maintenanceActive) return;
             for (UUID id : List.copyOf(maintenanceFrozen)) {
@@ -683,7 +683,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         // Restore any /atrack or maintenance-freeze state left behind by a reload or crash.
         scheduleAtrackRecoveryForOnlinePlayers();
         scheduleMaintenanceRecoveryForOnlinePlayers();
-        // Hourly Pizza+ expiry sweep — auto-revokes subscriptions whose 30-day clock ran out.
+        // Hourly Pizza+ expiry sweep: auto-revokes subscriptions whose 30-day clock ran out.
         PlatformScheduler.globalRepeating(this, this::runPizzaPlusExpirySweep, 20L * 60L, 20L * 60L * 60L);
         // Night vision lives in PizzaNetworkCore (/nv, /nightvision and the settings toggle), so nvEnabled
         // stays empty here and the respawn/consume re-apply hooks are inert.
@@ -1059,6 +1059,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             }
         }
 
+        String elsewhere = homeServerElsewhere(cfg, selectedHome);
+        if (elsewhere != null) {
+            player.sendMessage(color("&7That home is on &f" + elsewhere + "&7. Join that server to use it."));
+            return true;
+        }
         Location targetLocation = readHomeLocation(cfg, selectedHome);
         if (targetLocation == null) {
             player.sendMessage(color("&cHome data is invalid for &e" + selectedHome + "&c."));
@@ -1070,10 +1075,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return true;
     }
 
-    // /stash | /spawnstash — drop a random small stash centered on the block the
+    // /stash | /spawnstash: drop a random small stash centered on the block the
     // admin is looking at. Variants are weighted toward SMALL: most are 1-cell
     // (ender chest / candle / lantern / etc) up to a rare 3x3 camp with a bed.
-    // Footprint never exceeds 3x3. Fully silent — failures report via action bar.
+    // Footprint never exceeds 3x3. Fully silent: failures report via action bar.
     // Staff-only (PERM_STASH_CMD).
     private static final Material[] STASH_TINY_POOL = {
         Material.ENDER_CHEST, Material.CHEST, Material.BARREL, Material.CANDLE,
@@ -1468,7 +1473,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 sender.sendMessage(color("&f" + lpName + " &7" + tierDisplay(tier) + ": &aACTIVE &7(expires in &f"
                     + formatRemainingMs(remaining) + "&7)"));
             } else if (hasNode) {
-                sender.sendMessage(color("&f" + lpName + " &7" + TIER_PLUS + ": &aACTIVE &7(no expiry tracked — legacy grant)"));
+                sender.sendMessage(color("&f" + lpName + " &7" + TIER_PLUS + ": &aACTIVE &7(no expiry tracked, legacy grant)"));
             } else {
                 sender.sendMessage(color("&f" + lpName + " &7" + TIER_PLUS + "/" + TIER_PLUSPLUS + ": &cnone"));
             }
@@ -1494,7 +1499,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return true;
         }
 
-        // give / extend — optional tier token then optional days ("90", "90d", "3mo")
+        // give / extend: optional tier token then optional days ("90", "90d", "3mo")
         String tier = null;
         int dayArgIdx = 2;
         if (args.length >= 3) {
@@ -1551,7 +1556,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return true;
     }
 
-    // ---- /pizzaplus list — GUI for players, text for console ----
+    // ---- /pizzaplus list: GUI for players, text for console ----
 
     private void handlePizzaPlusList(CommandSender sender, String tierFilter) {
         long now = System.currentTimeMillis();
@@ -1574,7 +1579,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             for (UUID uuid : subs) {
                 String name = pizzaPlusSubsConfig.getString("names." + uuid, uuid.toString());
                 String tier = getPizzaPlusTier(uuid);
-                sender.sendMessage(color(" &f" + name + " &7— " + tierDisplay(tier)
+                sender.sendMessage(color(" &f" + name + "&7: " + tierDisplay(tier)
                     + ", expires in &f" + formatRemainingMs(getPizzaPlusExpiry(uuid) - now)));
             }
             return;
@@ -1850,7 +1855,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
                 if (!target.isOnline()) {
                     session.updatePending.set(false);
-                    this.stopAtrackSession(session, Component.text("§cTarget disconnected — tracking stopped"));
+                    this.stopAtrackSession(session, Component.text("§cTarget disconnected, tracking stopped"));
                     return;
                 }
 
@@ -1877,7 +1882,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                     this.stopAtrackSession(session, null);
                 }
             }, () -> this.stopAtrackSession(session,
-                Component.text("§cTarget disconnected — tracking stopped")), 1L, 1L);
+                Component.text("§cTarget disconnected, tracking stopped")), 1L, 1L);
             session.setTargetTask(targetTask);
         } catch (RuntimeException exception) {
             this.stopAtrackSession(session, null);
@@ -1886,7 +1891,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
 
         if (this.isCurrentAtrack(session)) {
-            tracker.sendActionBar(Component.text("§dNow tracking §f" + targetName + " §d— /atrack to stop"));
+            tracker.sendActionBar(Component.text("§dNow tracking §f" + targetName + " §d(/atrack to stop)"));
         }
     }
 
@@ -2228,7 +2233,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         for (AtrackSession session : new ArrayList<>(this.atrackSessions.values())) {
             if (session.targetId.equals(quittingId)) {
-                this.stopAtrackSession(session, Component.text("§cTarget disconnected — tracking stopped"));
+                this.stopAtrackSession(session, Component.text("§cTarget disconnected, tracking stopped"));
             }
         }
     }
@@ -2353,12 +2358,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             player.sendMessage(net.kyori.adventure.text.Component.text("You currently have ", gray)
                 .append(net.kyori.adventure.text.Component.text(TIER_PLUSPLUS, gold)
                     .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
-                .append(net.kyori.adventure.text.Component.text(" — enjoy!", gray)));
+                .append(net.kyori.adventure.text.Component.text(". Enjoy!", gray)));
         } else if (hasPlus) {
             player.sendMessage(net.kyori.adventure.text.Component.text("You currently have ", gray)
                 .append(net.kyori.adventure.text.Component.text(TIER_PLUS, gold)
                     .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
-                .append(net.kyori.adventure.text.Component.text(" — upgrade to ", gray))
+                .append(net.kyori.adventure.text.Component.text(". Upgrade to ", gray))
                 .append(net.kyori.adventure.text.Component.text(TIER_PLUSPLUS, gold)
                     .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
                 .append(net.kyori.adventure.text.Component.text(" for even more!", gray)));
@@ -2699,8 +2704,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private void showMaintenanceTitle(Player p) {
-        // Green, persistent hotbar (action bar) — refreshed by the maintenance task.
-        p.sendActionBar(color("&aYour region is under maintenance"));
+        // Green, persistent hotbar (action bar): refreshed by the maintenance task.
+        p.sendActionBar(color("&aWARNING: Your Region Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost."));
     }
 
     private void enterMaintenanceFreeze(Player p) {
@@ -2753,7 +2758,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         this.clearMaintenanceFreezeState(var2, false);
         if (var1.isOnline()) {
             var1.resetTitle();
-            var1.sendActionBar(Component.text(color("&aMaintenance complete — welcome back!")));
+            var1.sendActionBar(Component.text(color("&aMaintenance complete. Welcome back!")));
         }
 
         return true;
@@ -2836,7 +2841,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                     int frozenCount = this.countSuccessfulPlayerUpdates(updates);
                     this.scheduleCommandFeedback(sender,
                         color("&aFrozen-maintenance &lON&a. Froze &e" + frozenCount + " &aplayer(s). Reason: &f" + reason), false);
-                    this.getLogger().info("[Maintenance] Frozen-maintenance ON by " + issuerName + " (" + reason + ") — froze " + frozenCount + ".");
+                    this.getLogger().info("[Maintenance] Frozen-maintenance ON by " + issuerName + " (" + reason + "): froze " + frozenCount + ".");
                 });
             });
         } catch (RuntimeException exception) {
@@ -2883,7 +2888,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                     int releasedCount = this.countSuccessfulPlayerUpdates(updates);
                     this.scheduleCommandFeedback(sender,
                         color("&aFrozen-maintenance &lOFF&a. Released &e" + releasedCount + " &aplayer(s)."), false);
-                    this.getLogger().info("[Maintenance] Frozen-maintenance OFF by " + issuerName + " — released " + releasedCount + ".");
+                    this.getLogger().info("[Maintenance] Frozen-maintenance OFF by " + issuerName + ": released " + releasedCount + ".");
                 });
             });
         } catch (RuntimeException exception) {
@@ -2976,7 +2981,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         player.getPersistentDataContainer().remove(this.maintenanceRestoreInvulnerabilityKey);
         this.clearMaintenanceFreezeState(playerId, false);
         player.resetTitle();
-        player.sendActionBar(Component.text(color("&aMaintenance complete — welcome back!")));
+        player.sendActionBar(Component.text(color("&aMaintenance complete. Welcome back!")));
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -3498,7 +3503,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
-    // /maintenance motd "<text>" — sets the kennytv Maintenance ping MOTD live.
+    // /maintenance motd "<text>": sets the kennytv Maintenance ping MOTD live.
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onMaintenanceMotdCommand(PlayerCommandPreprocessEvent event) {
         Player player = event.getPlayer();
@@ -3570,7 +3575,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     // Non-staff command lockdown: for default / pizza+ players, listed admin /
-    // non-gameplay commands behave EXACTLY like an unknown command — same hotbar,
+    // non-gameplay commands behave EXACTLY like an unknown command: same hotbar,
     // no "no permission" hint. Strips the optional minecraft:/bukkit: namespace.
     @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
     public void onRestrictedNonStaffCommand(PlayerCommandPreprocessEvent event) {
@@ -3609,7 +3614,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     @EventHandler
     public void onCommandSendFilter(PlayerCommandSendEvent event) {
         Player player = event.getPlayer();
-        // /gmcbypass is CONSOLE-ONLY — strip it from EVERYONE's command tree (staff included),
+        // /gmcbypass is CONSOLE-ONLY: strip it from EVERYONE's command tree (staff included),
         // so no player ever gets the arg suggestion / tab completion for it.
         event.getCommands().removeIf(cmd -> {
             String r = cmd.toLowerCase(Locale.ROOT);
@@ -4387,7 +4392,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         int allowedHomes = allowedHomes(viewer);
         boolean selfTarget = target.getUniqueId().equals(viewer.getUniqueId());
-        // Legacy 9x4 grid (non-dialog clients). SAFE slot mapping via buildHomeSlots — it does NOT
+        // Legacy 9x4 grid (non-dialog clients). SAFE slot mapping via buildHomeSlots: it does NOT
         // rename custom homes (unlike normalizeHomes), so named homes survive. Rows 0-2 (slots
         // 0-26) hold up to 27 home slots; left-click teleports/sets, right-click deletes.
         HomeFile file = homeFile(target);
@@ -4460,6 +4465,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             viewer.sendMessage(color("&cYou are in combat. Wait &e" + remainingCombatSeconds(viewer) + "s &cbefore teleporting home."));
             return;
         }
+        HomeFile targetFile = homeFile(target);
+        String elsewhere = targetFile == null || !targetFile.exists() ? null : homeServerElsewhere(targetFile.load(), homeName);
+        if (elsewhere != null) {
+            viewer.sendMessage(color("&7That home is on &f" + elsewhere + "&7. Join that server to use it."));
+            return;
+        }
         Location loc = readHomeLocation(target, homeName);
         if (loc == null) {
             viewer.sendMessage(color("&cThat home is invalid or its world is missing."));
@@ -4507,6 +4518,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             player.sendMessage(color("&cHome not found. Use a valid home number or name."));
             return;
         }
+        String elsewhere = homeServerElsewhere(cfg, selectedHome);
+        if (elsewhere != null) {
+            player.sendMessage(color("&7That home is on &f" + elsewhere + "&7. Join that server to use it."));
+            return;
+        }
         Location loc = readHomeLocation(cfg, selectedHome);
         if (loc == null) {
             player.sendMessage(color("&cThat home is invalid or its world is missing."));
@@ -4519,7 +4535,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     // ===================== Homes dialog frontend (#8) =====================
     // Vanilla 1.21.6+ dialog screens via the Paper Dialog API. Java 1.21.6+
     // clients get dialogs; Bedrock (Floodgate) and pre-1.21.6 clients joining
-    // through ViaVersion (both detected via reflection — no compile dep) fall
+    // through ViaVersion (both detected via reflection: no compile dep) fall
     // back to the legacy inventory GUI.
 
     private static final TextColor DIALOG_BRAND = TextColor.color(0x00BFFF);
@@ -5456,6 +5472,30 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return readHomeLocation(dataFile.load(), home);
     }
 
+    private String homeServerName;
+
+    /**
+     * This backend's network name (PizzaNetworkCore {@code sync.server-name}), recorded with each home so a home set
+     * on another backend is never applied to this server's world of the same name. Null on a single server or when
+     * the name is left on {@code auto}.
+     */
+    private String homeServerName() {
+        if (homeServerName == null) {
+            File f = new File(getDataFolder().getParentFile(), "PizzaNetworkCore/config.yml");
+            String name = f.isFile() ? YamlConfiguration.loadConfiguration(f).getString("sync.server-name", "") : "";
+            homeServerName = name == null || name.isBlank() || name.equalsIgnoreCase("auto")
+                ? "" : name.trim().toLowerCase(Locale.ROOT);
+        }
+        return homeServerName.isEmpty() ? null : homeServerName;
+    }
+
+    /** The server a home was set on, when that is another server; null for homes from before 1.0.0. */
+    private String homeServerElsewhere(FileConfiguration cfg, String home) {
+        String saved = cfg.getString(home + ".server");
+        String here = homeServerName();
+        return saved == null || saved.isBlank() || here == null || saved.equalsIgnoreCase(here) ? null : saved;
+    }
+
     private Location readHomeLocation(FileConfiguration cfg, String home) {
         String worldName = cfg.getString(home + ".world");
         World world = worldName == null ? null : Bukkit.getWorld(worldName);
@@ -5953,7 +5993,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     /**
-     * /sethome [name] — named-homes backend. No name picks the lowest free canonical
+     * /sethome [name]: named-homes backend. No name picks the lowest free canonical
      * slot (home1..homeN). Re-setting an existing name moves that home (no limit check);
      * creating a new one is gated by the player's tier limit (3 / 9 / 27).
      */
@@ -6001,6 +6041,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         Location loc = player.getLocation();
         cfg.set(name + ".world", loc.getWorld() == null ? "world" : loc.getWorld().getName());
+        cfg.set(name + ".server", homeServerName());
         cfg.set(name + ".x", loc.getX());
         cfg.set(name + ".y", loc.getY());
         cfg.set(name + ".z", loc.getZ());
@@ -6020,7 +6061,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
-    /** /delhome <name|number> — name-based delete with the standard pre-delete backup. */
+    /** /delhome <name|number>: name-based delete with the standard pre-delete backup. */
     private void handleDelHomeCommand(Player player, String arg) {
         HomeFile file = homeFile(player);
         if (file == null || !file.exists()) {
@@ -6074,6 +6115,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         Location loc = player.getLocation();
         cfg.set(homeName + ".world", loc.getWorld() == null ? "world" : loc.getWorld().getName());
+        cfg.set(homeName + ".server", homeServerName());
         cfg.set(homeName + ".x", loc.getX());
         cfg.set(homeName + ".y", loc.getY());
         cfg.set(homeName + ".z", loc.getZ());
@@ -6093,7 +6135,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (file == null || !file.exists()) {
             return false;
         }
-        // Fixed-slot, name-based deletion: delete EXACTLY "home"+(slotIndex+1) — never by list position.
+        // Fixed-slot, name-based deletion: delete EXACTLY "home"+(slotIndex+1): never by list position.
         String homeName = "home" + (slotIndex + 1);
         FileConfiguration cfg = file.load();
         List<String> homes = new ArrayList<>(cfg.getStringList("homes"));
@@ -6206,7 +6248,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private void startCountdownCommand(Player player, Runnable action, String successActionBarMessage) {
-        // Instant teleport — no warmup, no cooldown. Combat is the only gate.
+        // Instant teleport: no warmup, no cooldown. Combat is the only gate.
         cancelPendingTeleport(player);
         if (!player.isOnline()) {
             return;
@@ -6249,7 +6291,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
         frozenNoticeCooldown.put(uuid, now + 1_500L);
         if (maintenanceFrozen.contains(uuid)) {
-            player.sendActionBar(color("&aYour region is under maintenance"));
+            player.sendActionBar(color("&aWARNING: Your Region Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost."));
         } else {
             player.sendActionBar(color("&cYou are frozen."));
         }
@@ -6616,7 +6658,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
-    /** /sfmode — toggle staff mode (hides staff commands + blocks their use). Staff only. */
+    /** /sfmode: toggle staff mode (hides staff commands + blocks their use). Staff only. */
     /** Appends a staff-mode toggle to the console log and staffmode-audit.log in the plugin folder. */
     private void auditStaffMode(Player player, boolean enabled) {
         String stamp = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")

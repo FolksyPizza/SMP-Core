@@ -1,11 +1,4 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img alt="SMP-Core" src="assets/banner-light.svg" width="640">
-  </picture>
-</p>
-
-<p align="center">
   <a href="https://github.com/FolksyPizza/SMP-Core/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/FolksyPizza/SMP-Core"></a>
   <a href="https://github.com/FolksyPizza/SMP-Core/actions/workflows/build.yml"><img alt="Build" src="https://github.com/FolksyPizza/SMP-Core/actions/workflows/build.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
@@ -21,7 +14,7 @@ Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG
 
 - 10 plugins and a shared library, about 51,000 lines of Java, plus two datapacks
 - More than 100 commands ([COMMANDS.md](COMMANDS.md))
-- Built and tested on Paper 1.21.11, where it has run in production
+- Runs on Paper 1.21.7 to 1.21.11; most tested on 1.21.11, where it has run in production ([Supported versions](#supported-versions))
 
 ## Plugins
 
@@ -43,12 +36,45 @@ Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG
 
 | | Minimum | Recommended |
 | --- | --- | --- |
-| Server | Paper 1.21.6 or newer, Java 21 | Paper 1.21.11 |
+| Server | Paper 1.21.7, Java 21 | Paper 1.21.11 |
 | Database | None: a single server stores its data in local files | MySQL or MariaDB; required for a Velocity network |
 | Dependencies | ProtocolLib, Vault | LuckPerms, PlaceholderAPI (full list: `setup/deps.txt`) |
 | Hardware | 2 cores, 4 GB RAM | 4+ cores, 8 to 12 GB RAM, SSD |
 
+## Supported versions
+
+**Tested**: passes this release's automated tests. **Beta**: works in the tests that ran, with less coverage.
+*Unverified*: expected to work, never checked.
+
+| Platform | Status |
+| --- | --- |
+| Paper 1.21.11 | **Tested**: every bot test, single server and network; used in production |
+| Paper 1.21.7 to 1.21.10 | **Beta**: boots clean; the release, menu lock and command routing bot tests pass |
+| Paper 1.21.6 and older | Not supported: no dialog API. The plugins refuse to load |
+| Paper 26.x, Folia | Not supported yet ([UPCOMING.md](UPCOMING.md)) |
+| Java | 21 or newer |
+| Velocity | 3.5.1 **Tested** (network bot tests); other 3.x releases *Unverified* |
+| Java Edition clients | The server's version natively; other versions through ViaVersion, used in production |
+| Bedrock Edition clients | Through Geyser and Floodgate, with chest menus in place of dialogs; used in production, not in the bot tests |
+| Network features | **Beta**: cross-server `/home` is not supported yet; a home on another backend is refused by name |
+
+One set of jars covers every supported Paper version.
+
 ## Installation
+
+### Quick start (macOS or Linux)
+
+From a clone of this repository:
+
+```sh
+./setup.sh            # asks a few questions; creates ./server
+./server/start.sh
+```
+
+`setup.sh` checks for Java 21 (offering Homebrew's on macOS), downloads Paper, builds the plugins (or downloads the
+latest release), installs ProtocolLib, Vault and optionally LuckPerms with checksums where published, adds the menu
+datapack, and writes the EULA, `server.properties`, a brand profile and `start.sh`. Re-run it to update the plugins
+or change the brand; worlds, configs and player data are kept. `./setup.sh --help` lists the options.
 
 ### Single server
 
@@ -59,8 +85,6 @@ Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG
    `plugins/PizzaNetworkCore/config.yml` and restart. The other plugins share that connection, and tables are
    created on first start.
 
-`setup/setup-server.sh` is an interactive alternative: it downloads Paper and the dependencies and writes a brand
-profile. It never touches worlds or player data and can be re-run to rebrand.
 
 ### Velocity network
 
@@ -72,14 +96,29 @@ Network support is in beta.
 
 | What | Where |
 | --- | --- |
-| Branding: name, colors, MOTD, tab list, menus, rank and tier labels | `plugins/PizzaNetworkCore/branding.yml`; switch live with `/branding set <profile>` |
+| Branding: name, tagline, region, Discord link, tier names and color palette | `plugins/PizzaNetworkCore/branding.yml` ([Branding](#branding)) |
 | Economy, gameplay and database | `plugins/PizzaNetworkCore/config.yml`, `shop.yml` |
 | Chat filtering | `plugins/PizzaChatGuard/` |
 | Punishments and rules | `plugins/PizzaPunishment/`, `plugins/PizzaRuleGuard/` |
 | Storage (Database or File) | `storage.backend` in each plugin's config: `auto` (default) uses the database when reachable, sharing PizzaNetworkCore's connection, and files otherwise |
 
-Without `branding.yml` the suite uses neutral defaults. Subscription tiers follow the brand name (a brand called
-HappyLand gets HappyLand+ and HappyLand++).
+### Branding
+
+One file themes the whole suite. PizzaNetworkCore writes a documented `branding.yml` on first start (`setup.sh`
+fills it in with your server's name and color); PizzaAdminTools, PizzaPunishment and PizzaLimbo read the same file.
+
+| Key | Used for |
+| --- | --- |
+| `display`, `short` | The server name in messages, menus, ban screens and the limbo |
+| `tagline`, `region`, `discord` | Message tokens; the limbo shows the region, ban screens the Discord link |
+| `tiers.plus`, `tiers.plusplus` | Subscription tier names; by default the name plus "+" and "++" (HappyLand+, HappyLand++) |
+| `colors.primary` | The accent color in messages, menus, dialogs and the scoreboard |
+| `colors.info`, `success`, `warning`, `danger`, `muted`, `text` | Color roles for message tokens |
+
+Messages and config text can use the tokens `{brand}`, `{brand_short}`, `{tagline}`, `{region}`, `{discord}`,
+`{plus}`, `{plusplus}` and the color tokens `{primary}`, `{info}`, `{success}`, `{warning}`, `{danger}`, `{muted}`
+and `{text}`. A file can hold several profiles; `active` picks one, and `/branding set <profile>` switches live.
+The server icon, MOTD and tab list are not themed by the suite.
 
 ### Datapacks
 
@@ -126,4 +165,8 @@ decompiler structure and are cleaned up as they are touched.
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE). Maintained by FolksyPizza.
+Apache 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). Releases before 1.0.0 were published under the MIT
+License. PizzaProxyGuard bundles MariaDB Connector/J under the LGPL-2.1; its license ships in the jar. Maintained by
+FolksyPizza.
+
+Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.

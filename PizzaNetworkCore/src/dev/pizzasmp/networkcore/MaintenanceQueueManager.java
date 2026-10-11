@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 William W. (FolksyPizza).
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
 /*
  * Decompiled with CFR 0.152.
  * 
@@ -99,7 +101,7 @@ final class MaintenanceQueueManager {
         this.returnBatchSize = Math.max(1, plugin.getConfig().getInt("maintenance_queue.return_batch_size", 2));
         this.returnDrainIntervalTicks = Math.max(1L, plugin.getConfig().getLong("maintenance_queue.return_drain_interval_ticks", 20L));
         this.holdMessage = plugin.getConfig().getString("maintenance_hold.message",
-            "The Server Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost. You Will Be Put Back After Your Region Restarts.");
+            "WARNING: Your Region Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost.");
     }
     synchronized void start() {
         if (this.running) {
@@ -422,7 +424,7 @@ final class MaintenanceQueueManager {
      *
      * Reconstructed: the decompiler (CFR) failed on this method and left a stub that THREW
      * IllegalStateException at runtime. Because handleJoin() calls it on every join to the
-     * maintenance backend, every such join threw — which is why held players were not being
+     * maintenance backend, every such join threw, which is why held players were not being
      * managed or returned correctly.
      */
     private boolean isQueued(UUID uuid) {

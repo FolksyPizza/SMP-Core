@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Start the dev backend — the plugin development/test server.
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# Start the dev backend: the plugin development/test server.
 #
 # Dev is a normal Paper backend on :25568 (the retired pvp port) running the same plugin
 # set as survival so tests are representative. It is registered in velocity.toml but kept

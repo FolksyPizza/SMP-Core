@@ -1,7 +1,7 @@
 name: PizzaAdminTools
 version: 1.0.0
 main: dev.pizzasmp.admin.PizzaAdminTools
-api-version: '1.21'
+api-version: '1.21.7'
 # SuiteStorage needs a JDBC driver and a pool to put shared state in the database.
 # Paper's runtime library loader fetches these; without the block the plugin loads and
 # then silently falls back to per-server YAML files.
@@ -78,7 +78,7 @@ commands:
   pizzabans:
     description: PizzaBans command hub.
     usage: /pizzabans [help]
-  # /sus and /suspicious are handled by PizzaNetworkCore — keeping it registered here would cause a conflict
+  # /sus and /suspicious are handled by PizzaNetworkCore: keeping it registered here would cause a conflict
   # /nv and /nightvision are handled by PizzaNetworkCore (same state as the /settings Night Vision toggle);
   # registering them here too would conflict.
   nuke:
@@ -111,7 +111,7 @@ commands:
     description: Toggle staff mode (hide and disable staff commands for yourself).
     usage: /sfmode
   gmcbypass:
-    description: Console-only — grant a one-time creative-mode bypass to a player.
+    description: "Console-only: grant a one-time creative-mode bypass to a player."
     usage: /gmcbypass <player>
 permissions:
   pizzasmp.gtp:

@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 William W. (FolksyPizza).
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
 package dev.pizzasmp.proxyguard;
 
 import com.google.inject.Inject;
@@ -87,7 +89,7 @@ public class PizzaProxyGuard {
     private String smpServerName = "survival";
     private String limboServerName = "lobby";
     private String maintenanceMessage = "&fWe are under maintenance, please wait a few minutes and try again";
-    // NOTE: must NOT include color codes — ban/kick messages are colored, and matching "§" here would
+    // NOTE: must NOT include color codes: ban/kick messages are colored, and matching "§" here would
     // wrongly treat every punishment as a shutdown and send it to limbo instead of disconnecting.
     private String[] shutdownReasonNeedles = {
         "server closed", "shutdown", "shut down", "restart", "maintenance", "closed"
@@ -235,7 +237,7 @@ public class PizzaProxyGuard {
                 }
             }
             this.emergencyUnits = Set.copyOf(emergency);
-            // "*" (or active with no targets) means the WHOLE network is closed — Tier 2.
+            // "*" (or active with no targets) means the WHOLE network is closed: Tier 2.
             this.networkMaintenance = active && (units.contains("*") || units.isEmpty());
             this.maintenanceUnits = Set.copyOf(units);
             this.evictFromEmergencyUnits();
@@ -263,7 +265,7 @@ public class PizzaProxyGuard {
      * Move players off a backend that has just been flagged for ordinary maintenance.
      *
      * Without this, backend_maint.sh flagged the unit and then stopped the server, and
-     * players were simply DISCONNECTED by the shutdown — the reported symptom. The whole
+     * players were simply DISCONNECTED by the shutdown: the reported symptom. The whole
      * point of Tier 1 is that they are held and returned, so the proxy relocates them to
      * the maintenance backend as soon as the flag appears. Emergency units are skipped:
      * those are evicted by evictFromEmergencyUnits(), not held.
@@ -406,7 +408,7 @@ public class PizzaProxyGuard {
     /**
      * Player-facing name for a backend: "goliath<id>-<REGION>", e.g. goliath2-NY.
      *
-     * Players see the process identity, not our internal backend name — the same scheme
+     * Players see the process identity, not our internal backend name: the same scheme
      * used in each server's shutdown-message. Under distributed Folia these ids become
      * per-process/per-slice, so the message keeps identifying exactly what a player was
      * connected to. Region is fixed to NY for now; make it config when there is a second.

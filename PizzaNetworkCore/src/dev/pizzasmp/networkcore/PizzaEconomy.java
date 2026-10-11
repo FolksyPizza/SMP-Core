@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 William W. (FolksyPizza).
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
 package dev.pizzasmp.networkcore;
 
 import net.milkbowl.vault.economy.AbstractEconomy;
@@ -19,7 +21,7 @@ import java.util.UUID;
  *
  * Before this class, EssentialsX Economy won the Vault hook. Essentials stores balances
  * in PER-SERVER YAML files (plugins/Essentials/userdata/), so a player's money on the
- * lobby and on survival were different numbers that never reconciled — the reported
+ * lobby and on survival were different numbers that never reconciled: the reported
  * "money isn't syncing". PizzaNetworkCore only ever CONSUMED Vault (economy.depositPlayer
  * and friends), so it was writing into whichever per-server file Essentials owned, while
  * the `balances` table it reads for /baltop sat separate.

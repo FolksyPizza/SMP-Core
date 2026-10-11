@@ -71,7 +71,7 @@ import net.kyori.adventure.title.Title;
 import dev.pizzasmp.common.scheduler.PlatformScheduler;
 
 /**
- * PizzaLimbo v0.1 (alpha) — the holding server players are moved to during full-stop maintenance.
+ * PizzaLimbo v0.1 (alpha): the holding server players are moved to during full-stop maintenance.
  *
  * Behaviour: a transferred player arrives in a protected copy of the SMP hub, may walk around while
  * maintenance runs, and sees a visual inventory copy read from `limbo_snapshots`. The SMP remains
@@ -386,7 +386,7 @@ public final class PizzaLimbo extends JavaPlugin implements Listener {
                 if (!captured) {
                     // No snapshot = NOT a transferred player. They fell here via the proxy's try-list.
                     // If the SMP is down (maintenance) deny them with the maintenance message; if it's
-                    // up, this is a stray connect — send them straight to the SMP.
+                    // up, this is a stray connect: send them straight to the SMP.
                     if (!smpReachable) {
                         p.kick(brandingTexts.maintenanceKick());
                     } else {
@@ -400,7 +400,7 @@ public final class PizzaLimbo extends JavaPlugin implements Listener {
                 ItemStack[] fEnder = deserialize(fEnderSnapshot);
                 if (fInv != null) p.getInventory().setContents(fInv);     // visual only; SMP keeps the real inv
                 if (fEnder != null) p.getEnderChest().setContents(fEnder);
-                // Real transferred player — now show the hold UI.
+                // Real transferred player: now show the hold UI.
                 BrandingTexts texts = brandingTexts;
                 p.sendMessage(texts.chat());
                 p.sendPlayerListHeaderAndFooter(texts.tabHeader(), texts.tabFooter());
@@ -583,7 +583,7 @@ public final class PizzaLimbo extends JavaPlugin implements Listener {
         applyControlSnapshot(generation, control);
         if (!isActive(generation)) return;
         if (!up) {
-            // SMP just went offline — remember the ready timestamp so only a NEWER one means it's back.
+            // SMP just went offline: remember the ready timestamp so only a NEWER one means it's back.
             if (smpDownSeen.compareAndSet(false, true)) readyBaselineMs = lastSmpReadyMs;
             smpUpSince.set(0L);
             return;
@@ -591,14 +591,14 @@ public final class PizzaLimbo extends JavaPlugin implements Listener {
         if (smpDownSeen.get()) {
             // Primary fast path: the SMP stamped a fresh smp_ready_at after rebooting -> it's actually ready.
             if (lastSmpReadyMs > readyBaselineMs) {
-                getLogger().info("SMP ready signal observed — returning held players to '" + smpServer + "'.");
+                getLogger().info("SMP ready signal observed: returning held players to '" + smpServer + "'.");
                 returnAll();
                 return;
             }
             // Fallback: the port has been reachable for the grace window (covers a missing/failed DB signal).
             smpUpSince.compareAndSet(0L, now);
             if (now - smpUpSince.get() >= graceMs) {
-                getLogger().info("SMP port up >= grace — returning held players (fallback).");
+                getLogger().info("SMP port up >= grace: returning held players (fallback).");
                 returnAll();
             }
         }
@@ -624,7 +624,7 @@ public final class PizzaLimbo extends JavaPlugin implements Listener {
             reopened.removeAll(newClosed);
             closedWorlds = newClosed;
             if (!reopened.isEmpty()) {
-                getLogger().info("Region(s) reopened: " + reopened + " — releasing held players.");
+                getLogger().info("Region(s) reopened (" + reopened + "); releasing held players.");
                 for (Player p : Bukkit.getOnlinePlayers()) {
                     connectToSmp(p, (id, origin) -> origin != null && reopened.contains(origin));
                 }
@@ -807,7 +807,7 @@ public final class PizzaLimbo extends JavaPlugin implements Listener {
                     + " restarts.", NamedTextColor.GRAY));
         Component hotbar = hotbarText != null
             ? legacy(hotbarText)
-            : Component.text("Region under maintenance. You will be returned automatically.", NamedTextColor.GRAY);
+            : Component.text("WARNING: Your Region Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost.", NamedTextColor.GREEN);
         Component maintenanceKick = kickText != null
             ? legacy(kickText)
             : brandTag.get().append(Component.text(" Maintenance", accent))

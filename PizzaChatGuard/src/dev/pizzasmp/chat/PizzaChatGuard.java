@@ -1,7 +1,7 @@
 package dev.pizzasmp.chat;
 
 /*
- * PizzaChatGuard — part of the SMP-Core plugin suite.
+ * PizzaChatGuard: part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the Apache License, Version 2.0 (see LICENSE). No feature is gated or paid.
  */
@@ -40,7 +40,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 /**
- * PizzaChatGuard — false-positive-resistant chat filter.
+ * PizzaChatGuard: false-positive-resistant chat filter.
  *
  * Design goals:
  *  - Whole-WORD matching only (word boundaries). "ass" never matches inside "class"/"grass"/"pass".
@@ -220,11 +220,8 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         }
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "chatguard");
         this.storage.importFromYamlOnce(java.util.List.of("strikes"), false);
-        if (!this.storage.isMysql()) {
-            getLogger().warning("[storage] running on local files: chat strikes will NOT be shared "
-                + "between backends, so a player can shed them by changing server. "
-                + "Configure a database (PizzaNetworkCore sync.database or storage.database) to share them.");
-        }
+        this.storage.logLocalFiles(this, "chat strikes will NOT be shared between backends, so a player can "
+            + "shed them by changing server.");
         loadPolicy();
         initLeet();
         loadStrikes();
@@ -236,7 +233,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
             refreshOnlinePermissionSnapshots();
         }, 1L, 20L);
         FilterPolicy policy = filterPolicy;
-        getLogger().info("PizzaChatGuard enabled — " + policy.slurWords().size() + " slurs, "
+        getLogger().info("PizzaChatGuard enabled: " + policy.slurWords().size() + " slurs, "
             + policy.blockedWords().size() + " blocked, " + policy.safeWords().size() + " safe-words, "
             + policy.advertPatterns().size() + " advert patterns, filter=" + policy.enabled());
     }
@@ -364,7 +361,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
             for (Map.Entry<UUID, StrikeState> e : Map.copyOf(strikeStates).entrySet()) {
                 StrikeState state = e.getValue();
                 if (state.count() <= 0) continue;
-                if (state.expiresAtMillis() > 0L && now > state.expiresAtMillis()) continue; // stale — don't persist
+                if (state.expiresAtMillis() > 0L && now > state.expiresAtMillis()) continue; // stale: don't persist
                 String key = e.getKey().toString();
                 cfg.set("counts." + key, state.count());
                 if (state.expiresAtMillis() > 0L) cfg.set("expiry." + key, state.expiresAtMillis());
@@ -1023,7 +1020,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
 
     // True when two (already lowercased/trimmed) messages are identical, or close enough to
     // count as spam: alphanumeric-only forms within a small Levenshtein distance. Fuzzy
-    // matching is skipped for very short messages ("ok", "gg") to avoid false positives —
+    // matching is skipped for very short messages ("ok", "gg") to avoid false positives:
     // exact repeats of those are still caught by the equality check.
     private boolean isSameOrSimilar(String a, String b) {
         if (a.equals(b)) return true;
@@ -1097,7 +1094,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     }
 
     private void applyViolation(Player p, UUID id, Violation v, String message) {
-        // Spam and caps are soft — warn only, never escalate to mutes.
+        // Spam and caps are soft: warn only, never escalate to mutes.
         if (v == Violation.SPAM_RATE) {
             if (p != null && p.isOnline()) p.sendMessage("§cPlease wait 1 second before your next message");
             return;
@@ -1112,8 +1109,8 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
             }
             return;
         }
-        // Hard violations (slur/blocked/advert) — escalate with a 5-strike system.
-        // SEVERE violations (hate speech / slurs) are "really bad" — instant mute, no warnings.
+        // Hard violations (slur/blocked/advert): escalate with a 5-strike system.
+        // SEVERE violations (hate speech / slurs) are "really bad": instant mute, no warnings.
         boolean severe = (v == Violation.SLUR);
         String playerName = p != null && p.isOnline() ? p.getName() : null;
         StrikeState strike = strikeStates.compute(id, (ignored, previous) -> {
@@ -1424,7 +1421,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
                     return true;
                 }
             }
-            sender.sendMessage("§ePizzaChatGuard §7— false-positive-resistant chat filter");
+            sender.sendMessage("§ePizzaChatGuard§7: false-positive-resistant chat filter");
             sender.sendMessage("§7/clearwarnings <player> §8- clear a player's warnings");
             sender.sendMessage("§7/pcg reload §8- reload config");
             sender.sendMessage("§7/pcg owner on|off §8- also guard owner/dev");

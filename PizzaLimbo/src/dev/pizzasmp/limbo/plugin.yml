@@ -1,7 +1,7 @@
 name: PizzaLimbo
 version: 1.0.0
 main: dev.pizzasmp.limbo.PizzaLimbo
-api-version: '1.21'
+api-version: '1.21.7'
 author: FolksyPizza
 description: Holds transferred players in a protected maintenance hub and returns them when the SMP is ready.
 libraries:

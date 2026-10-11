@@ -1,4 +1,4 @@
--- SMP-Core network schema — single shared MariaDB for velocity + lobby + survival + maintenance.
+-- SMP-Core network schema: single shared MariaDB for velocity + lobby + survival + maintenance.
 --
 -- This schema is the backbone of cross-server sync: because every backend and the
 -- Velocity bridge read and write this one database, a player's inventory, balance,
@@ -7,7 +7,7 @@
 -- AUTHORITY RULE: for any table PizzaNetworkCore creates at runtime, the definition
 -- here is copied verbatim from PizzaNetworkCore's own ensureSchema() SQL. PNC's
 -- CREATE TABLE IF NOT EXISTS calls are therefore no-ops against a database built from
--- this file. Do not "improve" column types here — a mismatch (e.g. DECIMAL vs DOUBLE
+-- this file. Do not "improve" column types here: a mismatch (e.g. DECIMAL vs DOUBLE
 -- on auction price) will not error, it will silently round money.
 --
 -- Rebuilt 2026-08-06 for the 4-server topology (pvp retired, full fresh player wipe).
@@ -16,11 +16,11 @@ CREATE DATABASE IF NOT EXISTS pizzasmp CHARACTER SET utf8mb4 COLLATE utf8mb4_uni
 USE pizzasmp;
 
 -- ---------------------------------------------------------------------------
--- SECTION 1 — Core identity and per-player state.
+-- SECTION 1: Core identity and per-player state.
 -- Owned by this file (PNC reads these but does not create them).
 --
 -- No FOREIGN KEYs to players(uuid) here, deliberately. Several write paths touch a
--- player's row while they are OFFLINE and possibly never-seen — most notably the
+-- player's row while they are OFFLINE and possibly never-seen: most notably the
 -- offline /pay path, which credits balances.pending_vault_credit for a target that
 -- may not exist in players yet. Under a FK that insert throws and the payment is lost.
 -- ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS players (
 );
 
 -- One row per online player. The Velocity bridge writes/heartbeats these and PNC
--- reads them to answer "who is online network-wide, and on which backend" — this is
+-- reads them to answer "who is online network-wide, and on which backend": this is
 -- what powers the global tablist and cross-server DM routing.
 CREATE TABLE IF NOT EXISTS session_leases (
   uuid CHAR(36) PRIMARY KEY,
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS rtp_cooldowns (
 );
 
 -- ---------------------------------------------------------------------------
--- SECTION 2 — Moderation. Owned by PizzaPunishment / this file.
+-- SECTION 2: Moderation. Owned by PizzaPunishment / this file.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS punishments (
@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS punishment_audit_log (
 );
 
 -- ---------------------------------------------------------------------------
--- SECTION 3 — Network transfer / maintenance control plane.
+-- SECTION 3: Network transfer / maintenance control plane.
 -- Owned by this file; PNC's MaintenanceQueueManager and the Velocity bridge read it.
 -- ---------------------------------------------------------------------------
 
@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS shared_inventories (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
--- targets_csv defaults to 'survival' — the pvp backend was retired 2026-08-06 and the
+-- targets_csv defaults to 'survival': the pvp backend was retired 2026-08-06 and the
 -- lobby is the offload destination, so it is never itself a maintenance target.
 CREATE TABLE IF NOT EXISTS maintenance_state (
   id TINYINT PRIMARY KEY,
@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS duel_matches (
 );
 
 -- ---------------------------------------------------------------------------
--- SECTION 4 — Tables owned by PizzaNetworkCore.
+-- SECTION 4: Tables owned by PizzaNetworkCore.
 -- Copied verbatim from PNC's ensureSchema(). See AUTHORITY RULE at the top.
 -- ---------------------------------------------------------------------------
 

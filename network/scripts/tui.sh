@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# pizzactl — cursor-driven browser for the ops scripts.
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# pizzactl: cursor-driven browser for the ops scripts.
 #
 # The CLI is the control surface for this network (the in-game /admin and /manage
 # consoles were removed), which left ~60 scripts to remember. This groups them by intent,
@@ -26,7 +28,7 @@ SERVERS=(
   "Status (all services)|./scripts/status.sh|Ports, PIDs and readiness for every service"
   "Start everything|./scripts/start.sh|DB, proxy, then each enabled backend in order"
   "Start one service|@START|Bring a single service up"
-  "Restart one service|@RESTART|Stop then start — use after a jar swap"
+  "Restart one service|@RESTART|Stop then start: use after a jar swap"
   "Stop one service|@STOP|Graceful stop, then verify the port is free"
   "!Stop everything|./scripts/stop.sh|Graceful stop of every enabled service"
   "Screen sessions|./scripts/screen_sessions.sh|List the detached consoles"
@@ -180,7 +182,7 @@ show_menu() {
       fi
       i=$((i+1))
     done
-    (( n == 0 )) && printf '  %s(no matches — esc clears the filter)%s\n' "$DIM" "$R"
+    (( n == 0 )) && printf '  %s(no matches: esc clears the filter)%s\n' "$DIM" "$R"
     printf '\n%s ↑↓/jk move · enter run · / filter · esc back · q quit%s\n' "$DIM" "$R"
     hide
 

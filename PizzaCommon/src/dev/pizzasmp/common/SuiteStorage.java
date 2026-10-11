@@ -1,5 +1,5 @@
 /*
- * SuiteStorage — part of the SMP-Core plugin suite (PizzaCommon shared library).
+ * SuiteStorage: part of the SMP-Core plugin suite (PizzaCommon shared library).
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the Apache License, Version 2.0 (see LICENSE). No feature is gated or paid.
  */
@@ -41,7 +41,7 @@ import java.util.UUID;
  * auto uses the database when one is configured and reachable, and files otherwise. With no database block of
  * its own, a plugin shares PizzaNetworkCore's connection settings, so one database serves the whole suite.
  *
- * The data MODEL stays YAML everywhere — plugins keep working with YamlConfiguration objects. In
+ * The data MODEL stays YAML everywhere: plugins keep working with YamlConfiguration objects. In
  * mysql mode the serialized YAML text is just stored as a row instead of a file, so wiring an
  * existing YAML plugin onto the DB is a load/save swap, not a rewrite. Reads hit the DB live
  * (no boot-time cache), so multiple backends behind a Velocity proxy stay in sync.
@@ -119,7 +119,7 @@ public final class SuiteStorage {
             // driver that Paper loaded into this plugin's own classloader via `libraries:`.
             // The failure surfaces as the unhelpful "Failed to get driver instance", and
             // because init is wrapped in a fallback, the plugin then quietly runs on local
-            // files — looking configured for MySQL while sharing nothing.
+            // files: looking configured for MySQL while sharing nothing.
             hc.setDriverClassName("org.mariadb.jdbc.Driver");
             hc.setJdbcUrl("jdbc:mariadb://" + host + ":" + port + "/" + name + "?useSSL=false&allowPublicKeyRetrieval=true");
             hc.setUsername(user);
@@ -158,6 +158,27 @@ public final class SuiteStorage {
     }
 
     public boolean isMysql() { return this.mysql; }
+
+    /**
+     * Logs that this plugin keeps its data in local files. Behind a proxy that data is not shared between backends,
+     * so it is a warning there; on a single server it is the normal setup.
+     */
+    public void logLocalFiles(Plugin plugin, String unshared) {
+        if (this.mysql) return;
+        if (behindProxy()) {
+            plugin.getLogger().warning("[storage] running on local files: " + unshared + " Configure a database "
+                + "(PizzaNetworkCore sync.database or storage.database) to share them.");
+        } else {
+            plugin.getLogger().info("[storage] local files (no database configured)");
+        }
+    }
+
+    /** True when the server's config files enable Velocity forwarding or BungeeCord mode. */
+    static boolean behindProxy() {
+        YamlConfiguration paper = YamlConfiguration.loadConfiguration(new File("config", "paper-global.yml"));
+        YamlConfiguration spigot = YamlConfiguration.loadConfiguration(new File("spigot.yml"));
+        return paper.getBoolean("proxies.velocity.enabled", false) || spigot.getBoolean("settings.bungeecord", false);
+    }
 
     public void close() { if (this.ownsPool && this.ds != null && !this.ds.isClosed()) this.ds.close(); }
 

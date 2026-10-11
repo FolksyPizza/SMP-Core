@@ -52,7 +52,7 @@ maintenance_queue:
 maintenance_hold:
   # Green hotbar line shown to held players. backend_maint does not set the DB message,
   # so this is the single source for the hold wording.
-  message: "The Server Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost. You Will Be Put Back After Your Region Restarts."
+  message: "WARNING: Your Region Is Undergoing Maintenance. Do Not Teleport Or Your Location Will Be Lost."
 router:
   debug_log: false
 combat:

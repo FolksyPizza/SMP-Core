@@ -1,4 +1,4 @@
-# PROXY-SIDE TAB — this file owns the TABLIST.
+# PROXY-SIDE TAB: this file owns the TABLIST.
 #
 # TAB runs on Velocity with global-playerlist and tablist-name-formatting enabled, so the
 # proxy renders the player list for the whole network. Anything set in a BACKEND's

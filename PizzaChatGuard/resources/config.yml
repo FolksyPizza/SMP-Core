@@ -1,4 +1,4 @@
-# PizzaChatGuard — false-positive-resistant chat filter
+# PizzaChatGuard: false-positive-resistant chat filter
 enabled: true
 
 # Spam controls
@@ -11,7 +11,7 @@ caps-threshold: 0.7         # >=70% uppercase = caps violation
 
 block-advertising: true     # block IPs and domain names (server advertising)
 
-# Slurs / hate speech — matched as WHOLE WORDS after leet-speak normalization.
+# Slurs / hate speech: matched as WHOLE WORDS after leet-speak normalization.
 # Keep this list specific. Word-boundary matching means these never match inside
 # innocent words. (Add entries lowercase; leet variants are handled automatically.)
 # Slurs of at least this many letters also match inside longer words and across spaced-out fragments.
@@ -52,7 +52,7 @@ slur-words:
   - homo
   - queer
 
-# Soft-blocked words — exact whole-word match (with leet normalization). Common profanity.
+# Soft-blocked words: exact whole-word match (with leet normalization). Common profanity.
 blocked-words:
   - kys
   - kyss

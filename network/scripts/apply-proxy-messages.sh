@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 # Merge configs/proxy/lang/messages-overrides.properties into a Velocity proxy's lang/ files.
 #   scripts/apply-proxy-messages.sh <proxy dir>
 # Replaces only the keys in the overrides file, in messages.properties and every English variant. Keeps a

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 # Deploy built plugins to the right servers, by platform.
 #
-# THE PROBLEM THIS SOLVES: jars were being copied ad hoc, so backends drifted apart —
+# THE PROBLEM THIS SOLVES: jars were being copied ad hoc, so backends drifted apart:
 # dev ended up on an older PizzaNetworkCore with no quick-actions datapack while
 # survival had the current one. Anything that is "the same everywhere" must be applied
 # by one command that cannot forget a target.
@@ -28,7 +30,7 @@ PAPER_JARS=(PizzaNetworkCore.jar PizzaAdminTools.jar PizzaChatGuard.jar
 
 # Hub-only plugins. PizzaSpawnRules grants creative flight inside its protected zone to
 # power the lobby double jump, and its lockAllWorld option makes the WHOLE world that
-# zone — which on survival means every player is handed flight. It belongs on the hub
+# zone, which on survival means every player is handed flight. It belongs on the hub
 # backends only.
 HUB_ONLY_JARS=(PizzaSpawnRules.jar)
 HUB_SERVERS=(lobby maintenance)
@@ -112,7 +114,7 @@ if (( CHECK == 1 )); then
         echo "  $(printf '%-14s' "$b") ok"
       fi
     done
-    # A data folder with no jar beside it is the fingerprint of an uninstalled plugin —
+    # A data folder with no jar beside it is the fingerprint of an uninstalled plugin:
     # which is exactly how aAmethyst hid. Matching has to be case-insensitive (WorldEdit vs
     # worldedit-bukkit.jar) and alias-aware (a plugin's data folder often does not share a
     # name with its jar), otherwise the list is all false positives and gets ignored.
@@ -143,7 +145,7 @@ if (( CHECK == 1 )); then
     echo
     (( missing_total > 0 )) && echo "  ^ a MISSING third-party plugin means its features silently do nothing."
   else
-    echo "  (no manifest — create scripts/plugin-manifest.env to enable this check)"
+    echo "  (no manifest: create scripts/plugin-manifest.env to enable this check)"
   fi
   exit 0
 fi

@@ -8,6 +8,7 @@
 # Downloads a pinned Paper build and the required third-party plugins (checksums verified), starts the server in
 # offline mode with File storage (no database), waits for startup, stops it, and checks the log: every suite plugin
 # must enable at the suite version, with no SEVERE line, no plugin exception and no failed schema statement.
+# PAPER_JAR=<path> boots a local Paper jar instead of the pinned one (checking another supported version).
 set -euo pipefail
 
 JARS="$(cd "${1:-build/dist}" && pwd)"
@@ -28,7 +29,7 @@ fetch() { # url sha256 destination
 }
 
 rm -rf "$WORK"; mkdir -p "$WORK/plugins"; cd "$WORK"
-fetch "$PAPER_URL" "$PAPER_SHA" paper.jar
+if [ -n "${PAPER_JAR:-}" ]; then cp "$PAPER_JAR" paper.jar; else fetch "$PAPER_URL" "$PAPER_SHA" paper.jar; fi
 fetch "$PROTOCOLLIB_URL" "$PROTOCOLLIB_SHA" plugins/ProtocolLib.jar
 fetch "$VAULT_URL" "$VAULT_SHA" plugins/Vault.jar
 # Backend plugins only: PizzaProxyGuard runs on Velocity and PizzaLimbo on its own limbo backend.

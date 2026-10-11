@@ -3,7 +3,7 @@ motd = "\n<white>1.21.11-Dev"
 show-max-players = 1000
 # Mojang authentication happens HERE, at the proxy. This is what fetches each
 # player's real UUID and their skin/textures property on every login, then hands
-# both to the backends over modern forwarding — so skins stay current.
+# both to the backends over modern forwarding, so skins stay current.
 # The backends deliberately keep online-mode=false; they trust this proxy via
 # forwarding.secret. Setting them true would break the network.
 online-mode = true
@@ -27,7 +27,7 @@ try = ["lobby"]
 lobby = "127.0.0.1:25566"
 survival = "127.0.0.1:25567"
 maintenance = "127.0.0.1:25569"
-# Development/test backend. Deliberately NOT in `try` — a player must ask for it
+# Development/test backend. Deliberately NOT in `try`: a player must ask for it
 # explicitly (/server dev) and is never routed here by a fallback.
 dev = "127.0.0.1:25568"
 

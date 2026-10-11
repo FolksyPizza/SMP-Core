@@ -1,9 +1,11 @@
+// Copyright (c) 2025-2026 William W. (FolksyPizza).
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
 /*
  * Cross-server chat relay, absorbed into PizzaProxyGuard.
  *
  * Was a standalone plugin (PizzaVelocityBridge). Velocity permits one @Plugin per jar, so
  * this is now a plain component that PizzaProxyGuard constructs and registers as a
- * listener — one proxy plugin owning both jobs: gatekeeping and chat.
+ * listener: one proxy plugin owning both jobs: gatekeeping and chat.
  *
  * What it does: backends send global chat / DMs / team chat over the "pizzasmp:bridge"
  * plugin-message channel; this fans each message back out to EVERY player on the network,
@@ -11,7 +13,7 @@
  * session leases (which player is on which backend), which is what lets a DM find someone
  * on another server.
  *
- * The join-denial and kick-mediation handlers that used to live here were REMOVED —
+ * The join-denial and kick-mediation handlers that used to live here were REMOVED:
  * PizzaProxyGuard owns those, and having both set a result on the same event is a bug.
  */
 package dev.pizzasmp.proxyguard;
@@ -73,7 +75,7 @@ public final class ChatRelay {
     private String dbPassword;
     private int leaseSeconds;
 
-    /** Owning plugin instance — Velocity keys scheduled tasks and plugin messages on it. */
+    /** Owning plugin instance: Velocity keys scheduled tasks and plugin messages on it. */
     private final Object owner;
 
     ChatRelay(Object owner, ProxyServer proxy, Logger logger, Path dataDirectory) {
@@ -152,7 +154,7 @@ public final class ChatRelay {
      * Relay an RTP request from whatever backend the player is on to the one that owns
      * the destination world.
      *
-     * Only the destination backend can decide whether a spot is safe — it alone has
+     * Only the destination backend can decide whether a spot is safe: it alone has
      * those worlds loaded. Doing this over the proxy (rather than transferring the
      * player first and searching afterwards) is what makes cross-server /rtp land the
      * player directly instead of visibly dropping them at their arrival point first.
@@ -335,7 +337,7 @@ public final class ChatRelay {
         // Expiry is computed by the DATABASE. A Java-side Timestamp is sent in the JVM's
         // local zone; against a UTC database on a non-UTC host every lease landed hours in
         // the past, so `expires_at > CURRENT_TIMESTAMP` never matched and the whole network
-        // read as empty — no cross-backend completion, no cross-backend /tpa or /msg.
+        // read as empty: no cross-backend completion, no cross-backend /tpa or /msg.
         String leaseSql = "INSERT INTO session_leases (uuid, lease_token, server_name, expires_at, heartbeat_at) " +
             "VALUES (?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND), CURRENT_TIMESTAMP) " +
             "ON DUPLICATE KEY UPDATE lease_token=VALUES(lease_token), server_name=VALUES(server_name), expires_at=VALUES(expires_at), heartbeat_at=VALUES(heartbeat_at)";
@@ -545,7 +547,7 @@ public final class ChatRelay {
      *
      * We deliberately do NOT hunt for another backend to shove them into. Silent
      * rerouting is how a player asking for survival ends up somewhere they did not
-     * choose, and — when every backend is down — how the proxy ends up retrying the
+     * choose, and, when every backend is down, how the proxy ends up retrying the
      * whole try-list per join. That retry loop is not theoretical: on 2026-08-06 with
      * both backends down it logged ~400 full stack traces per connecting player and
      * grew velocity.log to 1.9 GB in three minutes.

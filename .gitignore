@@ -11,6 +11,8 @@
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
 dist/
+# Servers created by setup.sh
+/server/
 .gradle/
 
 # OS / editor noise
@@ -21,7 +23,7 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Branding is private — not shipped in the public repo
+# Branding is private: not shipped in the public repo
 PizzaNetworkCore/resources/branding.yml
 setup/apply-branding.sh
 branding.yml

@@ -2,7 +2,7 @@ package me.pizzasmp.punishdrop;
 
 import java.time.ZoneOffset;
 /*
- * PunishDropPlugin — part of the SMP-Core plugin suite.
+ * PunishDropPlugin: part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the Apache License, Version 2.0 (see LICENSE). No feature is gated or paid.
  */
@@ -169,7 +169,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
      * Shared storage for moderation state.
      *
      * Offence counts drive the escalation ladder (7d, 30d, then a year), so keeping them
-     * per-server meant the ladder reset every time a player changed backend — a repeat
+     * per-server meant the ladder reset every time a player changed backend: a repeat
      * offender looked like a first-timer. Ban records and pending unbans have the same
      * problem: LibertyBans itself is already shared, but this plugin's parallel bookkeeping
      * was not, so staff saw a partial history depending on where they were standing.
@@ -179,7 +179,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     private static final String DOC_RECORDS = "ban-records";
     private static final String DOC_PENDING = "pending-unbans";
 
-    /** See PizzaAdminTools.loadSharedDoc — same one-shot, non-clobbering import. */
+    /** See PizzaAdminTools.loadSharedDoc: same one-shot, non-clobbering import. */
     private YamlConfiguration loadSharedDoc(String docName, String legacyFileName) {
         YamlConfiguration shared = this.storage.loadDoc(docName);
         if (!shared.getKeys(true).isEmpty()) return shared;
@@ -202,11 +202,8 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         loadBranding();
         saveConfig();
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "punishment");
-        if (!this.storage.isMysql()) {
-            getLogger().warning("[storage] running on local files: offence counts and ban records will "
-                + "NOT be shared between backends, so punishment escalation resets on a server hop. "
-                + "Configure a database (PizzaNetworkCore sync.database or storage.database) to share them.");
-        }
+        this.storage.logLocalFiles(this, "offence counts and ban records will NOT be shared between backends, "
+            + "so punishment escalation resets on a server hop.");
         loadFlightWhitelist();
         loadPunishmentPresets();
         initLocations();
@@ -1642,7 +1639,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    // ===================== Dialog UI (1.21.6+) — /moderation as Paper dialogs =====================
+    // ===================== Dialog UI (1.21.6+): /moderation as Paper dialogs =====================
     private static final TextColor DIALOG_BRAND = TextColor.color(0x00BFFF);
     private static final int DLG_PAGE = 12;
 
@@ -2270,7 +2267,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         for (int i = start; i < end; i++) {
             PunishmentRecord rec = list.get(i);
             buttons.add(dialogButton(Component.text(rec.id + "  " + rec.displayTarget(), NamedTextColor.WHITE),
-                rec.type.displayName + " — " + formatDuration(rec), 300, p -> openRecordDetailDialog(p, rec.id, mode, page)));
+                rec.type.displayName + ": " + formatDuration(rec), 300, p -> openRecordDetailDialog(p, rec.id, mode, page)));
         }
         buttons.add(dialogButton(Component.text("Bans", NamedTextColor.RED), null, 100, p -> openListDialog(p, ViewMode.ACTIVE_BANS, 0)));
         buttons.add(dialogButton(Component.text("Mutes", NamedTextColor.YELLOW), null, 100, p -> openListDialog(p, ViewMode.ACTIVE_MUTES, 0)));
@@ -4031,7 +4028,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         banArgs[1] = duration;
         System.arraycopy(reasonTokens, 0, banArgs, 2, reasonTokens.length);
         sender.sendMessage(ChatColor.RED + "Offense " + newCount + "/3 logged for " + target.targetName
-            + " — applying " + duration + " ban.");
+            + ": applying " + duration + " ban.");
         return handleGenericPunishCommand(sender, banArgs);
     }
 

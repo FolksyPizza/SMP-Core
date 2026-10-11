@@ -1,7 +1,7 @@
 name: PizzaPunishment
 main: me.pizzasmp.punishdrop.PunishDropPlugin
 version: 1.0.0
-api-version: "1.21"
+api-version: '1.21.7'
 author: FolksyPizza
 description: Punishment stack with presets, Ban IDs, history, and admin GUIs.
 # Loads after Simple Voice Chat when it is installed, so mutes also silence voice chat.

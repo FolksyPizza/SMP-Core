@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 # Stop one service (or all).
 #
 # Drives off all_backends() rather than a hardcoded case list. The old list omitted
 # `dev` entirely, so `stop_only.sh dev` silently fell through to the usage branch and
-# stopped nothing — which is how dev kept running a stale jar.
+# stopped nothing, which is how dev kept running a stale jar.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/lib.sh"
@@ -22,7 +24,7 @@ for b in $(all_backends); do
     # start is not skipped by the "already running" check.
     port="$(service_port "$b")"
     if [[ -n "$port" ]] && ! wait_for_port_closed "$port" 30; then
-      echo "[$b] port $port still bound after graceful stop — killing the JVM" >&2
+      echo "[$b] port $port still bound after graceful stop: killing the JVM" >&2
       pkill -f "$b/server.jar" 2>/dev/null || true
       sleep 2
     fi

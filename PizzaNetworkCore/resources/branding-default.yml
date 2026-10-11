@@ -1,0 +1,32 @@
+# SMP-Core branding: one file themes the whole suite.
+#
+# PizzaNetworkCore writes this file to plugins/PizzaNetworkCore/branding.yml on first start. PizzaAdminTools,
+# PizzaPunishment and PizzaLimbo read it from there (their branding.file setting points elsewhere if needed).
+# Edit it and restart, or keep several profiles and switch live with /branding set <profile>.
+#
+# Colors are hex without "#". The primary color replaces the suite's accent color in messages, menus, dialogs and
+# the scoreboard. Messages and config text can use these tokens:
+#   {brand} {brand_short} {tagline} {region} {discord} {plus} {plusplus}
+#   {primary} {info} {success} {warning} {danger} {muted} {text}   (colors)
+
+active: example
+
+profiles:
+  example:
+    display: "ExampleSMP"      # the server name: messages, menus, ban screens, the limbo
+    short: "ExampleSMP"        # a shorter name where space is tight
+    tagline: "Survival"
+    region: "NA-East"          # shown by the limbo while players wait
+    discord: ""                # invite link for ban screens and help; leave empty to hide it
+    # Subscription tier names. Without these lines they follow the name: ExampleSMP+ and ExampleSMP++.
+    # tiers:
+    #   plus: "ExampleSMP+"
+    #   plusplus: "ExampleSMP++"
+    colors:
+      primary: "00BFFF"        # accent: titles, highlights, dialog buttons
+      info: "00BFFF"
+      success: "55FF55"
+      warning: "FFAA00"
+      danger: "FF5555"
+      muted: "AAAAAA"          # secondary text
+      text: "FFFFFF"

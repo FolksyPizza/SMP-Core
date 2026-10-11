@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 William W. (FolksyPizza).
+// Licensed under the Apache License, Version 2.0 (see LICENSE).
 /*
  * Decompiled with CFR 0.152.
  * 
@@ -401,7 +403,7 @@ final class PlayerSyncManager {
     /**
      * Dismiss a death screen left behind on another backend.
      *
-     * On a proxy network you can die on one backend and leave before clicking Respawn —
+     * On a proxy network you can die on one backend and leave before clicking Respawn:
      * by switching servers, or by quitting outright. That backend never receives the
      * respawn packet, so it saves your player data still dead. Come back to it later and
      * vanilla faithfully restores that state: you are greeted by the death screen you
@@ -409,7 +411,7 @@ final class PlayerSyncManager {
      *
      * Respawning on arrival is the fix. The player is dead either way; the only question
      * is whether they have to click through a stale screen to find out. Note that health
-     * restoration alone does not do this — the client is already showing the screen and
+     * restoration alone does not do this: the client is already showing the screen and
      * needs an actual respawn to leave it.
      */
     private void clearStaleDeathScreen(Player player) {
@@ -417,7 +419,7 @@ final class PlayerSyncManager {
             return;
         }
         this.plugin.getLogger().info("[sync] " + player.getName()
-            + " joined " + this.serverName + " still dead from a previous session — respawning.");
+            + " joined " + this.serverName + " still dead from a previous session: respawning.");
         this.runOnPlayerLater(player, () -> {
             if (player.isOnline() && player.isDead()) {
                 try {
@@ -588,7 +590,7 @@ final class PlayerSyncManager {
 
     void queueOneTimeAction(UUID uuid, String action, int ttlSeconds) {
         this.runAsync(() -> {
-            // Expiry is computed by the database — see upsertLease for why a Java-side
+            // Expiry is computed by the database; see upsertLease for why a Java-side
             // Timestamp here made every queued action arrive already expired.
             String sql = "INSERT INTO player_transfer_actions (uuid, action, expires_at) "
                        + "VALUES (?, ?, TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP)) "
@@ -844,7 +846,7 @@ final class PlayerSyncManager {
      * These rows were written with Timestamp.from(Instant.now()), which the driver sends
      * in the JVM's local zone. Our MariaDB runs UTC, so on an EDT host every lease landed
      * four hours in the past and `expires_at > CURRENT_TIMESTAMP` was never true. Nothing
-     * errored; the network simply behaved as though no one was online anywhere — no
+     * errored; the network simply behaved as though no one was online anywhere: no
      * cross-backend name completion, no cross-backend /tpa or /msg routing, and queued
      * transfer actions (including RTP) expired before they could be applied.
      *
@@ -1225,8 +1227,8 @@ final class PlayerSyncManager {
          * which leaked hub flight into survival. The lobby's spawn rules call
          * setAllowFlight(true) to power the double jump while the player is still in SURVIVAL
          * gamemode, so the snapshot recorded "allowFlight = true" for an ordinary survival
-         * player. Arriving on survival, anyone holding the bypass node — which every wildcard
-         * permission grants, so every admin and dev — had that restored and could fly.
+         * player. Arriving on survival, anyone holding the bypass node, which every wildcard
+         * permission grants, so every admin and dev: had that restored and could fly.
          *
          * A hub's local movement mechanics are not a property of the player, so they are not
          * carried. Flight here is whatever this player's gamemode entitles them to; a hub

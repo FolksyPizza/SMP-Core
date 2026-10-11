@@ -1,5 +1,5 @@
 /*
- * PizzaNetworkCore — part of the SMP-Core plugin suite.
+ * PizzaNetworkCore: part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
  * Licensed under the Apache License, Version 2.0 (see LICENSE). No feature is gated or paid.
  */
@@ -406,7 +406,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private static final String TITLE_AH_SELL = "List Item";
     private static final String TITLE_AH_CONFIRM = "Confirm Listing";
     private static final String TITLE_AH_BUY_CONFIRM = "Confirm Purchase";
-    private static final String TITLE_SHOP_GEAR_2 = "Shop – Gear II";
+    private static final String TITLE_SHOP_GEAR_2 = "Shop: Gear II";
     private static final String TITLE_PVP_SHOP = "PvP Gear";
     private static final String TITLE_CRATE_COMMON = "Common Crate";
     private static final String TITLE_CRATE_CRIMSON = "Crimson Crate";
@@ -1113,7 +1113,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             this.clearHubDoubleJumpFlight(player);
         }
-        // Limbo sync safety net: on ANY shutdown (plain stop, crash-stop, /admin restart — not just the
+        // Limbo sync safety net: on ANY shutdown (plain stop, crash-stop, /admin restart: not just the
         // /limbomaint flow), snapshot every online player's location + inventory + ender chest so the
         // limbo can hold them faithfully when Velocity falls them back. Synchronous on purpose: the DB
         // pool is still open here and players are still online. Region copy is intentionally skipped
@@ -1255,13 +1255,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.saveResource("shop.yml", false);
         }
         this.shopConfig = YamlConfiguration.loadConfiguration((File)file);
-        // Loud on purpose. This fallback is a stale bundled catalogue, and because it silently
-        // "works" it hid the fact that every backend was serving the wrong shop: the maintained
-        // categories.yml/items/ set lives at the NETWORK root, while the lookup above is relative
-        // to each backend. scripts/sync_shop_config.sh is what copies it down.
-        this.getLogger().warning("[shop] configs/shop/{categories.yml,items/} not found under "
-            + (root != null ? root.getAbsolutePath() : "?")
-            + " — falling back to the bundled shop.yml. Run scripts/sync_shop_config.sh.");
+        // The bundled catalogue is the default; categories.yml plus items/ in configs/shop/ replace it. On a
+        // network, each backend needs its own copy of configs/shop/.
+        this.getLogger().info("[shop] using the bundled shop.yml; put categories.yml and items/ in "
+            + (root != null ? new File(root, "configs/shop").getAbsolutePath() : "configs/shop") + " to replace it.");
     }
     private void loadSellConfig() {
         File absData = this.getDataFolder().getAbsoluteFile();
@@ -1345,7 +1342,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    // Background DB health probe. Drives the join gate below — if the database is unreachable,
+    // Background DB health probe. Drives the join gate below: if the database is unreachable,
     // we deny new logins rather than let players join into a broken/data-losing state.
     private void startDbHealthCheck() {
         this.runAsyncRepeatingTask(() -> {
@@ -1471,7 +1468,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         this.clearUnexpectedJoinInvisibility(e.getPlayer());
         this.restorePearlsOnJoin(e.getPlayer());
-        // Non-critical/cosmetic join work — deferred a moment off the join chunk burst when enabled.
+        // Non-critical/cosmetic join work: deferred a moment off the join chunk burst when enabled.
         this.runDeferredJoinWork(joined, () -> {
             this.notifyFollowers(joined.getUniqueId(), joined.getName(), "joined.", false);
             this.refreshTabName(joined);
@@ -1880,7 +1877,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         if (mult < 0.0) mult = 0.0;
-        if (mult == 1.0) return;                       // vanilla — nothing to scale
+        if (mult == 1.0) return;                       // vanilla: nothing to scale
         e.setDamage(e.getDamage() * mult);             // scales the base; armor/enchants still apply after
     }
 
@@ -1901,7 +1898,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.activeDuels.containsKey(victim.getUniqueId())) return;
         this.clearCombatTag(victim.getUniqueId());
         if (this.isHubWorld(victim.getWorld())) return;
-        // Killing the opponent ends YOUR combat too — clear the tag of whoever last hit the victim. This
+        // Killing the opponent ends YOUR combat too: clear the tag of whoever last hit the victim. This
         // covers crystal/anchor/bed kills where victim.getKiller() is null (the getKiller() branch below
         // only handles direct kills).
         UUID lastAtt = this.lastCombatAttacker.remove(victim.getUniqueId());
@@ -1930,7 +1927,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             killer.sendActionBar((Component)Component.text("§c+1"));
             this.claimBountiesOnKill(killer, victim);
         } else {
-            // No killer (self-kill / environment death) — victim claims their own bounty
+            // No killer (self-kill / environment death): victim claims their own bounty
             this.claimBountiesOnKill(victim, victim);
         }
     }
@@ -1944,7 +1941,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             e.setKeepLevel(true);
             return;
         }
-        // Diagnostic: if loot "vanishes" on death (e.g. /kill), this shows why — empty drops means the
+        // Diagnostic: if loot "vanishes" on death (e.g. /kill), this shows why: empty drops means the
         // items were kept (keepInventory) or the player was in creative, NOT destroyed by this handler.
         org.bukkit.GameMode gm = dead.getGameMode();
         this.getLogger().info("[death] " + dead.getName() + " gm=" + gm
@@ -1964,7 +1961,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         // Items ALWAYS drop. CRITICAL FIX: when the keepInventory gamerule is ON, the event's drop list
         // is EMPTY, but PunishDrop's setKeepInventory(false) makes the server clear the inventory while
-        // dropping nothing — so loot was being DESTROYED. Force keep-inventory off (so the inventory is
+        // dropping nothing, so loot was being DESTROYED. Force keep-inventory off (so the inventory is
         // cleared, no dupe) and re-drop the items ourselves: the event's drops if present, else a snapshot
         // of the live inventory. Everything is despawn-protected at the death spot.
         e.setKeepInventory(false);
@@ -2014,7 +2011,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     public void onDeathDropPickup(org.bukkit.event.entity.EntityPickupItemEvent e) {
         this.protectedDeathDrops.remove(e.getItem().getUniqueId());
     }
-    // (Removed the worth-lore inventory resync hack — unit-worth lore is amount-independent,
+    // (Removed the worth-lore inventory resync hack: unit-worth lore is amount-independent,
     // so client stacking prediction stays consistent without forced WINDOW_ITEMS resends.)
 
     @EventHandler(priority=EventPriority.LOWEST)
@@ -2459,7 +2456,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             e.setTo(from);
             return;
         }
-        // NO teleport-cancel-on-move anywhere — all teleports are instant, so movement never
+        // NO teleport-cancel-on-move anywhere: all teleports are instant, so movement never
         // cancels a teleport. (Activity tracking + join-state freeze above are still handled.)
     }
 
@@ -2487,7 +2484,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.runOnPlayerThread(p, () -> this.handlePendingTextInput(p, pendingInput, text));
             return;
         }
-        // :alias: chat icons are applied at render time — see onChatIconRender.
+        // :alias: chat icons are applied at render time; see onChatIconRender.
         if (!this.isChatInterceptionEnabled()) {
             return;
         }
@@ -2549,7 +2546,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.getServer().getConsoleSender().sendMessage(formatted);
     }
 
-    // :alias: chat icons (item sprites / player heads — Minecraft 1.21.9+ object components). Applied to the
+    // :alias: chat icons (item sprites / player heads: Minecraft 1.21.9+ object components). Applied to the
     // FINAL rendered line, not to the message: EssentialsXChat rebuilds every chat line from a legacy-string
     // copy of the message (ComponentFlattener.basic), and object components have no legacy form, so rewriting
     // e.message() lost every icon. Wrapping the renderer lets any formatter run first; the literal :alias:
@@ -3422,11 +3419,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private final java.util.Set<UUID> voidRescueInProgress = ConcurrentHashMap.newKeySet();
 
-    // Void handling (runs every 1s). OVERWORLD ONLY — the End/Nether have legitimate void
+    // Void handling (runs every 1s). OVERWORLD ONLY: the End/Nether have legitimate void
     // (end islands, nether roof) so they are never touched. A player below the overworld floor is
     // silently RTP'd to a fresh safe location (same safe-spot search as /rtp). No hotbar message,
     // no countdown; it force-teleports even in combat / on cooldown (we bypass the checked RTP path
-    // entirely). SPECTATOR is exempt — it's the vanilla void-immune mode and staff moderate in it.
+    // entirely). SPECTATOR is exempt: it's the vanilla void-immune mode and staff moderate in it.
     private void tickVoidRescue() {
         for (Player p : Bukkit.getOnlinePlayers()) {
             PlatformScheduler.entityNow(this, p, () -> {
@@ -3500,7 +3497,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                                     if (failure == null && Boolean.TRUE.equals(teleported)) {
                                         player.setFallDistance(0.0f);
                                         this.getLogger().info("[VoidRescue] " + player.getName()
-                                            + " was in the overworld void — RTP'd to a safe location.");
+                                            + " was in the overworld void: RTP'd to a safe location.");
                                     }
                                     this.voidRescueInProgress.remove(uuid);
                                 }, () -> this.voidRescueInProgress.remove(uuid)));
@@ -3526,7 +3523,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // Skin refresh: behind the Velocity proxy the backend can serve a cached game profile, so a
     // player who changed their Minecraft skin still shows the old one. On join, re-fetch textures
     // from Mojang (async) and re-apply, which refreshes the skin for the player and all viewers.
-    // Premium (v4) UUIDs only — Bedrock (Floodgate 0000… prefix) and offline (v3) are skipped;
+    // Premium (v4) UUIDs only: Bedrock (Floodgate 0000… prefix) and offline (v3) are skipped;
     // Geyser handles Bedrock skins.
     private void refreshSkinOnJoin(Player p) {
         if (p.getUniqueId().version() != 4) return;
@@ -3572,7 +3569,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     @EventHandler(priority=EventPriority.NORMAL, ignoreCancelled=true)
     public void onCreatureSpawn(org.bukkit.event.entity.CreatureSpawnEvent e) {
         // "Mob Spawns" is a per-player toggle (default ON = mobs spawn). When a player has it OFF, ALL
-        // natural mob spawns near them are cancelled — hostile, passive, phantoms, every type. Only
+        // natural mob spawns near them are cancelled: hostile, passive, phantoms, every type. Only
         // natural/chunk-gen style reasons are gated so mob spawners and commands still work.
         org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason = e.getSpawnReason();
         switch (reason) {
@@ -3752,7 +3749,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // ---- Advanced search spell-check ----------------------------------------------------------
     // Corrects typos in AH/orders searches. Only fires when the query matches NOTHING (no item name
-    // contains it) — exact, substring and abbreviation matches are never overridden. The distance
+    // contains it): exact, substring and abbreviation matches are never overridden. The distance
     // is a weighted Damerau-Levenshtein tuned for how typos actually happen on a keyboard:
     //   - substituting an ADJACENT QWERTY key costs 0.45 (miss-click: "seord" -> "sword")
     //   - transposing two neighbouring letters costs 0.70 ("sowrd" -> "sword")
@@ -3782,7 +3779,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // Key-adjacency across the commonly used physical layouts: a substitution counts as a
     // "miss-click" if the two keys are neighbours on ANY of QWERTY, AZERTY or QWERTZ (union map,
-    // precomputed once — covers same-row neighbours plus the stagger diagonals of adjacent rows).
+    // precomputed once: covers same-row neighbours plus the stagger diagonals of adjacent rows).
     private static final java.util.Map<Character, java.util.Set<Character>> KEY_NEIGHBORS = buildKeyNeighbors();
 
     private static java.util.Map<Character, java.util.Set<Character>> buildKeyNeighbors() {
@@ -3910,10 +3907,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // Full command-correction pipeline, applied to EVERY failed command in order of confidence:
-    //   1) junk normalization — extra slashes, space after slash, stray prefix chars, trailing
+    //   1) junk normalization: extra slashes, space after slash, stray prefix chars, trailing
     //      punctuation ("//rtp", "/ rtp", "/.rtp", "/rtp.", "/RTP,") -> run silently corrected
-    //   2) concatenation split — "/rtpnether" -> "/rtp nether", "/homelootdrop" -> "/home lootdrop"
-    //   3) keyboard-aware typo match — auto-runs at miss-click confidence, else clickable suggestion
+    //   2) concatenation split: "/rtpnether" -> "/rtp nether", "/homelootdrop" -> "/home lootdrop"
+    //   3) keyboard-aware typo match: auto-runs at miss-click confidence, else clickable suggestion
     @EventHandler(priority = org.bukkit.event.EventPriority.LOWEST, ignoreCancelled = true)
     public void onCommandSpellCheck(PlayerCommandPreprocessEvent e) {
         String msg = e.getMessage();
@@ -3990,7 +3987,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // Wrong prefix character typed in CHAT (".rtp", "\\rtp", ";home lootdrop"): the message never
-    // reaches the command system, so catch it here — if the first token after the stray prefix is
+    // reaches the command system, so catch it here: if the first token after the stray prefix is
     // exactly a known command, cancel the chat line (don't broadcast the typo) and run it.
     @EventHandler(priority = org.bukkit.event.EventPriority.LOWEST, ignoreCancelled = true)
     public void onChatCommandPrefixTypo(AsyncChatEvent e) {
@@ -4127,7 +4124,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (id.equals("shop_cancel") || id.startsWith("shop_cancel:")) {
             // The category is encoded in the action id (shop_cancel:<cat>), so rapid back-clicking always
-            // returns to the SAME category the player was in — never the End shop or the main page.
+            // returns to the SAME category the player was in: never the End shop or the main page.
             int ci = id.indexOf(':');
             String cat = ci >= 0 ? id.substring(ci + 1) : null;
             if (cat == null || cat.isBlank()) {
@@ -4511,7 +4508,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         String normalized;
         String string = normalized = label == null ? "" : label.toLowerCase(Locale.ROOT);
         // MATCH THE NAMES THAT ARE ACTUALLY REGISTERED. plugin.yml registers /tpaaccept,
-        // /tpadeny and /tpacancel, but this only matched "tpaccept"/"tpacept"/"tpdeny" — so
+        // /tpadeny and /tpacancel, but this only matched "tpaccept"/"tpacept"/"tpdeny": so
         // the canonical commands never took the cross-server path at all and fell through to
         // the local handlers, which cannot see a request filed by another backend.
         if ("tpaccept".equals(normalized) || "tpaaccept".equals(normalized) || "tpacept".equals(normalized)) {
@@ -4682,7 +4679,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      *
      * Returns true when a row was cancelled, so the caller can stop and not also run the
      * local handler. Without this, /tpacancel only cleared the in-memory map on the sender's
-     * own backend and a request filed in the database stayed live until it expired — the
+     * own backend and a request filed in the database stayed live until it expired: the
      * requester could be teleported after they had cancelled.
      */
     private boolean cancelRemoteTeleportRequest(Player requester) {
@@ -4788,8 +4785,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * The right message when a target could not be reached.
      *
      * "Player not found or not online" conflated three different situations: a name that has
-     * never played here, a real player who is offline, and — before the network lookups
-     * existed — a player who was online the whole time on another backend. Telling someone
+     * never played here, a real player who is offline, and: before the network lookups
+     * existed: a player who was online the whole time on another backend. Telling someone
      * their friend is not online when they are standing in the lobby is worse than unhelpful,
      * so distinguish the cases using the shared players table.
      */
@@ -4897,7 +4894,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 World w = Bukkit.getWorld(name);
                 if (w == null) {
                     java.io.File dir = new java.io.File(Bukkit.getWorldContainer(), name);
-                    if (!dir.isDirectory()) { this.getLogger().warning("[hub] world folder missing: " + name + " (place it in the server root)"); continue; }
+                    if (!dir.isDirectory()) { this.getLogger().info("[hub] no world folder '" + name + "' in the server root; that hub is off."); continue; }
                     w = Bukkit.createWorld(new org.bukkit.WorldCreator(name));   // overworld void (generator from level.dat)
                 }
                 if (w == null) { this.getLogger().warning("[hub] failed to load world " + name); continue; }
@@ -5249,7 +5246,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    // Stand where you want the spawn point and run /sethubspawn — writes it live (no restart).
+    // Stand where you want the spawn point and run /sethubspawn: writes it live (no restart).
     private void handleSetHubSpawn(Player p) {
         if (!p.hasPermission(PERM_HUB_BYPASS)) { p.sendMessage("§cThis command does not exist."); return; }
         if (!HUB_SPAWN_WORLD.equals(p.getWorld().getName())) {
@@ -5267,7 +5264,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.getLogger().info("[hub] spawn set by " + p.getName() + " -> " + l.getX() + "," + l.getY() + "," + l.getZ() + " yaw=" + l.getYaw());
     }
 
-    // Stand where you want an AFK point and run /addafkspot — appends it (random-picked on /afk).
+    // Stand where you want an AFK point and run /addafkspot: appends it (random-picked on /afk).
     private void handleAddAfkSpot(Player p) {
         if (!p.hasPermission(PERM_HUB_BYPASS)) { p.sendMessage("§cThis command does not exist."); return; }
         if (!HUB_AFK_WORLD.equals(p.getWorld().getName())) {
@@ -5555,7 +5552,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         }
         // Void edge: only when NOT rising (so jumps, stairs, and bubble columns are never blocked) and
-        // only over DEEP void — a normal drop or ledge is fine; the void-fall rescue is the backstop.
+        // only over DEEP void: a normal drop or ledge is fine; the void-fall rescue is the backstop.
         if (!blocked && to.getY() <= from.getY() + 0.05 && this.isOverDeepVoid(to)) blocked = true;
         if (blocked) {
             Location back = from.clone();
@@ -6272,7 +6269,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     /**
-     * Absorb damage during the grace window — except the void.
+     * Absorb damage during the grace window, except the void.
      *
      * Void damage is deliberately still applied. It is not something that "happens to" an
      * arriving player the way a mob or a trap is; it means they are somewhere they cannot be,
@@ -6308,7 +6305,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * RTP is what people use to LEAVE somewhere dangerous. Escaping a trap only works if the
      * escape itself is safe: between running the command and arriving there is a transfer, a
      * destination search and a chunk load, and for that whole window the player is still
-     * standing in whatever they were trying to get away from — or has just materialised in
+     * standing in whatever they were trying to get away from: or has just materialised in
      * terrain that is still settling. Damage taken there is damage taken for using the
      * feature correctly.
      *
@@ -6615,7 +6612,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      *
      * WHY NOT THE PROXY. The first version relayed this as a Velocity plugin message. That
      * only works while somebody is already connected to the destination, because a proxy
-     * plugin message rides inside a player's connection — there is no standalone socket to
+     * plugin message rides inside a player's connection: there is no standalone socket to
      * a backend. With survival empty the proxy had nothing to send through and answered
      * RTPFALLBACK, which meant "transfer them and search on arrival": the player watched
      * themselves land at spawn and then get moved. The one case where you most want RTP to
@@ -6625,7 +6622,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * anyone is on it, so the pipeline behaves identically at zero players and at fifty.
      *
      * WHY THIS DOES NOT WAIT. The transfer costs about a second no matter what, so rather
-     * than resolve first and then transfer — paying for both in sequence — the request is
+     * than resolve first and then transfer, paying for both in sequence, the request is
      * filed and the transfer starts immediately. Survival resolves it while the player is
      * still connecting, and applies it as they join. The destination is already known by
      * the time they arrive, so they never see the arrival point, and the total cost is just
@@ -6773,7 +6770,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * Place a cross-server RTP arrival BEFORE the player enters the world.
      *
      * Teleporting on join works, but the player is placed at their previous location first
-     * and moved a tick or two later, which can flash the arrival point — the exact thing the
+     * and moved a tick or two later, which can flash the arrival point: the exact thing the
      * pre-resolved pipeline exists to avoid. This event fires while the login is still being
      * assembled, so setting the location here means the player materialises at the RTP
      * destination and never occupies anywhere else.
@@ -6808,14 +6805,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      *
      * Normally the answer is already stored by the time they join, since resolution started
      * when they ran the command and the transfer took about a second. If it is not, retry
-     * briefly rather than giving up — the alternative is dumping them at spawn with no
+     * briefly rather than giving up: the alternative is dumping them at spawn with no
      * explanation, which is the behaviour this whole path exists to remove.
      */
     void applyResolvedRtp(Player player, int attempt) {
         if (player == null || !player.isOnline() || attempt > 40) {   // ~8s of retries
             if (attempt > 40) {
                 this.rtpLog("db_apply_timeout", "player=" + (player == null ? "?" : player.getName()));
-                // Gave up waiting — restore vision rather than leave them staring at black.
+                // Gave up waiting: restore vision rather than leave them staring at black.
                 if (player != null && player.isOnline()) {
                     this.runOnPlayerThread(player, () -> {
                         player.removePotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS);
@@ -6848,7 +6845,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 // The player is HERE and the destination is not ready, which is the only case
                 // that can still show them their arrival point before the teleport. Usually
                 // resolution finishes during the transfer and PlayerSpawnLocationEvent has
-                // already placed them, so this path is rare — but when it happens, black the
+                // already placed them, so this path is rare, but when it happens, black the
                 // screen out rather than let them watch the wrong place. Cleared the instant
                 // the teleport lands. Blindness rather than parking them in the sky: it hides
                 // the same thing with no chance of leaving someone falling or stranded if the
@@ -6883,7 +6880,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.rtpLog("db_apply", "player=" + player.getName() + " at="
                     + dest.getBlockX() + "," + dest.getBlockY() + "," + dest.getBlockZ());
                 player.teleportAsync(dest).thenAccept(okTp -> this.runOnPlayerThread(player, () -> {
-                    // Lift the cover-up whether or not the teleport succeeded — leaving a
+                    // Lift the cover-up whether or not the teleport succeeded: leaving a
                     // player blind because a teleport failed would be a worse bug than the
                     // flash this hides.
                     player.removePotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS);
@@ -6988,7 +6985,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         // DialogType.confirmation(yesButton, noButton): first arg is the affirmative. BOTH buttons must
-        // carry a real click action that closes the dialog itself (afterAction is NONE) — matches the
+        // carry a real click action that closes the dialog itself (afterAction is NONE): matches the
         // working kill-confirm pattern. The old (no, yes) order bound "search" to the cancel slot, so it
         // fired without pressing Yes and the buttons appeared dead.
         ActionButton yes = this.dialogButton(Component.text("Yes", NamedTextColor.GREEN), null, 120,
@@ -7473,8 +7470,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Player pa = Bukkit.getPlayer(a), pb = Bukkit.getPlayer(b);
         if (pa == null || !pa.isOnline() || pb == null || !pb.isOnline()) return;
         if (attempt >= plan.maxAttempts) {
-            pa.sendActionBar(Component.text("§cCouldn't find a duel spot — try /rtpq again."));
-            pb.sendActionBar(Component.text("§cCouldn't find a duel spot — try /rtpq again."));
+            pa.sendActionBar(Component.text("§cCouldn't find a duel spot. Try /rtpq again."));
+            pb.sendActionBar(Component.text("§cCouldn't find a duel spot. Try /rtpq again."));
             return;
         }
         World world = Bukkit.getWorld(plan.worldName);
@@ -7987,7 +7984,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 List.of("§7Click to enter a value in chat.")));
         }
         inventory.setItem(12, this.namedWithLore(Material.ARROW, "§7− Round", "duel_setup_round_down", List.of()));
-        inventory.setItem(13, this.namedWithLore(Material.PAPER, "§fRounds: §b" + state.rounds, null, List.of("§71–100")));
+        inventory.setItem(13, this.namedWithLore(Material.PAPER, "§fRounds: §b" + state.rounds, null, List.of("§71-100")));
         inventory.setItem(14, this.namedWithLore(Material.ARROW, "§7+ Round", "duel_setup_round_up", List.of()));
         inventory.setItem(15, this.namedWithLore(Material.COMPASS, "§fArena: §b" + this.duelArenaLabel(state.arenaPreference),
             "duel_setup_arena", List.of("§7Click to cycle arena choices.")));
@@ -9107,7 +9104,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             if (!s.soloTest) this.duelFrozen.remove(s.b);
             s.started = true;
             s.fightBegan = true;
-            s.stuckDeadline = 0L;   // fight resumed — disarm the watchdog
+            s.stuckDeadline = 0L;   // fight resumed: disarm the watchdog
         }
     }
 
@@ -9137,7 +9134,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // Final damage already includes absorption's reduction; adding absorption hearts again
         // can miss a genuinely lethal hit and let the vanilla death screen appear.
         if (p.getHealth() - e.getFinalDamage() > 0.0) return;   // survivable
-        // Let a Totem of Undying do its job — a totem pop is NOT a loss. The round ends only on an
+        // Let a Totem of Undying do its job: a totem pop is NOT a loss. The round ends only on an
         // actual death (a lethal hit with no totem to save them).
         if (this.holdingTotem(p)) return;
         e.setCancelled(true);
@@ -9150,7 +9147,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // A duel "death" (intercepted lethal hit): the loser watches from exactly where they fell, in spectator,
-    // until their return launch begins — startDuelReturnLaunch flips them straight back to SURVIVAL.
+    // until their return launch begins: startDuelReturnLaunch flips them straight back to SURVIVAL.
     // onDuelRoundSpectatorMove keeps them inside the arena and out of solid blocks meanwhile.
     private void enterDuelDeathSpectator(DuelSession s, Player p) {
         if (p == null || !p.isOnline() || s.ended) return;
@@ -9526,7 +9523,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             if (s.soloTest) this.finishSoloDuel(s, "§7Duel test recovered.", true);
             else if (s.pendingMatchOver && s.pendingRoundWinner != null && s.pendingRoundLoser != null)
                 this.resolveMatch(s, s.pendingRoundWinner, s.pendingRoundLoser);
-            else this.abortDuel(s, "§cDuel interrupted — recovered. Wager refunded.");
+            else this.abortDuel(s, "§cDuel interrupted and recovered. Wager refunded.");
         }
     }
 
@@ -9700,7 +9697,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void forfeitDuelByChoice(DuelSession s, UUID loserId) {
         if (s == null || s.ended || s.soloTest) return;
-        if (s.celebrating) return;   // already on the result screen — ignore /leave, no sub-message
+        if (s.celebrating) return;   // already on the result screen: ignore /leave, no sub-message
         UUID winnerId = s.other(loserId);
         s.started = false;
         s.celebrating = true;
@@ -10552,7 +10549,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // Fluids from buckets, and the blocks fluid FLOWS into, are the most common "arena didn't reset"
-    // culprits — plus fire burning blocks away, frost-walker ice, and falling/formed blocks.
+    // culprits: plus fire burning blocks away, frost-walker ice, and falling/formed blocks.
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDuelBucketEmpty(org.bukkit.event.player.PlayerBucketEmptyEvent e) {
         this.recordDuelBlockChange(e.getBlockClicked().getRelative(e.getBlockFace()).getState(), e.getPlayer().getUniqueId());
@@ -10835,7 +10832,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         DuelSession s = this.activeDuels.get(id);
         Location to = e.getTo();
         // Duel arenas live in their own generated world (duel_arena), so a death-spectator may phase through
-        // blocks freely — there is nothing to x-ray. Only keep them inside their own arena's square.
+        // blocks freely: there is nothing to x-ray. Only keep them inside their own arena's square.
         if (s == null || to == null || !s.inArena(to)) e.setTo(e.getFrom());
     }
 
@@ -10905,7 +10902,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.stopSpectating(e.getPlayer(), false);
     }
 
-    // ===== /spectate — fly-around watch (adventure + flight collides with blocks = no phasing) =====
+    // ===== /spectate: fly-around watch (adventure + flight collides with blocks = no phasing) =====
 
     private void handleSpectateCommand(Player p, String[] args) {
         boolean toggleOff = args.length == 0 || args[0].equalsIgnoreCase("off") || args[0].equalsIgnoreCase("stop");
@@ -11048,7 +11045,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 p.setFlying(true);
                 p.setInvulnerable(true);             // a watcher shouldn't be killable by a stray crystal/arrow
                 try { p.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.INVISIBILITY, Integer.MAX_VALUE, 0, false, false, false)); } catch (Throwable ignored) {}
-                p.sendActionBar(this.legacyColorize("&#00BFFFSpectating §7" + targetName + " §7— /spectate to stop"));
+                p.sendActionBar(this.legacyColorize("&#00BFFFSpectating §7" + targetName + " §7(/spectate to stop)"));
                 p.teleportAsync(destination).whenComplete((ok, error) -> this.runOnPlayerThread(p, () -> {
                     if (!p.isOnline() || this.spectating.get(viewerId) != state) return;
                     if (error != null || !Boolean.TRUE.equals(ok)) {
@@ -11163,7 +11160,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (split.length < 3) {
             return false;
         }
-        // /pay resolves exact or UNIQUE-prefix only — money must never typo-match to the wrong
+        // /pay resolves exact or UNIQUE-prefix only: money must never typo-match to the wrong
         // player (the fuzzy typo stage is deliberately NOT used here; unknown names fall through
         // to the offline-pay path, which resolves by exact known name).
         Player target = Bukkit.getPlayerExact(split[1]);
@@ -11631,7 +11628,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * join, because the economy of record was EssentialsX's per-server YAML and there was
      * no way to touch an offline player's balance from another backend. It is now the
      * shared `balances` table, so the money lands immediately and shows the correct figure
-     * network-wide the moment it is sent — no login required. `pending_vault_credit` is
+     * network-wide the moment it is sent: no login required. `pending_vault_credit` is
      * still drained on join to clear rows queued before this change.
      */
     private void depositMoneyOffline(UUID uuid, double amount) {
@@ -11968,13 +11965,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // ============================== Friends system (#60) ==============================
-    // Backend only — the friends GUI comes later. One DB row per relationship:
+    // Backend only: the friends GUI comes later. One DB row per relationship:
     // PENDING = open request requester->target, ACCEPTED = mutual friendship.
 
     private static final int MAX_FRIENDS = 100;
 
     // ===================== Ignore / Block =====================
-    // /block is a pure alias for /ignore — same table, same code path, just the word players reach
+    // /block is a pure alias for /ignore: same table, same code path, just the word players reach
     // for first. Enforcement lives in privacyAllows (messages, tpa, payments) and notifyFollowers
     // (activity + transaction feeds), so every gated action is covered by the one list.
 
@@ -12037,7 +12034,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
             } catch (Exception ex) {
                 this.getLogger().warning("handleIgnoreCommand failed: " + ex.getMessage());
-                this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cCould not update your list — try again.")));
+                this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cCould not update your list. Try again.")));
                 return;
             }
             String actorName = p.getName();
@@ -12049,7 +12046,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     /**
      * Tell the ignored player, on the hotbar, wherever they are on the network.
      *
-     * Local delivery first, then the DB queue as the cross-backend path — the same split every
+     * Local delivery first, then the DB queue as the cross-backend path: the same split every
      * other player-directed notice uses, because a plugin message cannot reach a backend the
      * sender has no connection to.
      */
@@ -12078,7 +12075,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         } catch (Exception ex) {
             this.getLogger().warning("sendIgnoreList failed: " + ex.getMessage());
-            this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cCould not read your list — try again.")));
+            this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cCould not read your list. Try again.")));
             return;
         }
         this.runOnPlayerThread(p, () -> {
@@ -12131,7 +12128,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // follow(a,b) = a follows b. Mutual follow = friends. Per-relationship toggles live on the
     // follower's row. Unfollow removes only your own follow (they keep following you).
 
-    // Note: can_tpa is intentionally NOT in the per-friend menu — TP-request permission is governed by
+    // Note: can_tpa is intentionally NOT in the per-friend menu: TP-request permission is governed by
     // the /settings Privacy tri-state (Anyone / Friends / Off), not a per-friend toggle. The column
     // still exists and is read by privacyAllows.
     private static final java.util.List<String> FOLLOW_SETTING_COLS = java.util.List.of(
@@ -12246,7 +12243,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         } catch (Throwable t) {
             if (!this.wpReflectWarned) {
                 this.wpReflectWarned = true;
-                this.getLogger().warning("[locator] waypoint-subject reflection failed — friends-only "
+                this.getLogger().warning("[locator] waypoint-subject reflection failed: friends-only "
                     + "locator filter is passing everything through. Cause: " + t);
             }
             return null;
@@ -12305,7 +12302,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    /** /follow <player> — start following someone (mutual follow becomes friends). Async. */
+    /** /follow <player>: start following someone (mutual follow becomes friends). Async. */
     private void handleFollowCommand(Player p, String[] args) {
         if (args.length < 1) {
             this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cUsage: /follow <player>")));
@@ -12339,7 +12336,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    /** /unfollow <player> — stop following (they keep following you). Async. */
+    /** /unfollow <player>: stop following (they keep following you). Async. */
     private void handleUnfollowCommand(Player p, String[] args) {
         if (args.length < 1) {
             this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§cUsage: /unfollow <player>")));
@@ -13058,14 +13055,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // Team homes are retired (teams -> friends transition). Existing team homes were converted
     // into personal named homes for every member by migrateTeamHomesToPersonal().
     private void sendTeamHomesRetired(Player p) {
-        p.sendMessage("§cTeam homes have been retired — your team's home was saved as a personal home (§e/home teamhome§c).");
+        p.sendMessage("§cTeam homes have been retired: your team's home was saved as a personal home (§e/home teamhome§c).");
     }
 
     /**
      * One-shot migration: for every team with a home set, write that location into each
      * member's SetHome data file as a personal named home ("teamhome", suffixed 2,3... on
      * collision), then clear the team's home columns. Added as a BONUS home (bypasses the
-     * tier limit — the limit only gates setting NEW homes). Guarded by a marker file so it
+     * tier limit: the limit only gates setting NEW homes). Guarded by a marker file so it
      * never runs twice.
      */
     private void migrateTeamHomesToPersonal() {
@@ -13109,7 +13106,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                                 (String) th[2], (Double) th[3], (Double) th[4], (Double) th[5], (Float) th[6], (Float) th[7]);
                         homesWritten++;
                         summary.append(teamName).append(" -> ").append(member).append(" as ").append(homeName).append('\n');
-                        String msg = "§eTeam homes were retired — your team's home was saved as your personal home §f/home " + homeName + "§e.";
+                        String msg = "§eTeam homes were retired: your team's home was saved as your personal home §f/home " + homeName + "§e.";
                         Player online = Bukkit.getPlayer(member);
                         if (online != null && online.isOnline()) {
                             this.runOnPlayerThread(online, () -> online.sendMessage(msg));
@@ -13129,7 +13126,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         } catch (Exception ex) {
             this.getLogger().warning("migrateTeamHomesToPersonal failed: " + ex.getMessage());
-            return; // no marker written — retried next boot
+            return; // no marker written: retried next boot
         }
         try {
             String body = "migrated_at: " + new java.util.Date() + "\nteams: " + teamsMigrated
@@ -13145,7 +13142,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    /** Writes a named home directly into the SetHome yaml (bonus — no tier-limit check). Returns the name used. */
+    /** Writes a named home directly into the SetHome yaml (bonus: no tier-limit check). Returns the name used. */
     private String writeSetHomeBonusHome(File setHomeData, UUID uuid, String world, double x, double y, double z, float yaw, float pitch) throws Exception {
         File file = new File(setHomeData, uuid + ".yml");
         org.bukkit.configuration.file.YamlConfiguration yml = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(file);
@@ -13364,12 +13361,25 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // Loads branding.yml (saved from resources on first run) and resolves the active
     // profile into the brand* fields. Same plugins/DB/command-names; display + colours only.
     private void loadBranding() {
-        try { this.saveResource("branding.yml", false); } catch (Exception ignored) {}
         File f = new File(this.getDataFolder(), "branding.yml");
+        if (!f.exists()) {
+            // First start: write the documented neutral template (branding-default.yml in the jar).
+            try (java.io.InputStream in = this.getResource("branding-default.yml")) {
+                if (in != null) {
+                    f.getParentFile().mkdirs();
+                    java.nio.file.Files.copy(in, f.toPath());
+                }
+            } catch (Exception ex) {
+                this.getLogger().warning("[brand] could not write branding.yml: " + ex.getMessage());
+            }
+        }
         this.brandingConfig = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
         String active = this.brandingConfig.getString("active", "example");
         String base = "profiles." + active + ".";
-        if (!this.brandingConfig.isConfigurationSection("profiles." + active)) {
+        if (!this.brandingConfig.isConfigurationSection("profiles")) {
+            this.getLogger().info("[brand] no branding.yml profiles; using the neutral brand.");
+            active = "example"; base = "profiles.example.";
+        } else if (!this.brandingConfig.isConfigurationSection("profiles." + active)) {
             this.getLogger().warning("[brand] profile '" + active + "' not found in branding.yml; using neutral defaults.");
             active = "example"; base = "profiles.example.";
         }
@@ -13496,7 +13506,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private boolean isTeamChatModeEnabled(UUID uuid) {
         if (TEAMS_DISABLED) {
-            return false; // teams retired — never route chat to team chat
+            return false; // teams retired: never route chat to team chat
         }
         if (this.teamChatModeCache.containsKey(uuid)) {
             return this.teamChatModeCache.getOrDefault(uuid, false);
@@ -13761,7 +13771,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         String databaseUser = this.settings.getString("sync.database.user", "");
         String databasePassword = this.settings.getString("sync.database.password", "");
-        // Fallback: pool unavailable — per-op connection.
+        // Fallback: pool unavailable: per-op connection.
         if (!this.mariadbDriverLoaded) {
             try {
                 Class.forName("org.mariadb.jdbc.Driver");
@@ -13786,7 +13796,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         UUID uuid = player.getUniqueId();
         this.cancelPendingById(uuid);
-        // Instant teleport — no warmup.
+        // Instant teleport: no warmup.
         this.executeDelayedTeleportCommand(player, fullCommand);
     }
 
@@ -13936,7 +13946,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             if (this.pendingTeleports.containsKey(uuid) || this.pendingRtpTeleports.containsKey(uuid) || this.pendingHomeTeleports.containsKey(uuid)) {
                 this.cancelPendingTeleport(player, true);
                 this.cancelPendingHomeTeleport(uuid);
-                player.sendActionBar((Component)Component.text("§cTeleport cancelled — you entered combat"));
+                player.sendActionBar((Component)Component.text("§cTeleport cancelled: you entered combat"));
             }
         }
     }
@@ -14135,7 +14145,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * How far out RTP may land, in blocks from the world-border centre.
      *
      * The border is the natural bound, but a world whose border was never set carries
-     * vanilla's default of 59,999,968 — half of that is a ~30,000,000-block radius. RTP
+     * vanilla's default of 59,999,968: half of that is a ~30,000,000-block radius. RTP
      * then picks a coordinate in never-generated terrain and the player arrives to an
      * empty sky, because nothing streams in that far out. That is exactly what "it's just
      * a void when I RTP" was. `rtp.max-radius` caps it regardless of the border, so a
@@ -14404,7 +14414,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private long getRtpCooldownMillis(Player player) {
-        // Tiered cooldown — RTP is the biggest single chunk burst, so default players wait longest,
+        // Tiered cooldown: RTP is the biggest single chunk burst, so default players wait longest,
         // ranked members less, staff not at all. All values config-tunable. Staff = mod and up / op.
         if (player == null) return 15_000L;
         if (player.isOp() || player.hasPermission("pizzasmp.staff") || this.getPlayerPriority(player) <= 7) {
@@ -14880,8 +14890,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      *
      * `sync.server-name` in config.yml wins; "auto" (or absent) falls back to the port map.
      * Honouring the config matters because the port map cannot be right for every operator:
-     * the dev backend runs on 25568, which this map used to call "pvp" — a server that no
-     * longer exists — so dev identified as pvp and every isServer() check against it failed.
+     * the dev backend runs on 25568, which this map used to call "pvp": a server that no
+     * longer exists, so dev identified as pvp and every isServer() check against it failed.
      * PVP is retired; 25568 is dev.
      */
     private String detectServerName() {
@@ -15709,7 +15719,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.applyNightVisionPreference(player);
     }
 
-    // /nv [player] — flips the SAME "night_vision" setting the /settings GUI uses (one shared state:
+    // /nv [player]: flips the SAME "night_vision" setting the /settings GUI uses (one shared state:
     // toggling either place changes both). PAT's old separate NV list was retired for this.
     private void handleNvCommand(Player sender, String[] args) {
         if (!sender.hasPermission("pizzasmp.nv")) {
@@ -15798,8 +15808,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 final String cmd = "lp user " + player.getName() + " permission set pizzasmp.sfmode.bypass " + enabled;
                 PlatformScheduler.globalNow(this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd));
                 player.sendActionBar(this.legacyColorize(enabled
-                    ? "&7Staff mode bypass &#00BFFFON&7 — your staff functions are always available."
-                    : "&7Staff mode bypass &fOFF&7 — you're now subject to /sfmode. Relog to apply fully."));
+                    ? "&7Staff mode bypass &#00BFFFON&7: your staff functions are always available."
+                    : "&7Staff mode bypass &fOFF&7: you're now subject to /sfmode. Relog to apply fully."));
                 break;
             }
         }
@@ -16009,7 +16019,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // ============================================================================
-    // PvP Gear shop (code-driven, not shop.yml — needs enchants/trims). 9x6 grid:
+    // PvP Gear shop (code-driven, not shop.yml: needs enchants/trims). 9x6 grid:
     // armor sets (trim variants) + a PvP sword up top, combat consumables in the
     // middle, a Custom Kits entry, and a back button. Prices come from settings
     // (pvpshop.*) so they're tunable without a code change.
@@ -16378,7 +16388,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (this.currentThrottledVd < VD_MAX) {
                     for (Player p : Bukkit.getOnlinePlayers()) {
                         int currentVd = this.currentThrottledVd;
-                        this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§7View distance recovering — §f" + currentVd + " §7chunks")));
+                        this.runOnPlayerThread(p, () -> p.sendActionBar(Component.text("§7View distance recovering: §f" + currentVd + " §7chunks")));
                     }
                 }
                 this.getLogger().info("[VDThrottle] TPS=" + String.format("%.1f", tps1m) + " → VD increased to " + this.currentThrottledVd);
@@ -16393,7 +16403,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    // /vdthrottle — admin view/control of the view-distance throttle.
+    // /vdthrottle: admin view/control of the view-distance throttle.
     private void handleVdThrottleCommand(Player admin, String[] args) {
         double[] tps = Bukkit.getTPS();
         double tps1m = tps.length > 0 ? tps[0] : 20.0;
@@ -16444,7 +16454,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
             }
             default -> {
-                // Treat as a player name — show that player's current VD.
+                // Treat as a player name: show that player's current VD.
                 Player target = Bukkit.getPlayerExact(args[0]);
                 if (target == null) { admin.sendMessage("§cPlayer not found: " + args[0]); return; }
                 int calc = this.calcPerPlayerVd(target, tps1m, online);
@@ -16498,7 +16508,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.egressVdPenalty > 0) {
             baseVd = Math.max(VD_MIN, baseVd - this.egressVdPenalty); // uplink near cap: shrink everyone
             // Fairness: while the uplink is congested, a player who just RTP'd/teleported is streaming a
-            // fresh full view — trim them one extra so their burst doesn't starve the stationary players.
+            // fresh full view: trim them one extra so their burst doesn't starve the stationary players.
             long lastRtp = this.rtpCooldowns.getOrDefault(p.getUniqueId(), 0L);
             if (lastRtp > 0L && System.currentTimeMillis() - lastRtp < 20_000L) baseVd = Math.max(VD_MIN, baseVd - 1);
         }
@@ -16510,7 +16520,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // ---- Command throttle under high load ----
     // When TPS < 17, expensive GUI commands (shop, orders, ah, worth, baltop, bounty list, stats)
     // are rate-limited: 1 per player per 5s. Cheap commands (pay, sell, ping, home) always allowed.
-    // Commands throttled under heavy load (TPS < 16). /shop has priority — only throttled under extreme load (TPS < 14).
+    // Commands throttled under heavy load (TPS < 16). /shop has priority: only throttled under extreme load (TPS < 14).
     private static final Set<String> THROTTLED_HEAVY = Set.of("ah", "orders", "worth", "baltop", "bounty", "stats", "sellmulti");
     private static final Set<String> THROTTLED_EXTREME = Set.of("shop");
     private final Map<UUID, Long> lastThrottledCommandTime = new ConcurrentHashMap<>();
@@ -16529,7 +16539,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Long last = this.lastThrottledCommandTime.get(p.getUniqueId());
         if (last != null && now - last < 5000L) {
             long remaining = (5000L - (now - last)) / 1000L + 1;
-            p.sendActionBar(Component.text("§7Commands temporarily throttled — try again in §f" + remaining + "s"));
+            p.sendActionBar(Component.text("§7Commands temporarily throttled. Try again in §f" + remaining + "s"));
             return true;
         }
         this.lastThrottledCommandTime.put(p.getUniqueId(), now);
@@ -16847,7 +16857,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         org.bukkit.inventory.meta.ItemMeta meta = stack.getItemMeta();
                         if (meta == null) continue;
                         org.bukkit.persistence.PersistentDataContainer pdc = meta.getPersistentDataContainer();
-                        // Only target untagged amethyst tools — skip tools the player already owned/equipped.
+                        // Only target untagged amethyst tools: skip tools the player already owned/equipped.
                         boolean isFresh = pdc.has(aamethystKey, org.bukkit.persistence.PersistentDataType.LONG)
                                           && !pdc.has(amethystExpireKey, org.bukkit.persistence.PersistentDataType.LONG)
                                           && !pdc.has(amethystKindKey, org.bukkit.persistence.PersistentDataType.STRING);
@@ -17467,7 +17477,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }, 1200L, 1200L);
     }
     // Best-effort, idempotent schema statement. MySQL rejects some MariaDB-only syntax (e.g.
-    // ADD COLUMN IF NOT EXISTS), so run each independently — one failure must not abort the rest.
+    // ADD COLUMN IF NOT EXISTS), so run each independently: one failure must not abort the rest.
     private void execSchema(Statement st, String sql) {
         try {
             st.execute(sql);
@@ -17605,7 +17615,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     /**
      * Read this backend's advancement file for {@code uuid} and store it in the DB. Safe to call
-     * from any thread; does its own IO. A missing or empty file is a no-op — never overwrite the
+     * from any thread; does its own IO. A missing or empty file is a no-op: never overwrite the
      * DB with nothing, or a player who joins a backend they have never earned anything on would
      * wipe their real progress.
      */
@@ -17635,7 +17645,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     /**
      * Write the stored advancement blob to this backend's advancement file, so the server loads it
-     * as the player joins. Called from AsyncPreLogin, which blocks the login until it returns —
+     * as the player joins. Called from AsyncPreLogin, which blocks the login until it returns:
      * that ordering is what guarantees the file is in place before Paper reads it. No stored row
      * (a genuinely new player) is a no-op.
      */
@@ -17675,7 +17685,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * follow do", which only exists while the follow does. Ignoring is a standalone decision and
      * has to survive with no relationship at all.
      *
-     * Its own block for the same reason as follows — a failure above must not skip it.
+     * Its own block for the same reason as follows: a failure above must not skip it.
      */
     private void ensureIgnoresSchema() {
         String ignoresSql = "CREATE TABLE IF NOT EXISTS player_ignores (" +
@@ -17776,7 +17786,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             sb.append(def.key).append('=').append(enabled ? (char)'1' : '0').append('\n');
         }
         // Tri-state privacy modifiers (<key>_friends) are NOT in SETTINGS_DEFINITIONS, so persist
-        // them explicitly — otherwise "Friends & Followers" is dropped on save and can never stick.
+        // them explicitly, otherwise "Friends & Followers" is dropped on save and can never stick.
         for (String key : PRIVACY_TRISTATE) {
             if (values.getOrDefault(key + "_friends", false)) {
                 sb.append(key).append("_friends=1\n");
@@ -20287,7 +20297,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     insertDelivery.setString(2, fulfiller.toString());
                     insertDelivery.setInt(3, deliverable);
                     insertDelivery.setDouble(4, payout);
-                    // EcoBot (SERVER) orders are a pure money sink — the buyer never claims the items,
+                    // EcoBot (SERVER) orders are a pure money sink: the buyer never claims the items,
                     // so don't store the item blob (mass /sell would otherwise bloat the DB).
                     if (SERVER_UUID.equals(creatorUuid)) insertDelivery.setNull(5, java.sql.Types.BLOB);
                     else insertDelivery.setBytes(5, this.serializeItem(storedItem));
@@ -20515,7 +20525,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // Drop an item that belongs to a specific player (AH overflow / sell-return): it lands at their
-    // feet, only THEY can pick it up (no theft), and there's no pickup delay or throw arc — i.e. it
+    // feet, only THEY can pick it up (no theft), and there's no pickup delay or throw arc: i.e. it
     // does NOT behave like a normal item you dropped from your own inventory.
     private void dropForPlayer(Player player, ItemStack stack) {
         if (stack == null || stack.getType() == Material.AIR) return;
@@ -21122,7 +21132,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void fillBlue(Inventory inv) {
     }
 
-    // /stats <player> — view another player's stats (online or offline).
+    // /stats <player>: view another player's stats (online or offline).
     private void openStatsMenuFor(Player viewer, String targetName) {
         Player online = Bukkit.getPlayerExact(targetName);
         if (online != null) {
@@ -21147,7 +21157,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (!viewer.isOnline()) return;
                 StatsSnapshot liveStats = (liveTarget != null && liveTarget.isOnline()) ? this.mergeLiveHudStats(liveTarget, stats) : stats;
                 if (this.useDialogUi(viewer)) { this.openStatsDialog(viewer, targetName, liveStats, false); return; }
-                Inventory inv = MenuLock.create(36, TITLE_STATS + " — " + targetName);
+                Inventory inv = MenuLock.create(36, TITLE_STATS + ": " + targetName);
                 inv.setItem(11, this.buildStatItem(Material.EMERALD,        "Money",         this.formatCompactNumber(liveStats.money),          "Current balance"));
                 inv.setItem(12, this.buildStatItem(Material.AMETHYST_SHARD, "Shards",        this.formatCompactNumber(liveStats.shards),          "Shard currency"));
                 inv.setItem(13, this.buildStatItem(Material.NETHERITE_SWORD, "§cKills",       this.formatCompactNumber(liveStats.kills),           "Players defeated"));
@@ -21387,7 +21397,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     /**
-     * Playtime for the sidebar HUD: days+hours only, never minutes. Two reasons — the design shows
+     * Playtime for the sidebar HUD: days+hours only, never minutes. Two reasons: the design shows
      * "21d 14h", and the minutes made this the longest line, stretching the sidebar wider than the
      * player's name. Under an hour there is nothing but minutes to show, so that lone case keeps them.
      */
@@ -21622,7 +21632,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     return; // temporary player during config phase
                 }
                 // worth_display setting, or always while the sell GUI is open (its worth
-                // display is packet-only — real items are never mutated)
+                // display is packet-only: real items are never mutated)
                 if (!PizzaNetworkCore.this.isSettingEnabledCached(playerId, "worth_display")
                         && !PizzaNetworkCore.this.sellGuiViewers.contains(playerId)) {
                     return;
@@ -21647,7 +21657,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         });
         // Hide the vanilla "X/Y players sleeping" status (sent as an action bar to EVERYONE) for
-        // players who are NOT in a bed — it overlaps the hotbar/screen. Sleepers still see it.
+        // players who are NOT in a bed: it overlaps the hotbar/screen. Sleepers still see it.
         ProtocolLibrary.getProtocolManager().addPacketListener((PacketListener)new PacketAdapter((Plugin)this, new PacketType[]{PacketType.Play.Server.SET_ACTION_BAR_TEXT}){
 
             public void onPacketSending(PacketEvent event) {
@@ -21779,7 +21789,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.useDialogUi(player)) {
             // Use the proven confirmation pattern (matches the working Friends dialogs): BOTH
             // buttons carry a real click action. A null/exitAction button does not reliably
-            // close or fire under afterAction NONE — that was why the buttons "did nothing".
+            // close or fire under afterAction NONE: that was why the buttons "did nothing".
             ActionButton confirm = this.dialogButton(Component.text("Confirm", NamedTextColor.RED), null, 150,
                 p -> { DialogCloseCompat.close(p); p.setHealth(0.0); });
             ActionButton cancel = this.dialogButton(Component.text("Cancel", NamedTextColor.GRAY), null, 150,
@@ -21943,7 +21953,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
-    /** Inventory "full leaderboard" — top 45 player heads with the category value in lore. */
+    /** Inventory "full leaderboard": top 45 player heads with the category value in lore. */
     private void openLeaderboardGui(Player player, LbCategory cat) {
         this.runAsyncTask(() -> {
             List<BalanceLookupResult> top = this.queryLeaderboard(cat, 45);
@@ -23008,7 +23018,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             for (Material mat : candidateList) {
                 if (posted >= batchLimit) break;
                 if (this.isEcobotExcluded(mat)) continue;
-                // Potions / tipped arrows need PotionMeta — handled by the dedicated potion pass
+                // Potions / tipped arrows need PotionMeta: handled by the dedicated potion pass
                 // below (a bare ItemStack renders as "Uncraftable Potion").
                 String mname = mat.name();
                 if (mname.equals("POTION") || mname.endsWith("_POTION") || mname.equals("TIPPED_ARROW")) continue;
@@ -23227,7 +23237,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return posted;
     }
 
-    // (material name, AH price, enchant pairs key:level) — god-tier tool/weapon kits.
+    // (material name, AH price, enchant pairs key:level): god-tier tool/weapon kits.
     private static final Object[][] ECOBOT_GEAR = {
         {"DIAMOND_SWORD",       350_000.0, "sharpness:5,looting:3,sweeping_edge:3,unbreaking:3,mending:1"},
         {"NETHERITE_SWORD",   1_200_000.0, "sharpness:5,looting:3,sweeping_edge:3,fire_aspect:2,unbreaking:3,mending:1"},
@@ -23365,7 +23375,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // EcoBot auto-selling INTO player buy orders makes them fill up and vanish from "Your Orders"
         // on their own. Off by default so player orders are persistent standing orders, filled only by
         // real players selling into them (or cancelled by the owner). EcoBot still POSTS buy orders and
-        // players still /sell into those — that side of the economy is unaffected.
+        // players still /sell into those: that side of the economy is unaffected.
         if (!this.settings.getBoolean("ecobot.fill_player_orders", false)) return;
         // Only deliver to orders at least 5 minutes old so players can see their own orders first
         String deliverSql = "SELECT ol.id, ol.item_key, ol.amount_total - ol.amount_filled AS remaining, ol.unit_price, ol.amount_total " +
@@ -23787,7 +23797,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.tpaRequestExpiry.put(target.getUniqueId(), now + 60000);
         this.tpaCooldowns.put(requester.getUniqueId(), now);
 
-        // Persistent, clickable CHAT notification — ALWAYS sent (even when auto-accepted below), so the
+        // Persistent, clickable CHAT notification: ALWAYS sent (even when auto-accepted below), so the
         // request always shows in chat. The action bar is fleeting.
         String tpaVerb = "tpa".equals(tpaType) ? " wants to teleport to you." : " wants you to teleport to them.";
         Component tpaChat = this.legacyColorize("&#00BFFF" + requester.getName() + "§7" + tpaVerb + " ")
@@ -23800,7 +23810,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text("Click to deny"))));
         target.sendMessage(tpaChat);
 
-        // TPA auto-accept: ONLY for /tpa (never /tpahere — you shouldn't be yanked to someone else
+        // TPA auto-accept: ONLY for /tpa (never /tpahere: you shouldn't be yanked to someone else
         // automatically). Per-friend toggle (target auto-accepts THIS requester) or the global /tpauto.
         if ("tpa".equals(tpaType)
                 && (this.isSettingEnabledCached(target.getUniqueId(), "tpa_auto_accept")
@@ -23907,7 +23917,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Map<String, Boolean> requesterSettings = this.playerSettingsCache.getOrDefault(requester.getUniqueId(), Map.of());
         boolean requesterSounds = requesterSettings.getOrDefault("music_sound_notifications", true);
         if ("tpa".equals(request.type())) {
-            // requester wants to teleport TO recipient — requester is the mover
+            // requester wants to teleport TO recipient: requester is the mover
             Location destination = recipient.getLocation();
             this.cancelPendingTpaTeleport(requesterId);
             PendingTpaTeleport pending = new PendingTpaTeleport(destination);
@@ -23915,7 +23925,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.tickTpaTeleportCountdown(requesterId);
             requester.sendActionBar(this.legacyColorize("§7" + recipient.getName() + " &#00BFFFaccepted your TPA request"));
         } else {
-            // tpahere — recipient should teleport TO requester
+            // tpahere: recipient should teleport TO requester
             Location destination = requester.getLocation();
             this.cancelPendingTpaTeleport(recipientId);
             PendingTpaTeleport pending = new PendingTpaTeleport(destination);
@@ -23973,7 +23983,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void tickTpaTeleportCountdown(UUID uuid) {
-        // Instant TPA teleport — no warmup, no cooldown.
+        // Instant TPA teleport: no warmup, no cooldown.
         PendingTpaTeleport pending = this.pendingTpaTeleports.get(uuid);
         Player player = Bukkit.getPlayer(uuid);
         if (pending == null || player == null || !player.isOnline()) {
@@ -24487,7 +24497,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // For each suspicious UUID, returns a list of "<CheckName> ×<count>" strings
-    // sorted by count desc — used to enrich the /sus list lore.
+    // sorted by count desc: used to enrich the /sus list lore.
     private java.util.Map<String, java.util.List<String>> loadSuspiciousFlagBreakdown() {
         java.util.Map<String, java.util.List<String>> out = new java.util.HashMap<>();
         String reason = "COALESCE(NULLIF(check_name, ''), violation_type)";
@@ -24674,11 +24684,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return w;
     }
 
-    // /region — per-world (dimension) maintenance over the world-access engine: closing a region
+    // /region: per-world (dimension) maintenance over the world-access engine: closing a region
     // evacuates everyone to the evac target and blocks re-entry (tp/portal/rtp/join) until reopened.
     // This is the in-process maintenance path: no restart, no limbo, other dimensions keep playing.
     // TEMP (2026-07-08): /region disabled at owner request until per-world instances over Velocity
-    // are designed. All the machinery (limbo hold, closed_worlds channel) stays intact — flip this
+    // are designed. All the machinery (limbo hold, closed_worlds channel) stays intact: flip this
     // back to true to re-enable.
     private static final boolean REGION_COMMAND_ENABLED = false;
 
@@ -24757,7 +24767,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             limboUp = true;
         } catch (Exception ex) { limboUp = false; }
         if (!limboUp) {
-            this.getLogger().warning("[Region] limbo unreachable — falling back to spawn evacuation for " + worldName);
+            this.getLogger().warning("[Region] limbo unreachable: falling back to spawn evacuation for " + worldName);
             return this.evacuateWorld(worldName);
         }
         java.util.List<Player> affected = new java.util.ArrayList<>();
@@ -24800,7 +24810,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
-    // /tpauto — flips the SAME "tpa_auto_accept" setting the /settings GUI uses.
+    // /tpauto: flips the SAME "tpa_auto_accept" setting the /settings GUI uses.
     private void handleTpAutoCommand(Player p) {
         this.togglePlayerSetting(p, "tpa_auto_accept", () -> {
             boolean on = this.isSettingEnabledCached(p.getUniqueId(), "tpa_auto_accept");
@@ -24849,7 +24859,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         Player pl = e.getPlayer();
         if (this.worldBlockedFor(pl, pl.getWorld().getName())) {
             // Rejoin into a CLOSED world: hold them in the limbo (position preserved) instead of
-            // teleporting to spawn — teleporting would permanently lose their spot in the region.
+            // teleporting to spawn: teleporting would permanently lose their spot in the region.
             this.runPlayerTaskLater(pl, () -> {
                 if (!pl.isOnline() || !this.worldBlockedFor(pl, pl.getWorld().getName())) return;
                 try {
@@ -24875,7 +24885,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         double tps = Bukkit.getTPS()[0];
         NamedTextColor tpsColor = tps >= 19.0 ? NamedTextColor.GREEN : tps >= 15.0 ? NamedTextColor.YELLOW : NamedTextColor.RED;
         java.util.List<DialogBody> body = List.of(
-            DialogBody.plainMessage(Component.text("Staff console — moderation, players, chat.", NamedTextColor.GRAY)),
+            DialogBody.plainMessage(Component.text("Staff console: moderation, players, chat.", NamedTextColor.GRAY)),
             this.kv("TPS:", String.format("%.1f", Math.min(20.0, tps)), tpsColor),
             this.kv("Online:", String.valueOf(Bukkit.getOnlinePlayers().size()), NamedTextColor.WHITE));
         java.util.List<ActionButton> buttons = new java.util.ArrayList<>(List.of(
@@ -24923,7 +24933,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // /manage = BACKEND management (the tier above /admin). Access: pizzasmp.manage (dev + admins the
-    // dev grants). Everything here can affect server operation — deliberately separated from staff tools.
+    // dev grants). Everything here can affect server operation: deliberately separated from staff tools.
     private void openManageConsole(Player p) {
         if (!p.hasPermission("pizzasmp.manage")) {
             p.sendActionBar(this.legacyColorize("&cYou do not have backend management access."));
@@ -25226,18 +25236,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             case "adm_players" -> this.openAdminLegacyPlayers(p);
             case "adm_tuning" -> this.openAdminLegacyTuning(p);
             case "adm_data" -> this.openAdminLegacyData(p);
-            case "adm_d_invsee" -> this.promptAdminInput(p, "Inventory inspect — type: <player>", t -> { p.performCommand("invsee " + t.split("\\s+")[0]); });
-            case "adm_d_history" -> this.promptAdminInput(p, "Player history — type: <player>", t -> { p.performCommand("history " + t.split("\\s+")[0]); });
+            case "adm_d_invsee" -> this.promptAdminInput(p, "Inventory inspect (type <player>)", t -> { p.performCommand("invsee " + t.split("\\s+")[0]); });
+            case "adm_d_history" -> this.promptAdminInput(p, "Player history (type <player>)", t -> { p.performCommand("history " + t.split("\\s+")[0]); });
             case "adm_d_txlog" -> { p.closeInventory(); p.performCommand("txlog"); }
             case "adm_d_bans" -> { p.closeInventory(); p.performCommand("listbans"); }
             case "adm_d_suspects" -> { p.closeInventory(); this.openSuspiciousPlayersGui(p); }
             case "adm_diag" -> { p.closeInventory(); p.sendMessage("§7TPS §f" + String.format("%.1f", Math.min(20.0, Bukkit.getTPS()[0])) + " §7| Online §f" + Bukkit.getOnlinePlayers().size() + " §7| Plugins §f" + Bukkit.getPluginManager().getPlugins().length); }
-            case "adm_e_givemoney" -> this.promptAdminInput(p, "Give money — type: <player> <amount>", t -> { this.runAdminEco(p, "eco give", t); });
-            case "adm_e_setmoney" -> this.promptAdminInput(p, "Set money — type: <player> <amount>", t -> { this.runAdminEco(p, "eco set", t); });
-            case "adm_e_giveshards" -> this.promptAdminInput(p, "Give shards — type: <player> <amount>", t -> { this.runAdminEco(p, "shards give", t); });
-            case "adm_e_plusgive" -> this.promptAdminInput(p, "Give " + this.brandTierPlus + " (30d) — type: <player>", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus give " + t.split("\\s+")[0] + " plus 30"); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
-            case "adm_e_plusplusgive" -> this.promptAdminInput(p, "Give " + this.brandTierPlusPlus + " (30d) — type: <player>", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus give " + t.split("\\s+")[0] + " plusplus 30"); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
-            case "adm_e_revoke" -> this.promptAdminInput(p, "Revoke " + this.brandTierPlus + "/++ — type: <player>", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus revoke " + t.split("\\s+")[0]); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
+            case "adm_e_givemoney" -> this.promptAdminInput(p, "Give money (type <player> <amount>)", t -> { this.runAdminEco(p, "eco give", t); });
+            case "adm_e_setmoney" -> this.promptAdminInput(p, "Set money (type <player> <amount>)", t -> { this.runAdminEco(p, "eco set", t); });
+            case "adm_e_giveshards" -> this.promptAdminInput(p, "Give shards (type <player> <amount>)", t -> { this.runAdminEco(p, "shards give", t); });
+            case "adm_e_plusgive" -> this.promptAdminInput(p, "Give " + this.brandTierPlus + " for 30 days (type <player>)", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus give " + t.split("\\s+")[0] + " plus 30"); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
+            case "adm_e_plusplusgive" -> this.promptAdminInput(p, "Give " + this.brandTierPlusPlus + " for 30 days (type <player>)", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus give " + t.split("\\s+")[0] + " plusplus 30"); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
+            case "adm_e_revoke" -> this.promptAdminInput(p, "Revoke " + this.brandTierPlus + "/++ (type <player>)", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus revoke " + t.split("\\s+")[0]); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
             case "adm_close" -> p.closeInventory();
             default -> this.handleAdminLegacyParam(p, id);
         }
@@ -26044,9 +26054,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         for (Player p : online) worlds.add(p.getWorld());
         for (org.bukkit.World w : worlds) { try { w.save(); } catch (Exception ignored) {} }
         if (online.isEmpty()) {
-            // No players: nothing to move — just save + restart.
+            // No players: nothing to move: just save + restart.
             this.getLogger().info("[LimboMaint] No players online; saving + restarting SMP.");
-            if (by instanceof Player pl0) pl0.sendMessage(this.legacyColorize("&#00BFFFNo players online — restarting SMP."));
+            if (by instanceof Player pl0) pl0.sendMessage(this.legacyColorize("&#00BFFFNo players online: restarting SMP."));
             Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
             this.spawnRelaunch();
             PlatformScheduler.globalLater(this, Bukkit::shutdown, 40L);
@@ -26101,7 +26111,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             if (empty || current >= 400) {   // 400 ticks = 20s timeout
                 if (holder[0] != null) holder[0].cancel();
-                this.getLogger().info("[LimboMaint] " + (empty ? "all players moved off" : "20s timeout") + " — saving + restarting SMP.");
+                this.getLogger().info("[LimboMaint] " + (empty ? "all players moved off" : "20s timeout") + ": saving + restarting SMP.");
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "save-all");
                 this.spawnRelaunch();
                 PlatformScheduler.globalLater(this, Bukkit::shutdown, 40L);
@@ -26109,7 +26119,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }, 10L, 10L);
     }
 
-    // /branding [status] | /branding set <pizzasmp|horizonsmp>
+    // /branding [status] | /branding set <profile>
     // Writes active: into branding.yml. The swap fully applies on the next (limbo) restart;
     // a live loadBranding() refreshes colours/labels for anything rendered after the flip.
     private void handleBrandingCommand(CommandSender sender, String[] args) {
@@ -26117,11 +26127,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if ("status".equals(sub) || "info".equals(sub)) {
             sender.sendMessage(this.legacyColorize("&#00BFFFBranding: &f" + this.brandActive
                 + " &7(" + this.brandDisplay + ", primary #" + this.brandColorHex("primary") + ")"));
-            sender.sendMessage(this.legacyColorize("&7Use &#00BFFF/branding set <pizzasmp|horizonsmp>&7, then restart (limbo) to fully apply."));
+            sender.sendMessage(this.legacyColorize("&7Use &#00BFFF/branding set <profile>&7, then restart (limbo) to fully apply."));
             return;
         }
         if ("set".equals(sub)) {
-            if (args.length < 2) { sender.sendMessage("§cUsage: /branding set <pizzasmp|horizonsmp>"); return; }
+            if (args.length < 2) { sender.sendMessage("§cUsage: /branding set <profile>"); return; }
             String target = args[1].toLowerCase(Locale.ROOT);
             File f = new File(this.getDataFolder(), "branding.yml");
             org.bukkit.configuration.file.YamlConfiguration y = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
@@ -26133,20 +26143,20 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             y.set("active", target);
             try { y.save(f); } catch (Exception ex) { sender.sendMessage("§cFailed to write branding.yml: " + ex.getMessage()); return; }
             this.loadBranding();   // refresh in-memory so newly rendered UI uses it immediately
-            // Apply external artifacts (icons, MOTD, TAB, datapack, DeluxeMenus, LuckPerms rank colours).
+            // Optional hook for artifacts outside the suite (server icon, MOTD, tab list, rank colours): an operator
+            // script at scripts.branding, relative to the server directory, run with the profile name if present.
             final String prof = target;
             this.runAsyncTask(() -> {
-                try {
-                    // Script paths are CONFIGURABLE and default to a path relative to the
-                    // server directory. They were absolute paths into one particular host's
-                    // home directory, which both leaked that layout and meant the feature
-                    // could never work on anyone else's machine.
-                    Process pr = new ProcessBuilder("bash",
-                        this.settings.getString("scripts.branding", "scripts/apply-branding.sh"), prof)
-                        .redirectErrorStream(true).start();
-                    pr.waitFor();
-                } catch (Exception ex) {
-                    this.getLogger().warning("[brand] apply-branding.sh failed: " + ex.getMessage());
+                String hook = this.settings.getString("scripts.branding", "scripts/apply-branding.sh");
+                File hookFile = new File(hook);
+                if (!hookFile.isAbsolute()) hookFile = new File(System.getProperty("user.dir"), hook);
+                if (hookFile.isFile()) {
+                    try {
+                        Process pr = new ProcessBuilder("bash", hookFile.getPath(), prof).redirectErrorStream(true).start();
+                        pr.waitFor();
+                    } catch (Exception ex) {
+                        this.getLogger().warning("[brand] " + hook + " failed: " + ex.getMessage());
+                    }
                 }
                 // Signal the limbo (DB control channel) to hot-reload branding.yml: it re-brands its
                 // tab header / hold / kick text live, no limbo restart needed.
@@ -26161,7 +26171,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 + "&7. External artifacts + limbo applied live; SMP icon/MOTD apply on its next restart."));
             return;
         }
-        sender.sendMessage("§7Usage: §f/branding [status] §7| §f/branding set <pizzasmp|horizonsmp>");
+        sender.sendMessage("§7Usage: §f/branding [status] §7| §f/branding set <profile>");
     }
     private void handleLimboMaintCommand(CommandSender sender, String[] args) {
         String sub = args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "status";
@@ -26377,7 +26387,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    // Console variant of /shards give — no Player sender required (stipend grants from PizzaAdminTools).
+    // Console variant of /shards give: no Player sender required (stipend grants from PizzaAdminTools).
     private void handleShardsGiveFromConsole(CommandSender sender, String targetName, String amountStr) {
         ParsedAmount parsed = this.parseCompactAmount(amountStr);
         if (parsed == null || parsed.value <= 0.0) {
@@ -26393,7 +26403,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             Player online = Bukkit.getPlayerExact(targetName);
             UUID tid = online != null ? online.getUniqueId() : this.lookupUuidByName(targetName);
             if (tid == null) {
-                this.getLogger().warning("[shards] Console give failed — player not found: " + targetName);
+                this.getLogger().warning("[shards] Console give failed: player not found: " + targetName);
                 return;
             }
             try {

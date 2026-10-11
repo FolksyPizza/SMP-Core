@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 # Rolling backend maintenance: the command-line control surface for the network.
 # network/README.md (Maintenance model) describes the tiers and the readmission gate.
 #
@@ -15,7 +17,7 @@
 #
 # Every step is independently abortable: if a backend fails to come back or fails its
 # health gate, the plan STOPS with that backend still flagged and its players still
-# held. It does not advance to the next unit. That is deliberate — readmitting players
+# held. It does not advance to the next unit. That is deliberate: readmitting players
 # into a half-broken backend loses items, which is worse than losing time.
 #
 # The relaunch path is verified BEFORE anything is stopped. On 2026-06-29 a stop-then-
@@ -156,10 +158,10 @@ cmd_apply() {
     # SAFETY: prove we can bring it back BEFORE stopping it.
     local starter="$ROOT/scripts/start_${b}.sh"
     if [[ ! -x "$starter" ]]; then
-      echo "[abort] no executable start script at $starter — refusing to stop $b"; exit 1
+      echo "[abort] no executable start script at $starter: refusing to stop $b"; exit 1
     fi
     if [[ ! -f "$ROOT/$b/server.jar" ]]; then
-      echo "[abort] $b/server.jar missing — refusing to stop $b"; exit 1
+      echo "[abort] $b/server.jar missing: refusing to stop $b"; exit 1
     fi
 
     set_maintenance "$b" 1          # proxy stops admitting; players already on are moved
@@ -177,10 +179,10 @@ cmd_apply() {
     set_maintenance "$b" 0          # readmit
     echo "=== $b complete ==="
   done
-  echo; echo "[apply] plan complete — all units healthy and readmitting."
+  echo; echo "[apply] plan complete: all units healthy and readmitting."
 }
 
-# TIER 3 — emergency. Close a backend NOW and kick everyone on it.
+# TIER 3: emergency. Close a backend NOW and kick everyone on it.
 #
 # Distinct from a normal maintenance flag: maintenance holds players and returns them,
 # emergency evicts them. The proxy reads the "!" prefix on a unit name to mean emergency
@@ -197,7 +199,7 @@ cmd_emergency() {
   set_maintenance "$backend" 1
   # Mark it emergency by prefixing the unit name.
   db "UPDATE maintenance_state SET targets_csv=REPLACE(targets_csv,'$backend','!$backend') WHERE id=1;"
-  echo "[emergency] $backend CLOSED — players on it will be disconnected."
+  echo "[emergency] $backend CLOSED: players on it will be disconnected."
   echo "            Clear with: ./scripts/backend_maint.sh emergency $backend off"
 }
 

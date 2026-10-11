@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2025-2026 William W. (FolksyPizza).
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 # Check that backends match wherever a configuration-free server switch needs them to.
 #   scripts/check-backend-parity.sh <server dir> <server dir> [...]
 #

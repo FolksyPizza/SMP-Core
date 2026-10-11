@@ -361,7 +361,7 @@ The source layout uses `src/` and varies resource/descriptor placement across mo
 
 [build_from_repo.sh][build] shows the fuller packaging model: compile Common, include it in AdminTools/ChatGuard/Punishment jars, compile individual plugins against server/integration dependencies, copy descriptors/resources, and build the Velocity plugin separately with its JDBC driver packaged. However, it expects an external `SMP/tools` layout and dependency caches that do not match this checkout's top-level module layout. Its default build set also omits PizzaLimbo. It should not be described as a verified clean-checkout build command.
 
-[deploy_plugins.sh][deploy] routes Paper and Velocity artifacts separately, restricts SpawnRules to hubs, checks jar drift/dependencies, and copies a referenced datapack. The script expects runtime directories and datapack sources not supplied by this source tree. [setup-server.sh][setup] provisions dependencies and branding, but also assumes script/resource placement that needs reconciliation with this checkout.
+[deploy_plugins.sh][deploy] routes Paper and Velocity artifacts separately, restricts SpawnRules to hubs, checks jar drift/dependencies, and copies a referenced datapack. The script expects runtime directories and datapack sources not supplied by this source tree. [setup.sh][setup] creates a runnable single server from this checkout: Paper, the suite, checksum-verified dependencies, the menu datapack, a brand profile and a start script.
 
 ### Operator interfaces and tests
 
@@ -408,5 +408,5 @@ These are properties of the current implementation, not proposed refactors. Wher
 [maint-script]: network/scripts/backend_maint.sh
 [ops-lib]: network/scripts/lib.sh
 [smoke]: network/scripts/smoke_test.sh
-[setup]: setup/setup-server.sh
+[setup]: setup.sh
 [tui]: tools/pizzactl.py

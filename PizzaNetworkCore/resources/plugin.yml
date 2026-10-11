@@ -1,7 +1,7 @@
 name: PizzaNetworkCore
 version: 1.0.0
 main: dev.pizzasmp.networkcore.PizzaNetworkCore
-api-version: '1.21.6'
+api-version: '1.21.7'
 authors: [FolksyPizza]
 description: Core plugin for the SMP-Core suite (economy, homes, teleports, social, settings, duels, hubs).
 # ProtocolLib is a HARD class-load dependency: this plugin imports com.comphenix.protocol.*
@@ -68,7 +68,7 @@ commands:
     aliases: [limbo]
     permission: pizzasmp.admin.console
   branding:
-    usage: /branding [status] | /branding set <pizzasmp|horizonsmp>
+    usage: /branding [status] | /branding set <profile>
     description: Switch the active server brand profile.
     permission: pizzasmp.admin.console
   worth:

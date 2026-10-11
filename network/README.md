@@ -40,9 +40,8 @@ Reach for the network if you want any of:
 ```
 
 `dev` is off by default and is never in the player-facing fallback chain. `maintenance` is
-where players wait while a backend restarts. There is no separate limbo backend in this
-layout because the lobby serves that role; PizzaLimbo remains in the repo for deployments
-that have no lobby.
+where players wait while a backend restarts. Rolling restarts hold players in the lobby, so this layout has
+no separate limbo backend; full-stop maintenance (`/limbomaint`) needs one ([Full-stop maintenance](#full-stop-maintenance)).
 
 ## What is shared, and how
 
@@ -206,6 +205,23 @@ cannot serve them. `scripts/backend_maint.sh` plans and runs rolling restarts.
 A rolling restart refuses to stop a backend whose start script or jar is missing, and will
 not readmit players until the backend has answered on its port, logged `Done (`, settled for
 20 seconds, reported no plugin errors, and held TPS ≥ 18 across three samples.
+
+### Full-stop maintenance
+
+`/limbomaint start` on a gameplay backend saves everyone, moves them to a limbo backend, restarts the gameplay
+backend and returns them when it is back. `/limbomaint stop` sends everyone back at once. It needs:
+
+| Piece | Setup |
+| --- | --- |
+| Limbo backend | A Paper server running only PizzaLimbo, with `level-name=limbo` in `server.properties` |
+| PizzaLimbo config | `plugins/PizzaLimbo/config.yml`: `db.*` (the shared database), `smp.probe-host` and `smp.probe-port` (the gameplay backend it waits for), `smp.server-name` (that backend's proxy name) |
+| Limbo datapack | `datapacks/pizzalimbo-menu` in the limbo world's `datapacks/` (the maintenance dialog) |
+| Proxy | The limbo registered as a server; PizzaProxyGuard `limbo-server` set to its name |
+| Gameplay backend | PizzaNetworkCore `limbo.server-name` (the limbo's proxy name) and `scripts.relaunch`: a script that starts the backend again after it stops (default `scripts/admin-restart.sh`, relative to the server directory) |
+
+Before anything stops, `/limbomaint start` checks that the relaunch script exists, the database answers and, with
+players online, that the limbo has checked in within the last 20 seconds. If any check fails it changes nothing and
+says why. A second start while one is running is refused.
 
 ### Admission control
 
