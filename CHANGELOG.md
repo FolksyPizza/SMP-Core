@@ -11,6 +11,11 @@ All notable changes to SMP-Core are documented here. The format is based on
 Changes since 1.0.0-beta.
 
 ### Added
+- Rank priority can be set with `pizzasmp.priority.1` to `pizzasmp.priority.9` (1 is highest) on any server; it
+  decides full-server joins, staff checks and per-player view distance. The original group names still work.
+- `pizzasmp.chatguard.owner` marks a player as the owner for ChatGuard, independent of group names.
+- Every permission the suite checks is declared in its `plugin.yml`, so permission plugins list it with its
+  intended default.
 - A Gradle build that works from a clean clone: `./gradlew build` compiles every plugin with dependencies from public
   repositories and collects the jars in `build/dist/`.
 - Continuous integration: every push and pull request builds the suite and boots it on Paper, failing on any plugin
@@ -83,6 +88,11 @@ Changes since 1.0.0-beta.
   readiness file (`admission.ready-file`) so admission works without a network database.
 
 ### Changed
+- Remaining legacy permission names are gone: `mycommand.punish`, `mycommand.unpunish`, `mycommand.forgive` and
+  `mycommand.bancheck` (use `pizzasmp.punish`, `pizzasmp.unpunish`, `pizzasmp.forgive`, `pizzasmp.bancheck`),
+  `maintenance.bypass` (use `pizzasmp.maintenance.stay`), and `pizzaruleguard.alerts` (now
+  `pizzasmp.ruleguard.alerts`).
+- The command map is read through the Paper API instead of reflection.
 - License changed from MIT to Apache 2.0. Releases before 1.0.0 remain under MIT.
 - Every permission the suite checks for its own features uses the `pizzasmp.` prefix. Renamed: `sethome.use` to
   `pizzasmp.home.use`, `sethome.admin` to `pizzasmp.home.admin`, `sethome.maxhomes.5` to `pizzasmp.homes.5`,
@@ -107,6 +117,8 @@ Changes since 1.0.0-beta.
 - PizzaUtils is retired: `/ping` lives in PizzaNetworkCore.
 
 ### Removed
+- PizzaAdminTools no longer replaces the client brand shown in F3. It reflected into server internals and showed
+  one server's name on every install; the server's own brand now shows.
 - `PizzaNetworkCore/pom.xml`: it resolved its dependencies from a server's `plugins/` folder and could not
   build from a clean clone.
 - PizzaNetworkCore's second homes implementation and its unused `homes` table. PizzaAdminTools owns every home
@@ -116,6 +128,14 @@ Changes since 1.0.0-beta.
   PizzaAdminTools.
 
 ### Fixed
+- A fresh install had no sell prices, so `/sell` paid nothing. PizzaNetworkCore ships default prices and writes
+  them to `plugins/PizzaNetworkCore/sell-prices.yml` on first start; `configs/sell/prices.yml` still overrides.
+- `pizzasmp.spawnedit` was declared by two plugins, which logged a warning at startup.
+- Subscription tier names follow `branding.yml` (`tiers.plus`, `tiers.plusplus`, otherwise the brand name plus
+  "+" and "++") everywhere, including PizzaAdminTools' perks, subscription menus and messages, which showed one
+  server's tier names. Without `branding.yml`, the short name and tiers default to the neutral brand.
+- Items dragged into a PizzaPunishment moderation menu were lost when it closed; drags into those menus are now
+  blocked like clicks.
 - PizzaSpawnRules no longer declares Folia support: it schedules through the Bukkit scheduler, which fails on Folia.
 - Server switches no longer race the final save. The server a player is on holds their state row and releases it
   in the same write as the final save; the next server waits for that release (or for the hold to expire after a

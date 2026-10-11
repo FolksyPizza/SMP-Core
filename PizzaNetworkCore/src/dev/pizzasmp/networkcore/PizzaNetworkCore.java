@@ -454,12 +454,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private FileConfiguration brandingConfig;
     private String brandActive = "example";
     private String brandDisplay = "ExampleSMP";
-    private String brandShort = "Pizza";
+    private String brandShort = "ExampleSMP";
     private String brandRegion = "NA-East";
     private String brandTagline = "Survival";
     private String brandDiscord = "";
-    private String brandTierPlus = "Pizza+";
-    private String brandTierPlusPlus = "Pizza++";
+    private String brandTierPlus = "ExampleSMP+";
+    private String brandTierPlusPlus = "ExampleSMP++";
     private final Map<String, String> brandColors = new java.util.HashMap<>();   // role -> 6-hex (no #)
     private final Map<UUID, Location> openEnderChestBlocks = new ConcurrentHashMap<>();   // ender chest FX (sound+lid)
     // Locator-bar friends-only filter: per-player set of MUTUAL follows (= friends). Read in the hot
@@ -1274,8 +1274,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.getLogger().info("[sell] Loaded " + count + " prices from " + externalFile.getAbsolutePath());
                 return;
             }
-            this.getLogger().warning("[sell] prices.yml not found at: " + new File(root, "configs/sell/prices.yml").getAbsolutePath());
         }
+        // No external price list: use sell-prices.yml in the plugin folder, written from the bundled defaults.
+        File local = new File(this.getDataFolder(), "sell-prices.yml");
+        if (!local.exists()) {
+            try { this.saveResource("sell-prices.yml", false); } catch (IllegalArgumentException ignored) { }
+        }
+        if (local.exists()) {
+            this.sellConfig = YamlConfiguration.loadConfiguration(local);
+            ConfigurationSection prices = this.sellConfig.getConfigurationSection("prices");
+            this.getLogger().info("[sell] Loaded " + (prices != null ? prices.getKeys(false).size() : 0) + " prices from " + local.getAbsolutePath());
+            return;
+        }
+        this.getLogger().warning("[sell] no price list found; /sell pays nothing until sell-prices.yml exists.");
         this.sellConfig = new YamlConfiguration();
         this.sellConfig.set("prices", new HashMap());
     }
@@ -13363,12 +13374,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         this.brandActive = active;
         this.brandDisplay = this.brandingConfig.getString(base + "display", "ExampleSMP");
-        this.brandShort = this.brandingConfig.getString(base + "short", "Pizza");
+        this.brandShort = this.brandingConfig.getString(base + "short", this.brandDisplay);
         this.brandRegion = this.brandingConfig.getString(base + "region", "NA-East");
         this.brandTagline = this.brandingConfig.getString(base + "tagline", "Survival");
         this.brandDiscord = this.brandingConfig.getString(base + "discord", "");
-        this.brandTierPlus = this.brandingConfig.getString(base + "tiers.plus", "Pizza+");
-        this.brandTierPlusPlus = this.brandingConfig.getString(base + "tiers.plusplus", "Pizza++");
+        // Tiers follow the brand name unless branding.yml names them.
+        this.brandTierPlus = this.brandingConfig.getString(base + "tiers.plus", this.brandDisplay + "+");
+        this.brandTierPlusPlus = this.brandingConfig.getString(base + "tiers.plusplus", this.brandDisplay + "++");
         this.brandColors.clear();
         this.brandColors.put("primary", this.brandingConfig.getString(base + "colors.primary", "00BFFF"));
         this.brandColors.put("info",    this.brandingConfig.getString(base + "colors.info",    "00BFFF"));
@@ -14373,7 +14385,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // Pizza++ premium tier (LuckPerms group pizza++, inherits pizza+).
     boolean isPizzaPlusPlus(Player p) {
-        return p != null && (p.hasPermission("group.pizza++") || p.hasPermission("pizzasmp.rank.pizzaplusplus"));
+        return p != null && (p.hasPermission("pizzasmp.rank.pizzaplusplus") || p.hasPermission("group.pizza++"));
     }
 
     private boolean isPizzaPlus(Player p) {
@@ -16450,7 +16462,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     // Rank order used by full-server joins, staff checks and per-player view distance (1 = highest).
+    // pizzasmp.priority.<1-9> sets it on any server; the group names below are the original ranks' fallback.
     int getPlayerPriority(Player p) {
+        for (int level = 1; level <= 9; level++) {
+            if (p.hasPermission("pizzasmp.priority." + level)) return level;
+        }
         if (p.hasPermission("group.dev")) return 1;
         if (p.hasPermission("group.owner")) return 2;
         if (p.hasPermission("group.sradmin")) return 3;

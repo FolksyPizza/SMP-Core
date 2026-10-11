@@ -163,3 +163,9 @@ permissions:
   pizzasmp.flight:
     description: Keep survival flight granted by other plugins (besides flight-owner-whitelist).
     default: false
+  pizzasmp.unpunish:
+    description: Release bans and mutes (same as pizzasmp.unban for bans, pizzasmp.unmute for mutes).
+    default: op
+  pizzasmp.forgive:
+    description: Release bans (same as pizzasmp.unban).
+    default: op

@@ -4,7 +4,7 @@
 
 alerts:
   # Staff with this permission node receive in-game alerts.
-  permission: pizzaruleguard.alerts
+  permission: pizzasmp.ruleguard.alerts
   # Also print alerts to the server console.
   console: true
   # Default cooldown between alerts for the same player/check pair.

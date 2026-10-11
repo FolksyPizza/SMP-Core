@@ -7,6 +7,9 @@ Planned work for SMP-Core. This is direction, not a commitment or a schedule. Op
 | Item | Summary |
 | --- | --- |
 | Version range | Paper 26.x (built and tested on Java 25), and a player choice of inventory menus over dialogs. 1.0.0 is tested on Paper 1.21.11. |
+| Network homes | `/home` and `/homes` for homes in a world on another backend: transfer first, then teleport (network support is in beta) |
+| Storage | Move home and SuiteStorage reads and writes off the main thread |
+| Paper API | Cross-server RTP arrival on `AsyncPlayerSpawnLocationEvent` instead of the deprecated `PlayerSpawnLocationEvent` |
 
 ## Later
 
@@ -19,4 +22,4 @@ Planned work for SMP-Core. This is direction, not a commitment or a schedule. Op
 | Gameplay | Visual effects for teleports, sales and milestones, and cosmetic trails |
 | Economy | Route sales through the best player order when it beats the base price; sweep matching listings when an order is created |
 | Moderation | A detection layer on PizzaRuleGuard: unified violation levels, autoclicker and macro cadence checks, economy and dupe checks. Supplements GrimAC, does not replace it |
-| Project | Continuous integration, checksummed releases, tests around money handling, performance work |
+| Project | Tests around money handling, performance work |

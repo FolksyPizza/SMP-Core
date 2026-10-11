@@ -198,3 +198,6 @@ permissions:
   pizzasmp.maintenance.motd:
     description: Use /maintenance motd to set the maintenance MOTD.
     default: op
+  pizzasmp.gamemode.bypass:
+    description: Change to creative or adventure while gamemode.block-creative-adventure is on.
+    default: false

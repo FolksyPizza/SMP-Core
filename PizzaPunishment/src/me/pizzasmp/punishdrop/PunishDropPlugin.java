@@ -64,6 +64,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import io.papermc.paper.event.player.AsyncChatEvent;
@@ -434,6 +435,26 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         if (getConfig().getBoolean("death.force-drops", true)
             && !Boolean.TRUE.equals(event.getPlayer().getWorld().getGameRuleValue(org.bukkit.GameRule.KEEP_INVENTORY))) {
             event.setKeepInventory(false);
+        }
+    }
+
+    /** Clicks are cancelled per menu below; a drag needs its own check or items dragged into a menu are lost. */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onModerationGuiDrag(InventoryDragEvent event) {
+        InventoryHolder holder = event.getInventory().getHolder();
+        if (!(holder instanceof ModerationMenuHolder || holder instanceof PunishmentListHolder
+                || holder instanceof PunishmentDetailHolder || holder instanceof BulkClearHolder
+                || holder instanceof OnlinePlayersHolder || holder instanceof PlayerActionsHolder
+                || holder instanceof OffensesHolder || holder instanceof OffenseDetailHolder
+                || holder instanceof ChatStrikesHolder)) {
+            return;
+        }
+        int topSize = event.getView().getTopInventory().getSize();
+        for (int slot : event.getRawSlots()) {
+            if (slot < topSize) {
+                event.setCancelled(true);
+                return;
+            }
         }
     }
 
@@ -3548,8 +3569,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private boolean hasPunishPermission(Player player) {
-        return player.hasPermission("mycommand.punish")
-            || player.hasPermission("pizzasmp.punish")
+        return player.hasPermission("pizzasmp.punish")
             || player.hasPermission("pizzasmp.ban")
             || player.hasPermission("pizzasmp.mute")
             || player.hasPermission("pizzasmp.kick");
@@ -3568,9 +3588,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         if (banLike) {
             return player.hasPermission("pizzasmp.unban")
                 || player.hasPermission("pizzasmp.unpunish")
-                || player.hasPermission("pizzasmp.forgive")
-                || player.hasPermission("mycommand.unpunish")
-                || player.hasPermission("mycommand.forgive");
+                || player.hasPermission("pizzasmp.forgive");
         }
         return player.hasPermission("pizzasmp.unmute")
             || player.hasPermission("pizzasmp.unpunish");
@@ -3578,7 +3596,6 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
 
     private boolean hasHistoryPermission(Player player) {
         return player.hasPermission("pizzasmp.bancheck")
-            || player.hasPermission("mycommand.bancheck")
             || player.hasPermission("pizzasmp.history")
             || player.hasPermission("pizzasmp.bans")
             || player.hasPermission("pizzasmp.listbans")

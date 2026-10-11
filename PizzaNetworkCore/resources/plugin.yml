@@ -265,8 +265,6 @@ permissions:
     default: op
   pizzasmp.gamemode.flight.bypass:
     default: op
-  pizzasmp.spawnedit:
-    default: op
   pizzasmp.pl.view:
     default: op
   pizzasmp.plugins.view:
@@ -285,6 +283,60 @@ permissions:
   pizzasmp.hub.leaderboard.place:
     description: Place the spawn money leaderboard.
     default: op
+  pizzasmp.staff:
+    description: Staff features across the suite (notifications, faster teleport requests).
+    default: op
+  pizzasmp.staff.invsee:
+    description: Use /invsee (same as pizzasmp.admin.invsee).
+    default: op
+  pizzasmp.staff.punish:
+    description: Counted as staff by teleport and visibility checks.
+    default: op
+  pizzasmp.staff.tpa:
+    description: Faster teleport requests (5 seconds).
+    default: op
+  pizzasmp.admin.vdthrottle:
+    description: Change the per-player view distance throttle.
+    default: op
+  pizzasmp.joinfull:
+    description: Join when the server is full.
+    default: op
+  pizzasmp.queue.staff:
+    description: Staff place in the join queue.
+    default: op
+  pizzasmp.queue.plus:
+    description: Supporter place in the join queue.
+    default: false
+  pizzasmp.rank.pizzaplusplus:
+    description: Top supporter rank (includes pizzasmp.rank.pizzaplus perks).
+    default: false
+  pizzasmp.priority.1:
+    description: Rank priority 1 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
+  pizzasmp.priority.2:
+    description: Rank priority 2 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
+  pizzasmp.priority.3:
+    description: Rank priority 3 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
+  pizzasmp.priority.4:
+    description: Rank priority 4 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
+  pizzasmp.priority.5:
+    description: Rank priority 5 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
+  pizzasmp.priority.6:
+    description: Rank priority 6 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
+  pizzasmp.priority.7:
+    description: Rank priority 7 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
+  pizzasmp.priority.8:
+    description: Rank priority 8 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
+  pizzasmp.priority.9:
+    description: Rank priority 9 (1 is highest) for full-server joins, staff checks and per-player view distance.
+    default: false
 # Load after Essentials/EssentialsChat so the chat-icon renderer wraps their chat renderer (same priority
 # runs in registration order).
 # ProtocolLib is required: the main class uses its packet API, and the plugin can't load without it.

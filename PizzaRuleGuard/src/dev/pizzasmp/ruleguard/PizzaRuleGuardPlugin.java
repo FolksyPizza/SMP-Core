@@ -552,7 +552,7 @@ public final class PizzaRuleGuardPlugin extends JavaPlugin implements Listener {
       if (var8 - var10 >= var5) {
          this.alertCooldowns.put(var7, var8);
          String var12 = color("&c[RuleGuard]&7 " + var1.getName() + " &f" + var3);
-         String var13 = this.getConfig().getString("alerts.permission", "pizzaruleguard.alerts");
+         String var13 = this.getConfig().getString("alerts.permission", "pizzasmp.ruleguard.alerts");
          boolean alertConsole = this.getConfig().getBoolean("alerts.console", true);
          String alertMessage = var12;
          String alertPermission = var13;

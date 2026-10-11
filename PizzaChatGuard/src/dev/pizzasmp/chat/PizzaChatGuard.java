@@ -60,6 +60,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
     private static final PlainTextComponentSerializer PLAIN = PlainTextComponentSerializer.plainText();
     private static final String PERM_BYPASS = "pizzasmp.chatguard.bypass";
     private static final String PERM_CLEAR = "pizzasmp.chatguard.clearwarnings";
+    private static final String PERM_OWNER = "pizzasmp.chatguard.owner";   // treated as owner (exempt unless the owner guard is on)
     private static final String PERM_LINKS = "pizzasmp.chatguard.links";   // may post links (bypass ADVERT only)
     private static final String PERM_MANAGE = "pizzasmp.chatguard.manage"; // manage whitelist + owner-guard toggle
     // Staff groups get link permission automatically. Owner/co-owner/dev are ALSO full-exempt (below).
@@ -737,7 +738,7 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
 
     // ---- exemption policy --------------------------------------------------
     private boolean isOwnerOrDev(Player p) {
-        return p.hasPermission("group.owner") || p.hasPermission("group.co-owner") || p.hasPermission("group.dev");
+        return p.hasPermission(PERM_OWNER) || p.hasPermission("group.owner") || p.hasPermission("group.co-owner") || p.hasPermission("group.dev");
     }
 
     /** Fully exempt from the whole filter: owner/co-owner/dev, unless the owner-guard is toggled on. */

@@ -38,7 +38,6 @@ import org.bukkit.FluidCollisionMode;
 import org.bukkit.event.player.PlayerToggleFlightEvent;
 import java.io.File;
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -157,14 +156,16 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private static final String PERM_NODE_PIZZAPLUSPLUS = "group.pizza++";
     private static final long PIZZAPLUS_STIPEND_PER_MONTH = 500L;      // shards per 30d block (Pizza+)
     private static final long PIZZAPLUSPLUS_STIPEND_PER_MONTH = 1000L; // shards per 30d block (Pizza++)
-    private static final String PIZZAPLUS_LIST_TITLE = "&6Pizza+ Subscribers";
+    private static String PIZZAPLUS_LIST_TITLE = "&6ExampleSMP+ Subscribers";
     private static final String PERM_RTP_USE = "rtp.use";
     private static final String RTP_PLUGIN_NAME = "RTPGUI";
     private static final String RTP_LISTENER_CLASS = "com.jolly.rtp.RTPListener";
 
-    private static final String BRAND_NAME = "PizzaPaper";
     // Brand identity comes from PizzaNetworkCore's branding.yml (see loadBranding); these are neutral defaults.
     private static String BRAND_DISPLAY = "";
+    /** Subscription tier labels from branding.yml (tiers.plus, tiers.plusplus); default: the brand name + "+" / "++". */
+    private static String TIER_PLUS = "ExampleSMP+";
+    private static String TIER_PLUSPLUS = "ExampleSMP++";
     private static String BRAND_DISCORD = "";
     private static String BRAND_SECTION = "&x&0&0&B&F&F&F";
     private static net.kyori.adventure.text.format.TextColor BRAND_COLOR = net.kyori.adventure.text.format.TextColor.color(0x00BFFF);
@@ -513,6 +514,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 new File(getConfig().getString("branding.file", "plugins/PizzaNetworkCore/branding.yml")));
             String active = b.getString("active", "example");
             BRAND_DISPLAY = b.getString("profiles." + active + ".display", "");
+            String tierBase = BRAND_DISPLAY.isBlank() ? "ExampleSMP" : BRAND_DISPLAY;
+            TIER_PLUS = b.getString("profiles." + active + ".tiers.plus", tierBase + "+");
+            TIER_PLUSPLUS = b.getString("profiles." + active + ".tiers.plusplus", tierBase + "++");
+            PIZZAPLUS_LIST_TITLE = "&6" + TIER_PLUS + " Subscribers";
             BRAND_DISCORD = b.getString("profiles." + active + ".discord", "");
             String hex = b.getString("profiles." + active + ".colors.primary", "00BFFF").toUpperCase(Locale.ROOT);
             BRAND_COLOR = net.kyori.adventure.text.format.TextColor.color(Integer.parseInt(hex, 16));
@@ -1344,7 +1349,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private static String tierDisplay(String tier) {
-        return "plusplus".equals(tier) ? "Pizza++" : "Pizza+";
+        return "plusplus".equals(tier) ? TIER_PLUSPLUS : TIER_PLUS;
     }
 
     private static String tierGroup(String tier) {
@@ -1423,7 +1428,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private boolean handlePizzaPlusCommand(CommandSender sender, String[] args) {
         if (sender instanceof Player p && !p.hasPermission(PERM_PIZZAPLUS_ADMIN)) {
-            p.sendMessage(color("&cYou do not have permission to manage Pizza+."));
+            p.sendMessage(color("&cYou do not have permission to manage " + TIER_PLUS + "."));
             return true;
         }
         String usage = "&cUsage: &e/pizzaplus <give|revoke|check|extend> <player> [plus|plusplus] [days|Nmo] &7| &e/pizzaplus list [plus|plusplus]";
@@ -1462,9 +1467,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 sender.sendMessage(color("&f" + lpName + " &7" + tierDisplay(tier) + ": &aACTIVE &7(expires in &f"
                     + formatRemainingMs(remaining) + "&7)"));
             } else if (hasNode) {
-                sender.sendMessage(color("&f" + lpName + " &7Pizza+: &aACTIVE &7(no expiry tracked — legacy grant)"));
+                sender.sendMessage(color("&f" + lpName + " &7" + TIER_PLUS + ": &aACTIVE &7(no expiry tracked — legacy grant)"));
             } else {
-                sender.sendMessage(color("&f" + lpName + " &7Pizza+/Pizza++: &cnone"));
+                sender.sendMessage(color("&f" + lpName + " &7" + TIER_PLUS + "/" + TIER_PLUSPLUS + ": &cnone"));
             }
             return true;
         }
@@ -1564,7 +1569,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         subs.sort(java.util.Comparator.comparingLong(this::getPizzaPlusExpiry));
 
         if (!(sender instanceof Player viewer)) {
-            sender.sendMessage(color("&6Pizza+ subscribers (" + subs.size() + "):"));
+            sender.sendMessage(color("&6" + TIER_PLUS + " subscribers (" + subs.size() + "):"));
             for (UUID uuid : subs) {
                 String name = pizzaPlusSubsConfig.getString("names." + uuid, uuid.toString());
                 String tier = getPizzaPlusTier(uuid);
@@ -1592,7 +1597,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 meta.setOwningPlayer(Bukkit.getOfflinePlayer(uuid));
                 meta.setDisplayName(color((pp ? "&6" : "&f") + name + " " + (pp ? "&6&l++" : "&e&l+")));
                 meta.setLore(List.of(
-                    color("&7Tier: " + (pp ? "&6Pizza++" : "&ePizza+")),
+                    color("&7Tier: " + (pp ? "&6" + TIER_PLUSPLUS : "&e" + TIER_PLUS)),
                     color("&7Expires in: &f" + formatRemainingMs(getPizzaPlusExpiry(uuid) - now)),
                     color("&8" + uuid)));
                 head.setItemMeta(meta);
@@ -1628,7 +1633,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             pizzaPlusSubsConfig.set("names." + uuid, null);
         }
         savePizzaPlusSubscriptions();
-        actor.sendMessage(color("&7Revoked Pizza+/++ from &f" + name + "&7."));
+        actor.sendMessage(color("&7Revoked " + TIER_PLUS + "/++ from &f" + name + "&7."));
     }
 
     /** Pizza+ management dialog: filter tabs, Give, and a button per subscriber (-> detail). */
@@ -1644,7 +1649,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 String next = tierFilter == null ? "plus" : (tierFilter.equals("plus") ? "plusplus" : null);
                 handlePizzaPlusList(p, next);
             }));
-        buttons.add(dialogButton(Component.text("Give Subscription", NamedTextColor.GREEN), "Grant Pizza+ / Pizza++", 150,
+        buttons.add(dialogButton(Component.text("Give Subscription", NamedTextColor.GREEN), "Grant " + TIER_PLUS + " / " + TIER_PLUSPLUS, 150,
             this::openPizzaPlusGiveDialog));
         for (UUID uuid : subs) {
             String name = pizzaPlusSubsConfig.getString("names." + uuid, uuid.toString());
@@ -1657,7 +1662,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (subs.isEmpty()) {
             buttons.add(dialogButton(Component.text("(no subscribers)", NamedTextColor.DARK_GRAY), null, 200, null));
         }
-        Dialog dialog = buildDialog(Component.text("Pizza+ Management", DIALOG_BRAND), body, List.of(),
+        Dialog dialog = buildDialog(Component.text(TIER_PLUS + " Management", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(1).exitAction(dialogButton(Component.text("Close"), null, 150, null)).build());
         viewer.showDialog(dialog);
     }
@@ -1681,8 +1686,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private void openPizzaPlusGiveDialog(Player viewer) {
         List<DialogInput> inputs = List.of(
             DialogInput.text("name", Component.text("Player name", NamedTextColor.GRAY)).width(220).maxLength(16).build());
-        ActionButton plus = pizzaPlusGiveButton("Give Pizza+", NamedTextColor.YELLOW, "plus");
-        ActionButton plusplus = pizzaPlusGiveButton("Give Pizza++", NamedTextColor.GOLD, "plusplus");
+        ActionButton plus = pizzaPlusGiveButton("Give " + TIER_PLUS, NamedTextColor.YELLOW, "plus");
+        ActionButton plusplus = pizzaPlusGiveButton("Give " + TIER_PLUSPLUS, NamedTextColor.GOLD, "plusplus");
         ActionButton back = dialogButton(Component.text("Back"), null, 150, p -> handlePizzaPlusList(p, null));
         Dialog dialog = buildDialog(Component.text("Give Subscription", DIALOG_BRAND),
             List.of(DialogBody.plainMessage(Component.text("Grants a 30-day subscription.", NamedTextColor.GRAY))),
@@ -2308,10 +2313,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         boolean hasPlus = hasPlusPlus || player.hasPermission(PERM_NODE_PIZZAPLUS);
         player.sendMessage(net.kyori.adventure.text.Component.empty());
         player.sendMessage(net.kyori.adventure.text.Component.text("✨ ", gold)
-            .append(net.kyori.adventure.text.Component.text("Pizza+ & Pizza++ Perks", gold)
+            .append(net.kyori.adventure.text.Component.text(TIER_PLUS + " & " + TIER_PLUSPLUS + " Perks", gold)
                 .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
             .append(net.kyori.adventure.text.Component.text(" ✨", gold)));
-        player.sendMessage(net.kyori.adventure.text.Component.text("Pizza+", gold)
+        player.sendMessage(net.kyori.adventure.text.Component.text(TIER_PLUS, gold)
             .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true)
             .append(net.kyori.adventure.text.Component.text("  (500 shards/mo)", gray)));
         String[] plusPerks = {
@@ -2319,14 +2324,14 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             "27 auction & order slots (default 18)",
             "Faster RTP & TPA cooldowns (15s)",
             "Priority queue during maintenance",
-            "Pizza+ tag in chat & tab",
+            TIER_PLUS + " tag in chat & tab",
             "500 bonus shards every month"
         };
         for (String perk : plusPerks) {
             player.sendMessage(net.kyori.adventure.text.Component.text(" • ", brand)
                 .append(net.kyori.adventure.text.Component.text(perk, white)));
         }
-        player.sendMessage(net.kyori.adventure.text.Component.text("Pizza++", gold)
+        player.sendMessage(net.kyori.adventure.text.Component.text(TIER_PLUSPLUS, gold)
             .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true)
             .append(net.kyori.adventure.text.Component.text("  (everything above, plus...)", gray)));
         String[] plusPlusPerks = {
@@ -2345,23 +2350,23 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         player.sendMessage(net.kyori.adventure.text.Component.empty());
         if (hasPlusPlus) {
             player.sendMessage(net.kyori.adventure.text.Component.text("You currently have ", gray)
-                .append(net.kyori.adventure.text.Component.text("Pizza++", gold)
+                .append(net.kyori.adventure.text.Component.text(TIER_PLUSPLUS, gold)
                     .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
                 .append(net.kyori.adventure.text.Component.text(" — enjoy!", gray)));
         } else if (hasPlus) {
             player.sendMessage(net.kyori.adventure.text.Component.text("You currently have ", gray)
-                .append(net.kyori.adventure.text.Component.text("Pizza+", gold)
+                .append(net.kyori.adventure.text.Component.text(TIER_PLUS, gold)
                     .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
                 .append(net.kyori.adventure.text.Component.text(" — upgrade to ", gray))
-                .append(net.kyori.adventure.text.Component.text("Pizza++", gold)
+                .append(net.kyori.adventure.text.Component.text(TIER_PLUSPLUS, gold)
                     .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
                 .append(net.kyori.adventure.text.Component.text(" for even more!", gray)));
         } else {
             player.sendMessage(net.kyori.adventure.text.Component.text("Upgrade to ", gray)
-                .append(net.kyori.adventure.text.Component.text("Pizza+", gold)
+                .append(net.kyori.adventure.text.Component.text(TIER_PLUS, gold)
                     .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
                 .append(net.kyori.adventure.text.Component.text(" or ", gray))
-                .append(net.kyori.adventure.text.Component.text("Pizza++", gold)
+                .append(net.kyori.adventure.text.Component.text(TIER_PLUSPLUS, gold)
                     .decoration(net.kyori.adventure.text.format.TextDecoration.BOLD, true))
                 .append(net.kyori.adventure.text.Component.text(" to unlock these perks.", gray)));
         }
@@ -3955,7 +3960,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 }
                 break;
             case "punish":
-                if (!hasAnyPermission(event.getSender(), "pizzasmp.punish", "mycommand.punish")) {
+                if (!hasAnyPermission(event.getSender(), "pizzasmp.punish")) {
                     break;
                 }
                 if (request.argPosition == 0) {
@@ -3969,7 +3974,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             case "unpunish":
             case "forgive":
                 if (!hasAnyPermission(event.getSender(),
-                    "pizzasmp.unpunish", "pizzasmp.forgive", "mycommand.unpunish", "mycommand.forgive")) {
+                    "pizzasmp.unpunish", "pizzasmp.forgive")) {
                     break;
                 }
                 if (request.argPosition == 0) {
@@ -3977,7 +3982,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 }
                 break;
             case "bancheck":
-                if (!hasAnyPermission(event.getSender(), "pizzasmp.bancheck", "mycommand.bancheck")) {
+                if (!hasAnyPermission(event.getSender(), "pizzasmp.bancheck")) {
                     break;
                 }
                 if (request.argPosition == 0) {
@@ -3985,7 +3990,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 }
                 break;
             case "bans":
-                if (!hasAnyPermission(event.getSender(), "pizzasmp.bans", "pizzasmp.bancheck", "mycommand.bancheck")) {
+                if (!hasAnyPermission(event.getSender(), "pizzasmp.bans", "pizzasmp.bancheck")) {
                     break;
                 }
                 if (request.argPosition == 0) {
@@ -5143,7 +5148,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
     private boolean shouldStayDuringMaintenance(Player player) {
         return player.hasPermission(PERM_MAINTENANCE_STAY)
-            || player.hasPermission("maintenance.bypass")
             || player.isOp();
     }
 
@@ -5986,7 +5990,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         boolean isNew = !homes.contains(name);
         int limit = allowedHomes(player);
         if (isNew && homes.size() >= limit) {
-            player.sendMessage(color("&cHome limit reached (&e" + homes.size() + "&7/&e" + limit + "&c). Delete a home or upgrade to Pizza+ / Pizza++ for more."));
+            player.sendMessage(color("&cHome limit reached (&e" + homes.size() + "&7/&e" + limit + "&c). Delete a home or upgrade to " + TIER_PLUS + " / " + TIER_PLUSPLUS + " for more."));
             return;
         }
         if (isNew) {
@@ -6508,16 +6512,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private CommandMap resolveCommandMap() {
-        try {
-            Method method = getServer().getClass().getMethod("getCommandMap");
-            Object result = method.invoke(getServer());
-            if (result instanceof CommandMap resolved) {
-                return resolved;
-            }
-        } catch (ReflectiveOperationException ex) {
-            getLogger().warning("Failed to resolve command map: " + ex.getMessage());
-        }
-        return null;
+        return getServer().getCommandMap();
     }
 
     // Roots that are always valid even if the legacy command map misses them (Paper/Brigadier
@@ -6917,40 +6912,6 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
-    @EventHandler(priority = EventPriority.LOWEST)
-    public void onPlayerJoinBrand(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
-        PlatformScheduler.entityLater(this, player, () -> {
-            if (!player.isOnline()) return;
-            try {
-                Method getHandle = player.getClass().getMethod("getHandle");
-                Object serverPlayer = getHandle.invoke(player);
-
-                Class<?> brandPayloadClass = Class.forName(
-                    "net.minecraft.network.protocol.common.custom.BrandPayload");
-                Object brandPayload = brandPayloadClass
-                    .getConstructor(String.class)
-                    .newInstance(BRAND_NAME);
-
-                Class<?> customPacketPayloadClass = Class.forName(
-                    "net.minecraft.network.protocol.common.custom.CustomPacketPayload");
-                Class<?> packetClass = Class.forName(
-                    "net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket");
-                Object packet = packetClass
-                    .getConstructor(customPacketPayloadClass)
-                    .newInstance(brandPayload);
-
-                Field connectionField = serverPlayer.getClass().getField("connection");
-                Object connection = connectionField.get(serverPlayer);
-
-                Class<?> packetBaseClass = Class.forName("net.minecraft.network.protocol.Packet");
-                Method send = connection.getClass().getMethod("send", packetBaseClass);
-                send.invoke(connection, packet);
-            } catch (Exception e) {
-                getLogger().warning("Failed to send brand packet: " + e.getMessage());
-            }
-        }, null, 20L);
-    }
 
     private static String safeName(OfflinePlayer p) {
         return p.getName() == null ? p.getUniqueId().toString() : p.getName();

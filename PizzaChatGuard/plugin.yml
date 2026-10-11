@@ -43,3 +43,12 @@ permissions:
   pizzasmp.chatguard.bypass:
     description: "Bypass the chat filter entirely (must be explicitly granted; even staff are filtered by default)."
     default: false
+  pizzasmp.chatguard.owner:
+    description: "Treated as the server owner: exempt from the filter unless the owner guard is on."
+    default: false
+  pizzasmp.chatguard.links:
+    description: "Post links past the advertising filter."
+    default: op
+  pizzasmp.staff.notify:
+    description: "Receive ChatGuard staff notifications."
+    default: op

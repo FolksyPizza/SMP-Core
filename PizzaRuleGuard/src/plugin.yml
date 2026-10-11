@@ -9,6 +9,6 @@ libraries:
   - org.mariadb.jdbc:mariadb-java-client:3.5.4
   - com.zaxxer:HikariCP:5.1.0
 permissions:
-  pizzaruleguard.alerts:
+  pizzasmp.ruleguard.alerts:
     description: Receive PizzaRuleGuard alerts.
     default: op
