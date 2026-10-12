@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026 William W. (FolksyPizza).
-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 # Merge the game-menu and limbo datapacks into one pack that every backend loads.
 #   scripts/build-network-dialogs.sh <menu pack dir> <limbo pack dir> <output pack dir>
 #

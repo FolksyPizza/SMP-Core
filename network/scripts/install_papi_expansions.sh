@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026 William W. (FolksyPizza).
-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 # Install PlaceholderAPI expansions onto every Paper backend.
 #
 # WHY THIS EXISTS: the expansions directory was empty on every backend, so anything

@@ -1,14 +1,14 @@
 <p align="center">
   <a href="https://github.com/FolksyPizza/SMP-Core/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/FolksyPizza/SMP-Core"></a>
   <a href="https://github.com/FolksyPizza/SMP-Core/actions/workflows/build.yml"><img alt="Build" src="https://github.com/FolksyPizza/SMP-Core/actions/workflows/build.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
+  <a href="LICENSE"><img alt="License: SMP-Core Source License" src="https://img.shields.io/badge/license-source--available-blue"></a>
   <img alt="Paper 1.21.11" src="https://img.shields.io/badge/Paper-1.21.11-informational">
 </p>
 
 # SMP-Core
 
 A plugin suite for survival servers on Paper: a player-driven economy, quality-of-life commands, duels, and staff
-tooling, for a single server or a Velocity network. Apache 2.0 licensed.
+tooling, for a single server or a Velocity network. Source-available under the SMP-Core Source License.
 
 Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG.md).
 
@@ -165,8 +165,8 @@ decompiler structure and are cleaned up as they are touched.
 
 ## License
 
-Apache 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). Releases before 1.0.0 were published under the MIT
-License. PizzaProxyGuard bundles MariaDB Connector/J under the LGPL-2.1; its license ships in the jar. Maintained by
-FolksyPizza.
+SMP-Core Source License, version 1.0: all rights reserved, with a revocable permission to use, modify and share. See
+[LICENSE](LICENSE) and [NOTICE](NOTICE). Version 1.0.0 was published under the Apache License 2.0 and earlier releases under the MIT License; those releases keep their licenses. PizzaProxyGuard
+bundles MariaDB Connector/J under the LGPL-2.1; its license ships in the jar. Maintained by FolksyPizza.
 
 Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.

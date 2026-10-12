@@ -6,6 +6,10 @@ All notable changes to SMP-Core are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- License: SMP-Core Source License, version 1.0, from this version. 1.0.0 remains available under the Apache
+  License 2.0 and earlier releases under the MIT License.
+
 ## [1.0.0] - 2026-10-11
 
 Changes since 1.0.0-beta.

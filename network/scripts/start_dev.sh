@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026 William W. (FolksyPizza).
-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 # Start the dev backend: the plugin development/test server.
 #
 # Dev is a normal Paper backend on :25568 (the retired pvp port) running the same plugin

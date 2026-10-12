@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026 William W. (FolksyPizza).
-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 # Boot check: start a throwaway Paper server with the built plugins and fail on any plugin error.
 #
 #   tools/ci/boot-check.sh [jar-dir] [work-dir]     defaults: build/dist, build/boot-check

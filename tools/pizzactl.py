@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2025-2026 William W. (FolksyPizza).
-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 """
 ExampleSMP Admin TUI: a terminal control panel for server admins.
 

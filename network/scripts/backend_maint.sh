@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026 William W. (FolksyPizza).
-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 # Rolling backend maintenance: the command-line control surface for the network.
 # network/README.md (Maintenance model) describes the tiers and the readmission gate.
 #

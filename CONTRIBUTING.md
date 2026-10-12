@@ -44,4 +44,4 @@ Paper API and their dependencies. Test on a local Paper server with a throwaway 
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the [Apache License, Version 2.0](LICENSE).
+By contributing, you grant the maintainer the contribution permission in section 6 of the [SMP-Core Source License](LICENSE).

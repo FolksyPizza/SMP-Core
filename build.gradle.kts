@@ -1,5 +1,5 @@
 // Copyright (c) 2025-2026 William W. (FolksyPizza).
-// Licensed under the Apache License, Version 2.0 (see LICENSE).
+// Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 // SMP-Core build: one jar per plugin, from a clean clone, with dependencies from public repositories.
 //
 //   ./gradlew build    compiles every plugin; jars land in build/dist/

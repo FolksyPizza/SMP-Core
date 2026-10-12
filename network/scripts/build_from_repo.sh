@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026 William W. (FolksyPizza).
-# Licensed under the Apache License, Version 2.0 (see LICENSE).
+# Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 # Build every custom plugin from the repo's tools/ tree and stage the jars.
 #
 # AUTHORITY: SMP/tools/ is the source of truth. This script never edits that source and

@@ -3,7 +3,7 @@ package dev.pizzasmp.limbo;
 /*
  * PizzaLimbo is part of the SMP-Core plugin suite.
  * Copyright (c) 2025-2026 William W. (FolksyPizza).
- * Licensed under the Apache License, Version 2.0 (see LICENSE). Provided AS IS, without warranty.
+ * Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved. Provided AS IS, without warranty.
  */
 
 import java.io.ByteArrayInputStream;

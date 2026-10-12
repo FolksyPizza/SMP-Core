@@ -1,5 +1,5 @@
 // Copyright (c) 2025-2026 William W. (FolksyPizza).
-// Licensed under the Apache License, Version 2.0 (see LICENSE).
+// Licensed under the SMP-Core Source License, version 1.0 (see LICENSE). All rights reserved.
 package dev.pizzasmp.common;
 
 import org.bukkit.plugin.Plugin;
@@ -34,7 +34,7 @@ public final class SuiteBanner {
             .collect(Collectors.joining(", "));
         for (String line : ART) plugin.getLogger().info(line);
         plugin.getLogger().info("SMP-Core " + plugin.getPluginMeta().getVersion()
-            + " | Apache-2.0 | https://github.com/FolksyPizza/SMP-Core");
+            + " | SMP-Core Source License | https://github.com/FolksyPizza/SMP-Core");
         plugin.getLogger().info("Modules: " + modules);
     }
 }
