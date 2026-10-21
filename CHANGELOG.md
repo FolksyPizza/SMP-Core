@@ -6,6 +6,10 @@ All notable changes to SMP-Core are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- Clarified Apache 2.0 coverage for current source, documentation and build scripts, preserving earlier MIT
+  releases and third-party licenses. CI now verifies the license text, source notices and packaged metadata.
+
 ## [1.0.0] - 2026-10-11
 
 Changes since 1.0.0-beta.

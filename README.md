@@ -165,8 +165,12 @@ decompiler structure and are cleaned up as they are touched.
 
 ## License
 
-Apache 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). Releases before 1.0.0 were published under the MIT
-License. PizzaProxyGuard bundles MariaDB Connector/J under the LGPL-2.1; its license ships in the jar. Maintained by
-FolksyPizza.
+The current SMP-Core source code, documentation and build scripts use the Apache License, Version 2.0:
+see [LICENSE](LICENSE) and [NOTICE](NOTICE). Releases before 1.0.0 retain the MIT License.
+Third-party components retain their own licenses. PizzaProxyGuard bundles MariaDB Connector/J under the LGPL-2.1;
+its license ships in the jar. Maintained by FolksyPizza.
+
+CI checks the source licensing and each built jar's license metadata with
+`python3 tools/ci/check-licenses.py --jars build/dist`.
 
 Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.
