@@ -31,7 +31,7 @@ flowchart TB
     Core -. visual scene copies .-> Limbo
 ```
 
-The diagram shows supported code paths, not a required topology. A gameplay backend can run without a proxy, but PNC still requires its database for economy and other persistent features. A network-maintenance backend running PNC and a dedicated backend running PizzaLimbo implement different holding mechanisms; they are not interchangeable names for one service.
+The diagram shows supported code paths, not a required topology. A gameplay backend can run without a proxy, using an embedded H2 database for PNC when local storage is selected. A network needs shared MySQL/MariaDB storage. A network-maintenance backend running PNC and a dedicated backend running PizzaLimbo implement different holding mechanisms; they are not interchangeable names for one service.
 
 | Component | Implementation and responsibility |
 | --- | --- |
@@ -47,7 +47,7 @@ The diagram shows supported code paths, not a required topology. A gameplay back
 | PizzaRuleGuard | [Rule listener][ruleguard]: behavioral heuristics, inventory sanity checks, alerts, and configurable punishment dispatch. |
 | PizzaSpawnRules | [Hub listener][spawnrules]: protected areas, double jump, station interactions, and gate routing. |
 | PizzaLimbo | [Dedicated holding plugin][limbo]: frozen visual scene during maintenance, backend readiness checks, and return routing. |
-| EnderchestExpander | [Expanded inventory plugin][ender]: separate 54-slot ender-chest inventory and local persistence. |
+| EnderchestExpander | [Expanded inventory plugin][ender]: separate 54-slot ender-chest inventory, with SQL or local-file persistence selected through SuiteStorage. |
 | PizzaTune | [Runtime tuning][tune]: live view distance (`/viewdistance`) and chunk send/load rates. |
 
 ## Initialization, scheduling, and shutdown
@@ -135,8 +135,8 @@ PNC builds sidebar, tab, money nametag, sound, and notification output from sett
 | Boundary | Data and ownership | Important property |
 | --- | --- | --- |
 | PNC relational storage | Players, balances, settings, statistics, homes, markets, social relationships, teleport requests, notifications, audits, snapshots, and maintenance state. | Explicit SQL, mostly inside PNC; no ORM or repository layer. |
-| SuiteStorage documents | AdminTools, ChatGuard, and Punishment documents, selected by namespace. | YAML files or serialized YAML text in SQL rows; not the same model as PNC's tables. |
-| Local plugin/world files | Expanded ender chests, SetHome-compatible data, branding, rule logs, advancement files, and world regions. | Sharing the PNC database does not share these automatically. |
+| SuiteStorage documents | AdminTools, ChatGuard, Punishment, and expanded ender-chest documents, selected by namespace. | YAML files or serialized YAML text in SQL rows; not the same model as PNC's tables. |
+| Local plugin/world files | Expanded ender chests in file mode, SetHome-compatible data, branding, rule logs, advancement files, and world regions. | Sharing the PNC database does not share these automatically. |
 | Process-local state | GUI state, cooldowns, combat tags, pending tasks, cached names/settings, reply targets, and in-flight guards. | Lost on restart and not generally invalidated across servers. |
 
 ### Relational access and schema
@@ -337,7 +337,18 @@ Gate-pad movement dispatches warp commands after a cancellable countdown. Tagged
 
 ### Expanded ender chest and tuning plugins
 
-[EnderchestExpander][ender] redirects vanilla chest opening and selected commands into a cached 54-slot inventory. First load can seed from the vanilla chest. It writes compressed Bukkit-serialized arrays under its own `enderchests` data directory, with a five-second write throttle and periodic saves. It does not write the expanded contents back to the vanilla ender chest or PNC's sync snapshot. Close/quit saves are throttled too, and there is no explicit disable flush in this class.
+[EnderchestExpander][ender] redirects vanilla chest opening and selected commands into a cached 54-slot inventory.
+First load can seed from the vanilla chest. When SuiteStorage selects SQL, expanded contents are stored in its
+player documents with expiring instance holds; when it selects files, compressed serialized contents live in the
+plugin's `enderchests` directory. A missing SQL document can import an existing local chest file. These contents
+remain separate from the vanilla ender chest and PNC's player-sync snapshot.
+
+Close, quit and autosave paths capture or persist snapshots through per-player I/O lanes. During disable,
+`drainIoForShutdown()` drains queued operations, then `saveOpenChestsForShutdown()` saves cached inventories
+without an active inspection lease when called on Paper's primary thread. Off-thread disable skips that inventory
+capture, and active inspections are skipped. The class still warns that no host drain hook is wired for complete
+entity-owner snapshot/drain coordination. These shutdown paths do not establish a complete cross-backend or
+region-thread-safe shutdown guarantee.
 
 [PizzaTune][tune] changes live view distance and uses reflection into Paper's global configuration for chunk rates. These controls can overlap PNC's adaptive tuning and other command providers. Reflection-based tuning depends on the actual server implementation; it is not a stable suite API.
 
@@ -357,9 +368,12 @@ Price configuration has a further external dependency: `loadSellConfig()` looks 
 
 ### Build and packaging boundaries
 
-The source layout uses `src/` and varies resource/descriptor placement across modules. [PNC's Maven file][pom] targets Java 21 and declares local system-path dependencies, but is not a complete self-contained suite build: the main source references integrations not fully represented there, and its nonstandard resource directory needs packaging attention.
+The root Gradle wrapper is the clean-checkout suite build: `./gradlew build` compiles all plugins and collects
+jars in `build/dist/`. It resolves public dependencies, embeds Common in its consumers, packages plugin resources,
+and includes LICENSE/NOTICE. PizzaProxyGuard also includes its MariaDB driver license. See
+[the development guide](docs/development.md) for versions, checks and reproducibility limits.
 
-[build_from_repo.sh][build] shows the fuller packaging model: compile Common, include it in AdminTools/ChatGuard/Punishment jars, compile individual plugins against server/integration dependencies, copy descriptors/resources, and build the Velocity plugin separately with its JDBC driver packaged. However, it expects an external `SMP/tools` layout and dependency caches that do not match this checkout's top-level module layout. Its default build set also omits PizzaLimbo. It should not be described as a verified clean-checkout build command.
+Legacy network build scripts reflect earlier layouts and are not the authoritative clean-checkout build. Do not infer runtime deployment from a successful build.
 
 [deploy_plugins.sh][deploy] routes Paper and Velocity artifacts separately, restricts SpawnRules to hubs, checks jar drift/dependencies, and copies a referenced datapack. The script expects runtime directories and datapack sources not supplied by this source tree. [setup.sh][setup] creates a runnable single server from this checkout: Paper, the suite, checksum-verified dependencies, the menu datapack, a brand profile and a start script.
 
@@ -369,7 +383,7 @@ The source layout uses `src/` and varies resource/descriptor placement across mo
 
 [network/scripts/lib.sh][ops-lib] supplies shared service/configuration helpers used by startup, restart, database, deployment, and maintenance scripts. [smoke_test.sh][smoke] is an operational RCON probe requiring running services and external configuration; it is not an isolated unit-test suite and should be reviewed before execution because it sends commands.
 
-No conventional Java unit/integration test suite was found in this checkout. This architecture review checked source paths and execution/data flows; it did not compile, deploy, connect test players, validate live database migrations, or prove runtime compatibility of external dependencies.
+The published CI builds and performs an isolated Paper boot check. This is not a comprehensive gameplay or network failure test suite. Architecture statements describe source behavior, not proof of a running deployment; see [the development guide](docs/development.md) for verification boundaries.
 
 ## Constraints to retain when extending the system
 
@@ -402,7 +416,6 @@ These are properties of the current implementation, not proposed refactors. Wher
 [ender]: PizzaEnderchest/src/dev/pizzasmp/plugins/EnderchestExpander.java
 [tune]: PizzaTune/src/dev/pizzasmp/tune/PizzaTune.java
 [schema]: PizzaNetworkCore/resources/schema.sql
-[pom]: PizzaNetworkCore/pom.xml
 [build]: network/scripts/build_from_repo.sh
 [deploy]: network/scripts/deploy_plugins.sh
 [maint-script]: network/scripts/backend_maint.sh

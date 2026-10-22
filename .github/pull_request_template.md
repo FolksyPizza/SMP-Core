@@ -1,16 +1,23 @@
 ## Summary
 
-What changed and why. Link the issue.
+What changed for users, why, and the related issue.
 
-## Testing
+## Verification
 
-- Server: Paper version, single server or network
-- Paths exercised:
-- Not tested:
+- Source commit and server/client versions:
+- Storage mode: local or shared SQL; single server or network:
+- Commands/checks and results:
+- Failure, disconnect and restart paths exercised:
+- Verification level: compiled / unit tested / isolated boot / integration / real client / production:
+- Not verified:
 
-## Checklist
+## Review and compatibility
 
-- [ ] One concern in this pull request
-- [ ] `CHANGELOG.md` updated under `[Unreleased]`
-- [ ] `COMMANDS.md` updated if commands or permissions changed
-- [ ] No credentials, server names, hostnames or player data
+- [ ] One concern; entire diff reviewed by the contributor
+- [ ] Human reviewed the approach for substantial work and any later scope/risk changes
+- [ ] Human review of final diff and evidence before merge
+- [ ] Permissions, dependencies, storage/schema and upgrade implications described where applicable
+- [ ] CHANGELOG updated; COMMANDS and user guides updated when behavior changes
+- [ ] No credentials, player data or private operational material
+
+Contributors remain responsible for all submitted changes, including agent-generated code.

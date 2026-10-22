@@ -7,6 +7,12 @@ All notable changes to SMP-Core are documented here. The format is based on
 ## [Unreleased]
 
 ### Changed
+- Corrected setup rerun guidance: branding and start scripts are regenerated, and the branding backup is replaced
+  on each run. Clarified expanded ender-chest SQL/file storage and the scope and limits of shutdown saving.
+- Reorganized onboarding documentation with installation, architecture, build/test, plugin integration,
+  release and maintenance guides. Clarified jar placement, per-plugin storage selection and migration limits.
+- Updated contribution and pull-request guidance with human review checkpoints and responsibility for
+  agent-assisted changes.
 - Clarified Apache 2.0 coverage for current source, documentation and build scripts, preserving earlier MIT
   releases and third-party licenses. CI now verifies the license text, source notices and packaged metadata.
 

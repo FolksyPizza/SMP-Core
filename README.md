@@ -1,20 +1,66 @@
 <p align="center">
   <a href="https://github.com/FolksyPizza/SMP-Core/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/FolksyPizza/SMP-Core"></a>
   <a href="https://github.com/FolksyPizza/SMP-Core/actions/workflows/build.yml"><img alt="Build" src="https://github.com/FolksyPizza/SMP-Core/actions/workflows/build.yml/badge.svg"></a>
+  <a href="https://github.com/FolksyPizza/SMP-Core/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/FolksyPizza/SMP-Core"></a>
+  <a href="https://github.com/FolksyPizza/SMP-Core/network/members"><img alt="GitHub forks" src="https://img.shields.io/github/forks/FolksyPizza/SMP-Core"></a>
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
   <img alt="Paper 1.21.11" src="https://img.shields.io/badge/Paper-1.21.11-informational">
 </p>
 
 # SMP-Core
 
-A plugin suite for survival servers on Paper: a player-driven economy, quality-of-life commands, duels, and staff
-tooling, for a single server or a Velocity network. Apache 2.0 licensed.
+Survival gameplay, economy and staff tools for Paper servers and Velocity networks.
 
-Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG.md).
+[Get started](docs/getting-started.md) · [Commands](COMMANDS.md) · [Architecture](ARCHITECTURE.md) · [Releases](https://github.com/FolksyPizza/SMP-Core/releases) · [Contribute](CONTRIBUTING.md)
 
-- 10 plugins and a shared library, about 51,000 lines of Java, plus two datapacks
-- More than 100 commands ([COMMANDS.md](COMMANDS.md))
-- Runs on Paper 1.21.7 to 1.21.11; most tested on 1.21.11, where it has run in production ([Supported versions](#supported-versions))
+SMP-Core combines ten plugins and a shared library. Use it on a single survival server or configure a network
+with shared storage. The current release is **1.0.0**; see the [changelog](CHANGELOG.md).
+
+## What you can build
+
+- A survival economy with shops, auctions and buy orders.
+- Player tools for homes, teleport requests, friends, settings and expanded ender chests.
+- Staff workflows for moderation, maintenance, audit and player inspection.
+- A Velocity network with shared player state and a maintenance backend.
+
+Single-server gameplay is stable. Network support is **beta**, and duels are **preview**.
+Cross-server personal homes are not supported in the published release.
+See [compatibility and limitations](docs/compatibility.md) before choosing a deployment.
+
+## Get started
+
+Use Java 21 or newer and a supported Paper server. Paper **1.21.11** has the most coverage;
+Paper 1.21.7–1.21.10 has limited coverage. Folia and Paper 26.x are not supported.
+ProtocolLib and Vault are required. A single server can use local storage; a network requires MySQL or MariaDB.
+
+On macOS or Linux, clone the repository and run:
+
+```sh
+git clone https://github.com/FolksyPizza/SMP-Core.git
+cd SMP-Core
+./setup.sh            # starts onboarding
+./server/start.sh
+```
+
+The setup script creates a server directory, installs dependencies and offers a branding profile.
+Review its EULA and configuration choices before starting your server.
+For manual installation and database setup, follow [Getting started](docs/getting-started.md).
+For a proxy deployment, use the [network guide](network/).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Players[Players] --> Paper[Paper and gameplay plugins]
+    Paper --> Local[(Local storage: single server)]
+    Players --> Velocity[Optional Velocity proxy]
+    Velocity --> Backends[Paper backends]
+    Backends --> SQL[(Shared MySQL or MariaDB)]
+```
+
+PizzaNetworkCore owns gameplay and economy; support plugins own moderation and staff tools.
+PizzaCommon embeds storage, scheduling and menu helpers in its consumers.
+See [architecture](ARCHITECTURE.md) and [integrations](docs/integrations.md) for boundaries and limitations.
 
 ## Plugins
 
@@ -32,136 +78,50 @@ Current version: **1.0.0**, shared by every plugin. See [CHANGELOG.md](CHANGELOG
 | PizzaProxyGuard | Velocity plugin: holds new joins while the backend is down and turns moderation kicks into clean disconnects |
 | PizzaCommon | Shared library compiled into the plugins that use it: storage, menu locking, the startup banner and a facade over Paper's schedulers |
 
-## Requirements
+## Documentation
 
-| | Minimum | Recommended |
-| --- | --- | --- |
-| Server | Paper 1.21.7, Java 21 | Paper 1.21.11 |
-| Database | None: a single server stores its data in local files | MySQL or MariaDB; required for a Velocity network |
-| Dependencies | ProtocolLib, Vault | LuckPerms, PlaceholderAPI (full list: `setup/deps.txt`) |
-| Hardware | 2 cores, 4 GB RAM | 4+ cores, 8 to 12 GB RAM, SSD |
-
-## Supported versions
-
-**Tested**: passes this release's automated tests. **Beta**: works in the tests that ran, with less coverage.
-*Unverified*: expected to work, never checked.
-
-| Platform | Status |
+| Task | Guide |
 | --- | --- |
-| Paper 1.21.11 | **Tested**: every bot test, single server and network; used in production |
-| Paper 1.21.7 to 1.21.10 | **Beta**: boots clean; the release, menu lock and command routing bot tests pass |
-| Paper 1.21.6 and older | Not supported: no dialog API. The plugins refuse to load |
-| Paper 26.x, Folia | Not supported yet ([UPCOMING.md](UPCOMING.md)) |
-| Java | 21 or newer |
-| Velocity | 3.5.1 **Tested** (network bot tests); other 3.x releases *Unverified* |
-| Java Edition clients | The server's version natively; other versions through ViaVersion, used in production |
-| Bedrock Edition clients | Through Geyser and Floodgate, with chest menus in place of dialogs; used in production, not in the bot tests |
-| Network features | **Beta**: cross-server `/home` is not supported yet; a home on another backend is refused by name |
+| Install or update | [Getting started](docs/getting-started.md) |
+| Configure branding, storage and datapacks | [Configuration](docs/configuration.md) |
+| Check platform support and limitations | [Compatibility](docs/compatibility.md) |
+| Find commands and permissions | [Command reference](COMMANDS.md) |
+| Understand plugin and storage boundaries | [Architecture](ARCHITECTURE.md) |
+| Configure a Velocity network | [Network guide](network/) |
+| Integrate another plugin | [APIs and integrations](docs/integrations.md) |
+| Build and test a contribution | [Development guide](docs/development.md) |
+| Deploy, maintain or roll back | [Operations](docs/operations.md) |
+| Understand release and license scope | [Releases](docs/releases.md) |
+| Check changes and planned work | [Changelog](CHANGELOG.md), [Upcoming](UPCOMING.md) |
 
-One set of jars covers every supported Paper version.
+## Build from source
 
-## Installation
-
-### Quick start (macOS or Linux)
-
-From a clone of this repository:
-
-```sh
-./setup.sh            # asks a few questions; creates ./server
-./server/start.sh
-```
-
-`setup.sh` checks for Java 21 (offering Homebrew's on macOS), downloads Paper, builds the plugins (or downloads the
-latest release), installs ProtocolLib, Vault and optionally LuckPerms with checksums where published, adds the menu
-datapack, and writes the EULA, `server.properties`, a brand profile and `start.sh`. Re-run it to update the plugins
-or change the brand; worlds, configs and player data are kept. `./setup.sh --help` lists the options.
-
-### Single server
-
-1. Download the jars from the Releases page into `plugins/`, with ProtocolLib and Vault.
-2. Start the server. With no database configured, every plugin stores its data in local files (PizzaNetworkCore uses
-   an embedded database file, `plugins/PizzaNetworkCore/data/smpcore.mv.db`).
-3. Optional: to use MySQL or MariaDB, set the connection under `sync.database` in
-   `plugins/PizzaNetworkCore/config.yml` and restart. The other plugins share that connection, and tables are
-   created on first start.
-
-
-### Velocity network
-
-Lobby, survival, maintenance and optional dev backends run behind one proxy and share player state (inventory,
-balance, rank, settings) through a shared MySQL or MariaDB database. [`network/`](network) has the topology, configs and scripts.
-Network support is in beta.
-
-## Configuration
-
-| What | Where |
-| --- | --- |
-| Branding: name, tagline, region, Discord link, tier names and color palette | `plugins/PizzaNetworkCore/branding.yml` ([Branding](#branding)) |
-| Economy, gameplay and database | `plugins/PizzaNetworkCore/config.yml`, `shop.yml` |
-| Chat filtering | `plugins/PizzaChatGuard/` |
-| Punishments and rules | `plugins/PizzaPunishment/`, `plugins/PizzaRuleGuard/` |
-| Storage (Database or File) | `storage.backend` in each plugin's config: `auto` (default) uses the database when reachable, sharing PizzaNetworkCore's connection, and files otherwise |
-
-### Branding
-
-One file themes the whole suite. PizzaNetworkCore writes a documented `branding.yml` on first start (`setup.sh`
-fills it in with your server's name and color); PizzaAdminTools, PizzaPunishment and PizzaLimbo read the same file.
-
-| Key | Used for |
-| --- | --- |
-| `display`, `short` | The server name in messages, menus, ban screens and the limbo |
-| `tagline`, `region`, `discord` | Message tokens; the limbo shows the region, ban screens the Discord link |
-| `tiers.plus`, `tiers.plusplus` | Subscription tier names; by default the name plus "+" and "++" (HappyLand+, HappyLand++) |
-| `colors.primary` | The accent color in messages, menus, dialogs and the scoreboard |
-| `colors.info`, `success`, `warning`, `danger`, `muted`, `text` | Color roles for message tokens |
-
-Messages and config text can use the tokens `{brand}`, `{brand_short}`, `{tagline}`, `{region}`, `{discord}`,
-`{plus}`, `{plusplus}` and the color tokens `{primary}`, `{info}`, `{success}`, `{warning}`, `{danger}`, `{muted}`
-and `{text}`. A file can hold several profiles; `active` picks one, and `/branding set <profile>` switches live.
-The server icon, MOTD and tab list are not themed by the suite.
-
-### Datapacks
-
-| Datapack | Install into | Adds |
-| --- | --- | --- |
-| `datapacks/pizzasmp-menu` | The main world's `datapacks/` | The `/menu` pause-screen dialogs |
-| `datapacks/pizzalimbo-menu` | The limbo world's `datapacks/` | The maintenance dialog |
-
-## Building
-
-Prebuilt jars are on the Releases page. To build from source you need Java 21 or newer; Gradle comes with the
-wrapper and fetches every dependency from public repositories:
+The Gradle wrapper resolves dependencies from public repositories. Use Java 21 or newer:
 
 ```sh
 ./gradlew build
+python3 tools/ci/check-licenses.py --jars build/dist
 ```
 
-The jars land in `build/dist/`. `tools/ci/boot-check.sh` starts a throwaway Paper server with them and fails on any
-plugin error; CI runs both on every push and pull request.
+Jars are written to `build/dist/`. CI also runs `tools/ci/boot-check.sh`, which starts a disposable Paper server.
+If running it locally, use a dedicated disposable work directory and an available port; the script deletes its work directory.
+A clean boot establishes startup behavior; gameplay changes need focused runtime checks as well.
 
-## Status
+For repeatable commands, test coverage and remaining reproducibility limits, read the [development guide](docs/development.md).
 
-| Area | Status |
-| --- | --- |
-| Single-server gameplay: economy, homes, teleports, settings, moderation, menus | Stable |
-| Velocity network: shared inventories, balances, permissions, chat, cross-server RTP | Beta |
-| Duels and the duel queue | Preview: playable, still changing |
-| Folia | Not supported yet ([UPCOMING.md](UPCOMING.md)) |
+## Contributing
 
-Parts of PizzaNetworkCore and PizzaAdminTools were recovered from compiled builds. A few areas still carry
-decompiler structure and are cleaned up as they are touched.
+Bug reports, documentation and focused fixes are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
+Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
-## Documentation
+### Working with coding agents
 
-| Document | Contents |
-| --- | --- |
-| [COMMANDS.md](COMMANDS.md) | Every command and permission |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Plugin lifecycles, routing, persistence, gameplay flows, Velocity integration |
-| [CHANGELOG.md](CHANGELOG.md) | Release history |
-| [UPCOMING.md](UPCOMING.md) | Planned work |
-| [network/](network) | Network topology and operations |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
-| [SECURITY.md](SECURITY.md) | Reporting vulnerabilities |
+Agent-assisted contributions follow [AGENTS.md](AGENTS.md) and the [agent contribution guide](docs/agent-contributions.md).
+For substantial work, have a human review the proposed approach before implementation, then review the diff and
+test evidence before merging. Return to human review if the scope or risk changes during implementation.
+The contributor is responsible for every submitted change, including generated code, dependencies, licensing
+and security. Agent output and passing checks do not replace human review.
+An optional [SMP-Core change skill](skills/smp-core-change/SKILL.md) provides project-specific guidance.
 
 ## License
 
