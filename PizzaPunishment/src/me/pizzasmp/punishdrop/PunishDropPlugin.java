@@ -159,6 +159,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     private final ConcurrentHashMap<String, PendingBulkClear> pendingBulkClearConfirms = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PendingKickOperation> pendingKickOperations = new ConcurrentHashMap<>();
     private final SecureRandom idRandom = new SecureRandom();
+    private ProtectedTargets protectedTargets;
 
     private volatile boolean shuttingDown;
 
@@ -201,6 +202,8 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         getConfig().options().copyDefaults(true);
         loadBranding();
         saveConfig();
+        protectedTargets = new ProtectedTargets(this, getConfig().isList("protected-groups")
+            ? getConfig().getStringList("protected-groups") : List.of("owner"));
         this.storage = dev.pizzasmp.common.SuiteStorage.fromConfig(this, "punishment");
         this.storage.logLocalFiles(this, "offence counts and ban records will NOT be shared between backends, "
             + "so punishment escalation resets on a server hop.");
@@ -719,6 +722,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         boolean dropInventoryOnBan,
         String sourceCommand
     ) {
+        if (refuseProtectedTarget(sender, target)) return true;
         String lockKey = parsed.type.name() + ":" + target.lockKey();
         if (!activeLocks.add(lockKey)) {
             return true;
@@ -1135,6 +1139,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
     }
 
     private void submitKickCommand(CommandSender sender, KickSubmission submission) {
+        if (refuseProtectedName(sender, submission.targetName)) return;
         if (!scheduleGlobalTask(() -> beginKickCommand(submission))) {
             sender.sendMessage(ChatColor.RED + "Failed to apply Kick to " + submission.targetName + ".");
         }
@@ -3991,6 +3996,24 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    /** Owners (protected groups) cannot be punished by non-members, from a command or a menu. */
+    private boolean refuseProtectedTarget(CommandSender sender, ResolvedTarget target) {
+        if (protectedTargets == null || protectedTargets.actorExempt(sender)) return false;
+        boolean blocked = target.targetUuid != null ? protectedTargets.isProtected(target.targetUuid)
+            : protectedTargets.isProtectedName(target.targetName);
+        if (!blocked && target.targetKind == TargetKind.ADDRESS) {
+            blocked = protectedTargets.isProtectedAddress(target.targetAddress, this::findKnownAddress);
+        }
+        if (blocked) sender.sendMessage(ChatColor.GRAY + "You can't use that on an owner.");
+        return blocked;
+    }
+
+    private boolean refuseProtectedName(CommandSender sender, String name) {
+        if (protectedTargets == null || protectedTargets.actorExempt(sender) || !protectedTargets.isProtectedName(name)) return false;
+        sender.sendMessage(ChatColor.GRAY + "You can't use that on an owner.");
+        return true;
+    }
+
     private boolean handleOffendCommand(CommandSender sender, String[] args) {
         if (sender instanceof Player p && !p.hasPermission("pizzasmp.admin.offend")) {
             p.sendMessage(ChatColor.RED + "You do not have permission to issue offenses.");
@@ -4005,6 +4028,7 @@ public final class PunishDropPlugin extends JavaPlugin implements Listener {
             sender.sendMessage(ChatColor.RED + "Player not found: " + args[0]);
             return true;
         }
+        if (refuseProtectedTarget(sender, target)) return true;
         String reason = args.length > 1 ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)).trim() : "Cheating";
         if (reason.isBlank()) reason = "Cheating";
         String key = offenseKey(target);

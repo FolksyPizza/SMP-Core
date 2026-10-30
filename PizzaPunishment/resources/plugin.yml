@@ -5,7 +5,7 @@ api-version: '1.21.7'
 author: FolksyPizza
 description: Punishment stack with presets, Ban IDs, history, and admin GUIs.
 # Loads after Simple Voice Chat when it is installed, so mutes also silence voice chat.
-softdepend: [voicechat]
+softdepend: [voicechat, LuckPerms]
 # SuiteStorage needs a JDBC driver and a pool to put shared state in the database.
 # Paper's runtime library loader fetches these; without the block the plugin loads and
 # then silently falls back to per-server YAML files.

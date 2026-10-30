@@ -19,7 +19,7 @@ val apis = mapOf(
         "me.clip:placeholderapi:2.12.3",
         "com.github.MilkBowl:VaultAPI:1.7.1",
     ),
-    "PizzaPunishment" to listOf("de.maxhenkel.voicechat:voicechat-api:2.5.27"),
+    "PizzaPunishment" to listOf("de.maxhenkel.voicechat:voicechat-api:2.5.27", "net.luckperms:api:5.4"),
 )
 
 // PizzaProxyGuard runs on Velocity, which has no library loader, so it compiles against the Velocity API and
