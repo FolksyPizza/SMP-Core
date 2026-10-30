@@ -3,3 +3,7 @@ homes:
   # When enabled, show locked home slots and the "Show More" control in supported dialog UIs.
   # Defaults to hidden so players only see slots they can use.
   show-locked-slots: false
+
+# Java display cameras interpolate motion between server ticks.
+atrack:
+  java-display-camera: true

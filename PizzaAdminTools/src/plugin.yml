@@ -30,7 +30,7 @@ commands:
     usage: /delhome <name|number>
     permission: pizzasmp.home.use
   admindelhome:
-    description: Delete another player's home (a backup is kept).
+    description: "Console or home admin: delete another player's home (a backup is kept)."
     usage: /admindelhome <player> <home>
     permission: pizzasmp.home.admin
   menu:
@@ -99,8 +99,8 @@ commands:
     usage: /perks
     permission: pizzasmp.perks
   atrack:
-    description: Spectator-track a player in 3rd person.
-    usage: /atrack [player]
+    description: Follow a player with a smooth chase, orbit or first-person camera.
+    usage: /atrack [player] [chase|first|orbit]
     permission: pizzasmp.admin.track
   nv:
     description: Toggle night vision (kept through respawns and rejoins).

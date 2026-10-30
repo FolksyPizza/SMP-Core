@@ -87,6 +87,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandMap;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.ConsoleCommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -174,7 +175,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private static String SUS_MENU_TITLE = "&8Sus";
     private static final String SUS_DETAIL_TITLE = "&8Sus Flags";
 
-    private static final long COMBAT_TAG_MILLIS = 15_000L;
+    private static final long COMBAT_TAG_MILLIS = CombatCountdown.DURATION_MILLIS;
     private static final Pattern PLAYER_NAME_PATTERN = Pattern.compile("^[A-Za-z0-9_]{3,16}$");
     private static final int SUS_PAGE_SIZE = 45;
 
@@ -535,6 +536,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private final Map<UUID, Long> combatTaggedUntil = new ConcurrentHashMap<>();
+    private final Map<Player, PlatformScheduler.TaskHandle> combatCountdownTasks = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> adminTargetIndex = new ConcurrentHashMap<>();
     // Homes dialog expansion is opt-in through homes.show-locked-slots.
     private final Map<UUID, Integer> homesDialogExpanded = new ConcurrentHashMap<>();
@@ -569,6 +571,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     private final Map<UUID, SusDetailState> susDetailStates = new ConcurrentHashMap<>();
     private volatile boolean susHistoryUnavailable;
     private final Set<UUID> nvEnabled = ConcurrentHashMap.newKeySet();
+    private static final String ATRACK_CAMERA_CHANNEL = "pizzasmp:camera";
     private final Map<UUID, AtrackSession> atrackSessions = new ConcurrentHashMap<>();
     private final Map<UUID, GameMode> atrackPriorMode = new ConcurrentHashMap<>();
     private final Map<UUID, Player> atrackTrackers = new ConcurrentHashMap<>();
@@ -666,6 +669,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         loadMaintenanceMode();
         this.atrackRestoreModeKey = new org.bukkit.NamespacedKey(this, "atrack_restore_mode");
         this.atrackRestoreLocationKey = new org.bukkit.NamespacedKey(this, "atrack_restore_location");
+        // Bedrock /atrack cameras are applied by the proxy's PizzaBedrockCamera through Geyser.
+        getServer().getMessenger().registerOutgoingPluginChannel(this, ATRACK_CAMERA_CHANNEL);
         this.maintenanceRestoreInvulnerabilityKey = new org.bukkit.NamespacedKey(this, "maintenance_restore_invulnerable");
         // Keep the green maintenance hotbar persistent (action bars fade after ~3s): refresh every 2s.
         PlatformScheduler.globalRepeating(this, () -> {
@@ -679,6 +684,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             }
         }, 40L, 40L);
         initPizzaPlusSubscriptions();
+        // Night vision is kept across restarts: without this the set started empty and the next toggle overwrote it.
+        loadNvState();
         getServer().getPluginManager().registerEvents(this, this);
         // Restore any /atrack or maintenance-freeze state left behind by a reload or crash.
         scheduleAtrackRecoveryForOnlinePlayers();
@@ -695,6 +702,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     public void onDisable() {
         this.advanceMaintenanceTransferGeneration();
         this.stopAllAtrackSessions();
+        for (Player player : List.copyOf(combatCountdownTasks.keySet())) stopCombatCountdown(player);
         this.combatTaggedUntil.clear();
         this.adminTargetIndex.clear();
         this.pendingDeleteSlot.clear();
@@ -834,8 +842,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             case "homes":
             case "home":
             case "sethome":
-            case "delhome":
-            case "admindelhome": {
+            case "delhome": {
                 if (!(var1 instanceof Player player)) {
                     var1.sendMessage(color("&cOnly players can use /" + var5 + "."));
                     return true;
@@ -844,6 +851,20 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 parts[0] = var5;
                 System.arraycopy(var4, 0, parts, 1, var4.length);
                 this.routeHomeCommand(player, parts);
+                return true;
+            }
+            case "admindelhome": {
+                if (var1 instanceof Player player) {
+                    String[] parts = new String[var4.length + 1];
+                    parts[0] = var5;
+                    System.arraycopy(var4, 0, parts, 1, var4.length);
+                    this.routeHomeCommand(player, parts);
+                    return true;
+                }
+                if (var1 instanceof ConsoleCommandSender) {
+                    return this.handleAdminDeleteHomeConsole(var1, var4);
+                }
+                var1.sendMessage(color("&cUse /admindelhome from the console or as an authorized home admin."));
                 return true;
             }
             case "menu":
@@ -941,7 +962,13 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         if (command.getName().equalsIgnoreCase("atrack")) {
             if (args.length == 1) {
-                return completePlayerNames(args[0], false);
+                List<String> names = new ArrayList<>(completePlayerNames(args[0], false));
+                if ("settings".startsWith(args[0].toLowerCase(Locale.ROOT))) names.add("settings");
+                return names;
+            }
+            if (args.length == 2 && args[0].equalsIgnoreCase("settings")) return filterByPrefix(List.of("reset"), args[1]);
+            if (args.length == 2) {
+                return filterByPrefix(List.of("chase", "first", "orbit"), args[1]);
             }
             return Collections.emptyList();
         }
@@ -981,28 +1008,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return out;
         }
 
-        if (args.length == 2) {
-            OfflinePlayer target = Bukkit.getOfflinePlayer(args[0]);
-            HomeFile targetFile = homeFile(target);
-            if (targetFile == null || !targetFile.exists()) {
-                return Collections.emptyList();
-            }
-            FileConfiguration cfg = targetFile.load();
-            List<String> homes = cfg.getStringList("homes");
-            List<String> out = new ArrayList<>();
-            String prefix = args[1].toLowerCase(Locale.ROOT);
-            for (int i = 0; i < homes.size(); i++) {
-                String idx = String.valueOf(i + 1);
-                if (idx.startsWith(prefix)) {
-                    out.add(idx);
-                }
-            }
-            for (String home : homes) {
-                if (home.toLowerCase(Locale.ROOT).startsWith(prefix)) {
-                    out.add(home);
-                }
-            }
-            return out;
+        if (args.length >= 2) {
+            return completeTargetHomeSlots(args[0], String.join(" ", Arrays.copyOfRange(args, 1, args.length)));
         }
 
         return Collections.emptyList();
@@ -1024,10 +1031,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return true;
         }
 
-        if (args.length < 1 || args.length > 2) {
+        if (args.length < 1) {
             player.sendMessage(color("&cUsage: &e/gtp <player> [home-name|home-index]"));
             return true;
         }
+        // Home names may contain spaces: everything after the player is one name.
+        String homeArg = args.length >= 2 ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)) : null;
 
         OfflinePlayer target = Bukkit.getOfflinePlayer(args[0]);
         if (target == null || (!target.hasPlayedBefore() && !target.isOnline())) {
@@ -1049,10 +1058,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
 
         String selectedHome;
-        if (args.length == 1) {
+        if (homeArg == null) {
             selectedHome = homes.get(0);
         } else {
-            selectedHome = resolveHomeArg(args[1], homes, cfg);
+            selectedHome = resolveHomeArg(homeArg, homes, cfg);
             if (selectedHome == null) {
                 player.sendMessage(color("&cHome not found for &e" + safeName(target) + "&c. Use a valid home name or 1-" + homes.size() + "."));
                 return true;
@@ -1775,7 +1784,25 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return true;
         }
 
+        if (args[0].equalsIgnoreCase("settings") || args[0].equalsIgnoreCase("camera")) {
+            PlatformScheduler.entityNow(this, tracker, () -> {
+                if (!tracker.isOnline()) return;
+                if (!tracker.hasPermission("pizzasmp.admin.track")) { tracker.sendMessage(color("&cNo permission.")); return; }
+                if (args.length >= 2 && args[1].equalsIgnoreCase("reset")) {
+                    this.saveAtrackCamera(tracker, AtrackCamera.DEFAULT);
+                    tracker.sendMessage(color("&7Tracking camera reset to the default."));
+                    return;
+                }
+                this.openAtrackCameraDialog(tracker);
+            }, () -> { });
+            return true;
+        }
         String targetName = args[0];
+        AtrackMode mode = args.length >= 2 ? AtrackMode.parse(args[1]) : AtrackMode.CHASE;
+        if (mode == null) {
+            tracker.sendMessage(color("&7/atrack <player> [chase|first|orbit], /atrack settings, or /atrack to stop."));
+            return true;
+        }
         try {
             PlatformScheduler.globalNow(this, () -> {
                 if (this.atrackStopping) return;
@@ -1787,7 +1814,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
                 UUID targetId = target.getUniqueId();
                 PlatformScheduler.entityNow(this, tracker,
-                    () -> this.startTracking(tracker, target, targetId, targetName), () -> { });
+                    () -> this.startTracking(tracker, target, targetId, targetName, mode), () -> { });
             });
         } catch (RuntimeException exception) {
             this.scheduleAtrackMessage(tracker, color("&cCould not start tracking."));
@@ -1804,7 +1831,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
-    private void startTracking(Player tracker, Player target, UUID targetId, String targetName) {
+    private void startTracking(Player tracker, Player target, UUID targetId, String targetName, AtrackMode mode) {
         if (this.atrackStopping || !tracker.isOnline()) return;
         if (!tracker.hasPermission("pizzasmp.admin.track")) {
             tracker.sendMessage(color("&cNo permission."));
@@ -1837,6 +1864,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 return;
             }
         }
+        Location glideFrom = previous != null && previous.cameraLocation != null
+            ? previous.cameraLocation.clone() : tracker.getEyeLocation().clone();
         if (previous != null) this.deactivateAtrack(previous);
 
         tracker.setGameMode(GameMode.SPECTATOR);
@@ -1846,7 +1875,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             return;
         }
 
-        AtrackSession session = new AtrackSession(tracker, trackerId, targetId);
+        // Bedrock clients cannot spectate a camera entity smoothly; they keep the teleport camera.
+        AtrackSession session = new AtrackSession(tracker, trackerId, targetId, mode, !this.isBedrockPlayer(tracker));
+        session.directJavaCamera = session.entityCamera && !getConfig().getBoolean("atrack.java-display-camera", true);
+        session.glideFrom = glideFrom;
+        this.getLogger().info(tracker.getName() + " started /atrack " + mode.name().toLowerCase(Locale.ROOT) + " on "
+            + targetName + " (" + (session.entityCamera ? (session.directJavaCamera ? "Java direct camera" : "Java display camera") : "Bedrock eased camera") + ")");
         this.atrackTrackers.put(trackerId, tracker);
         this.atrackSessions.put(trackerId, session);
         try {
@@ -1860,12 +1894,19 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 }
 
                 Location location = target.getLocation();
-                Vector velocity = target.getVelocity();
                 Location eye = target.getEyeLocation();
                 Location focus = this.findAtrackFocus(target, eye);
+                Vector camera = session.mode == AtrackMode.ORBIT
+                    ? this.atrackOrbitPosition(target, location, session.orbitStep++ * (Math.PI * 2.0 / 600.0))
+                    : this.atrackChasePosition(session, target, location, target.getVelocity(), focus);
+                org.bukkit.inventory.ItemStack held = target.getInventory().getItemInMainHand();
                 AtrackPose pose = new AtrackPose(location.getWorld(), location.getX(), location.getY(), location.getZ(),
-                    location.getYaw(), location.getPitch(), velocity.getX(), velocity.getY(), velocity.getZ(),
-                    focus.getX(), focus.getY(), focus.getZ());
+                    location.getYaw(), location.getPitch(), camera.getX(), camera.getY(), camera.getZ(),
+                    focus.getX(), focus.getY(), focus.getZ(), target.getHealth(),
+                    target.getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH) == null ? 20.0
+                        : target.getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getValue(),
+                    held.getType().isAir() ? "" : held.getType().getKey().getKey().replace('_', ' '),
+                    this.atrackSafeDistance(session, target, location, camera));
                 try {
                     PlatformScheduler.entityNow(this, tracker, () -> {
                         try {
@@ -1891,7 +1932,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
 
         if (this.isCurrentAtrack(session)) {
-            tracker.sendActionBar(Component.text("§dNow tracking §f" + targetName + " §d(/atrack to stop)"));
+            tracker.sendActionBar(Component.text("Tracking " + targetName + ". Sneak or /atrack to stop.",
+                net.kyori.adventure.text.format.NamedTextColor.GRAY));
         }
     }
 
@@ -1902,52 +1944,468 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             this.retireAtrackTracker(session);
             return;
         }
-
+        session.ticks++;
+        if (session.ticks >= 40 && session.ticks % 10 == 0) tracker.sendActionBar(atrackHud(pose));
         Location targetLocation = pose.toLocation();
-        Vector flatVelocity = new Vector(pose.velocityX, 0.0, pose.velocityZ);
-        Vector behind;
-        if (flatVelocity.lengthSquared() > 0.0025) {
-            behind = flatVelocity.normalize().multiply(-1.0);
-        } else {
-            Vector look = targetLocation.getDirection();
-            behind = new Vector(look.getX(), 0.0, look.getZ());
-            if (behind.lengthSquared() < 1.0E-6) behind = new Vector(0.0, 0.0, 1.0);
-            behind.normalize().multiply(-1.0);
+        Location lastTarget = session.targetLocation;
+        boolean targetJump = lastTarget != null && (lastTarget.getWorld() != pose.world
+            || lastTarget.distanceSquared(targetLocation) > 900.0);
+        session.targetLocation = targetLocation.clone();
+        if (targetJump) {
+            session.glideFrom = null;
+            session.glideTick = session.glideDuration;
+            session.aimPoint = null;
         }
 
-        Location desired = targetLocation.clone().add(behind.clone().multiply(4.5)).add(0.0, 2.2, 0.0);
-        Location targetFocus = targetLocation.clone().add(0.0, 1.25, 0.0);
-        Vector focus = atrackFramingPoint(targetFocus.toVector(), new Vector(pose.focusX, pose.focusY, pose.focusZ));
+        if (session.mode == AtrackMode.FIRST && !session.entityCamera) {
+            // Geyser cannot spectate an entity; follow the target's eyes with the eased Bedrock camera instead.
+            Location eye = targetLocation.clone().add(0.0, 1.62, 0.0);
+            Vector look = eye.getDirection().multiply(8.0);
+            boolean far = tracker.getWorld() != pose.world || tracker.getLocation().distanceSquared(targetLocation) > 144.0;
+            if (far && !tracker.teleport(targetLocation)) {
+                this.stopAtrackSession(session, null);
+                return;
+            }
+            this.sendBedrockCamera(tracker, eye.toVector(), eye.toVector().add(look));
+            return;
+        }
+        if (session.mode == AtrackMode.FIRST) {
+            Entity target = Bukkit.getEntity(session.targetId);
+            if (target == null) return;
+            boolean outsideTargetRange = tracker.getWorld() != target.getWorld()
+                || tracker.getLocation().distanceSquared(targetLocation) > 32.0 * 32.0;
+            if (outsideTargetRange) {
+                session.detaching = true;
+                try { tracker.setSpectatorTarget(null); } finally { session.detaching = false; }
+                if (!tracker.teleport(targetLocation)) this.stopAtrackSession(session, null);
+                session.attachAt = session.ticks + 2;
+                return;
+            }
+            if (session.ticks >= session.attachAt && tracker.getSpectatorTarget() != target) tracker.setSpectatorTarget(target);
+            return;
+        }
+
+        Location desired = new Location(pose.world, pose.cameraX, pose.cameraY, pose.cameraZ);
+        if (session.glideDuration == 0) {
+            // Glide only when the target is close enough to have been in view; farther away the camera cuts there.
+            double distance = session.glideFrom != null && session.glideFrom.getWorld() == desired.getWorld()
+                ? session.glideFrom.distance(desired) : Double.POSITIVE_INFINITY;
+            if (distance > this.atrackGlideRange(tracker)) session.glideFrom = null;
+            session.glideDuration = Double.isFinite(distance) ? atrackGlideDuration(distance) : 1;
+        }
+        Vector focus = atrackFramingPoint(targetLocation.clone().add(0.0, 1.1, 0.0).toVector(),
+            new Vector(pose.focusX, pose.focusY, pose.focusZ));
+        if (session.aimPoint == null || session.cameraLocation == null
+                || session.cameraLocation.getWorld() != pose.world) session.aimPoint = focus.clone();
+        else session.aimPoint.add(focus.clone().subtract(session.aimPoint).multiply(0.2));
+        focus = session.aimPoint.clone();
         Location previous = session.cameraLocation;
         Location camera;
         boolean snap = previous == null || previous.getWorld() != desired.getWorld() || previous.distanceSquared(desired) > 900.0;
-        if (snap) {
+        Location from = session.glideFrom;
+        boolean displayCamera = session.entityCamera && !session.directJavaCamera;
+        boolean attached = !displayCamera || session.camera != null && session.ticks >= session.attachAt
+            && tracker.getSpectatorTarget() == session.camera;
+        if (from != null && from.getWorld() == desired.getWorld() && session.glideTick < session.glideDuration) {
+            // Keep the opening entity in range until the client has received and attached to it.
+            double progress = attached ? ++session.glideTick / (double) session.glideDuration : 0.0;
+            double eased = progress * progress * (3.0 - 2.0 * progress);
+            camera = from.clone().add(desired.toVector().subtract(from.toVector()).multiply(eased));
+            snap = false;
+            previous = previous == null ? from : previous;
+        } else if (snap) {
             camera = desired.clone();
         } else {
-            double easing = 0.24;
-            camera = previous.clone();
-            camera.add((desired.getX() - previous.getX()) * easing,
-                (desired.getY() - previous.getY()) * easing,
-                (desired.getZ() - previous.getZ()) * easing);
+            camera = previous.clone().add(desired.toVector().subtract(previous.toVector()).multiply(this.atrackCamera(session.trackerId).follow()));
+            Vector head = targetLocation.toVector().add(new Vector(0.0, 1.6, 0.0));
+            Vector offset = camera.toVector().subtract(head);
+            if (offset.length() > pose.safeCameraDistance) {
+                camera = head.add(offset.normalize().multiply(pose.safeCameraDistance)).toLocation(pose.world);
+            }
         }
-        Vector direction = focus.subtract(camera.toVector());
+        Vector direction = focus.clone().subtract(camera.toVector());
         if (direction.lengthSquared() > 1.0E-6) {
-            Location desiredView = desired.clone();
-            desiredView.setDirection(direction);
+            Location view = camera.clone();
+            view.setDirection(direction);
             if (snap) {
-                camera.setYaw(desiredView.getYaw());
-                camera.setPitch(desiredView.getPitch());
+                camera.setYaw(view.getYaw());
+                camera.setPitch(view.getPitch());
             } else {
-                camera.setYaw(smoothAtrackYaw(previous.getYaw(), desiredView.getYaw(), 0.28f));
-                camera.setPitch(previous.getPitch() + (desiredView.getPitch() - previous.getPitch()) * 0.28f);
+                float turn = this.atrackCamera(session.trackerId).turn();
+                camera.setYaw(smoothAtrackYaw(previous.getYaw(), view.getYaw(), turn));
+                camera.setPitch(previous.getPitch() + (view.getPitch() - previous.getPitch()) * turn);
             }
         }
 
-        if (!tracker.teleport(camera)) {
+        boolean moved;
+        if (session.entityCamera && session.directJavaCamera) {
+            // Keep the player's camera authoritative when an invisible display is not followed by their client.
+            session.detaching = true;
+            try {
+                tracker.setSpectatorTarget(null);
+                moved = tracker.teleport(camera.clone().subtract(0.0, tracker.getEyeHeight(), 0.0));
+            } finally {
+                session.detaching = false;
+            }
+        } else if (session.entityCamera) {
+            moved = this.moveAtrackCamera(session, camera);
+        } else {
+            // The Bedrock client eases its own camera between updates; the player only needs to stay close enough
+            // for chunks and entities to load around the shot.
+            boolean far = tracker.getWorld() != camera.getWorld() || tracker.getLocation().distanceSquared(camera) > 144.0;
+            moved = (!far && !snap) || tracker.teleport(camera);
+            if (moved) this.sendBedrockCamera(tracker, camera.toVector(), focus);
+        }
+        if (!moved) {
             this.stopAtrackSession(session, null);
             return;
         }
         session.cameraLocation = camera;
+    }
+
+    /**
+     * Moves the chase camera. The tracker spectates an invisible display entity that only they can see; the client
+     * interpolates its teleports, so the shot is smooth at any frame rate instead of stepping 20 times a second.
+     */
+    private boolean moveAtrackCamera(AtrackSession session, Location camera) {
+        Player tracker = session.tracker;
+        org.bukkit.entity.ItemDisplay entity = session.camera;
+        boolean outsideRange = tracker.getWorld() != camera.getWorld()
+            || tracker.getLocation().distanceSquared(camera) > 32.0 * 32.0;
+        if (entity == null || !entity.isValid() || entity.getWorld() != camera.getWorld() || outsideRange) {
+            session.detaching = true;
+            try {
+                tracker.setSpectatorTarget(null);
+                this.removeAtrackCamera(session);
+                if (outsideRange && !tracker.teleport(camera)) return false;
+            } finally {
+                session.detaching = false;
+            }
+            // Re-spawn beside the tracker after RTP; an existing camera can also leave the client tracking range.
+            entity = camera.getWorld().spawn(camera, org.bukkit.entity.ItemDisplay.class, display -> {
+                display.setPersistent(false);
+                display.setVisibleByDefault(false);
+                display.setTeleportDuration(3);
+            });
+            tracker.showEntity(this, entity);
+            session.camera = entity;
+            // The client must have spawned the entity before it accepts it as a camera.
+            session.attachAt = session.ticks + 2;
+            return true;
+        }
+        if (session.ticks < session.attachAt) return true;
+        if (!entity.teleport(camera)) return false;
+        if (session.ticks >= session.attachAt && tracker.getSpectatorTarget() != entity) tracker.setSpectatorTarget(entity);
+        return true;
+    }
+
+    private void removeAtrackCamera(AtrackSession session) {
+        org.bukkit.entity.ItemDisplay entity = session.camera;
+        session.camera = null;
+        if (entity == null) return;
+        try {
+            PlatformScheduler.entityNow(this, entity, entity::remove, () -> { });
+        } catch (RuntimeException exception) {
+            this.getLogger().warning("Could not remove an /atrack camera entity.");
+        }
+    }
+
+    /** Sends one eased camera pose to the proxy for a Bedrock tracker (PizzaBedrockCamera applies it via Geyser). */
+    private void sendBedrockCamera(Player tracker, Vector position, Vector focus) {
+        this.sendBedrockCameraMessage(tracker, true, position, focus);
+    }
+
+    private void clearBedrockCamera(Player tracker) {
+        if (this.isBedrockPlayer(tracker)) this.sendBedrockCameraMessage(tracker, false, null, null);
+    }
+
+    private void sendBedrockCameraMessage(Player tracker, boolean pose, Vector position, Vector focus) {
+        try {
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream(32);
+            java.io.DataOutputStream out = new java.io.DataOutputStream(bytes);
+            out.writeByte(1);
+            out.writeByte(pose ? 1 : 0);
+            if (pose) {
+                out.writeFloat((float) position.getX()); out.writeFloat((float) position.getY()); out.writeFloat((float) position.getZ());
+                out.writeFloat((float) focus.getX()); out.writeFloat((float) focus.getY()); out.writeFloat((float) focus.getZ());
+                out.writeFloat(0.1f);
+            }
+            tracker.sendPluginMessage(this, ATRACK_CAMERA_CHANNEL, bytes.toByteArray());
+        } catch (java.io.IOException | RuntimeException exception) {
+            this.getLogger().warning("Could not send an /atrack Bedrock camera update.");
+        }
+    }
+
+    /** A slow cinematic circle around the target, one turn every 30 seconds, pulled in by walls. */
+    private Vector atrackOrbitPosition(Player target, Location location, double angle) {
+        Vector head = location.toVector().add(new Vector(0.0, 1.6, 0.0));
+        Vector offset = new Vector(Math.cos(angle) * 6.0, 1.2, Math.sin(angle) * 6.0);
+        return this.atrackPullIn(target, head, offset);
+    }
+
+    private Vector atrackPullIn(Player target, Vector head, Vector offset) {
+        double length = offset.length();
+        Vector direction = offset.clone().normalize();
+        org.bukkit.util.RayTraceResult hit = target.getWorld().rayTraceBlocks(head.toLocation(target.getWorld()),
+            direction, length + 0.4, FluidCollisionMode.NEVER, true);
+        if (hit != null && hit.getHitPosition() != null) {
+            length = Math.max(0.6, hit.getHitPosition().distance(head) - 0.4);
+        }
+        return head.clone().add(direction.multiply(length));
+    }
+
+    /** Angles the chase camera considers, in degrees from directly behind the target's heading. */
+    private static final double[] ATRACK_ANGLES = {
+        0, 22.5, 45, 67.5, 90, 112.5, 135, 157.5, 180, -157.5, -135, -112.5, -90, -67.5, -45, -22.5
+    };
+    private static final double[] ATRACK_STILL_ANGLES = {75, -75, 150, -150, 35, -35, 180};
+    private static final double ATRACK_DISTANCE = 4.5;
+
+    /** A tracker's camera tuning: distance and height from the target, and how quickly position and view follow. */
+    record AtrackCamera(float distance, float height, float follow, float turn) {
+        /** The camera as it was before tuning existed. */
+        static final AtrackCamera DEFAULT = new AtrackCamera((float) ATRACK_DISTANCE, 0.7f, 0.18f, 0.28f);
+        static final AtrackCamera CLOSE = new AtrackCamera(3.0f, 0.5f, 0.25f, 0.35f);
+        static final AtrackCamera WIDE = new AtrackCamera(8.0f, 1.5f, 0.15f, 0.22f);
+        static final AtrackCamera CINEMATIC = new AtrackCamera(6.0f, 1.2f, 0.08f, 0.12f);
+
+        AtrackCamera {
+            distance = clamp(distance, 2.0f, 12.0f);
+            height = clamp(height, -1.0f, 4.0f);
+            follow = clamp(follow, 0.05f, 1.0f);
+            turn = clamp(turn, 0.05f, 1.0f);
+        }
+
+        private static float clamp(float value, float min, float max) {
+            return Float.isFinite(value) ? Math.max(min, Math.min(max, value)) : min;
+        }
+
+        String encode() { return distance + "," + height + "," + follow + "," + turn; }
+
+        static AtrackCamera decode(String raw) {
+            if (raw == null) return DEFAULT;
+            String[] parts = raw.split(",");
+            if (parts.length != 4) return DEFAULT;
+            try {
+                return new AtrackCamera(Float.parseFloat(parts[0]), Float.parseFloat(parts[1]), Float.parseFloat(parts[2]), Float.parseFloat(parts[3]));
+            } catch (NumberFormatException invalid) {
+                return DEFAULT;
+            }
+        }
+    }
+
+    private final Map<UUID, AtrackCamera> atrackCameras = new ConcurrentHashMap<>();
+
+    /** The tracker's saved camera tuning (kept on the player, so it follows them across restarts). */
+    private AtrackCamera atrackCamera(UUID trackerId) {
+        return this.atrackCameras.computeIfAbsent(trackerId, id -> {
+            Player player = getServer().getPlayer(id);
+            if (player == null) return AtrackCamera.DEFAULT;
+            return AtrackCamera.decode(player.getPersistentDataContainer().get(
+                new org.bukkit.NamespacedKey(this, "atrack_camera_v2"), org.bukkit.persistence.PersistentDataType.STRING));
+        });
+    }
+
+    private void saveAtrackCamera(Player tracker, AtrackCamera camera) {
+        this.atrackCameras.put(tracker.getUniqueId(), camera);
+        tracker.getPersistentDataContainer().set(new org.bukkit.NamespacedKey(this, "atrack_camera_v2"),
+            org.bukkit.persistence.PersistentDataType.STRING, camera.encode());
+    }
+
+    private ActionButton atrackPresetButton(String label, NamedTextColor color, AtrackCamera preset) {
+        return dialogButton(Component.text(label, color), null, 120, p -> {
+            this.saveAtrackCamera(p, preset);
+            p.sendActionBar(Component.text("Camera set to " + label.replace("Reset to ", "") + ".", NamedTextColor.GRAY));
+            this.openAtrackCameraDialog(p);
+        });
+    }
+
+    /** /atrack settings: sliders for the chase camera; changes apply to a running track at once. */
+    private void openAtrackCameraDialog(Player tracker) {
+        AtrackCamera cam = this.atrackCamera(tracker.getUniqueId());
+        List<DialogInput> inputs = List.of(
+            DialogInput.numberRange("distance", Component.text("Distance", NamedTextColor.GRAY), 2.0f, 12.0f)
+                .step(0.5f).initial(cam.distance()).width(260).build(),
+            DialogInput.numberRange("height", Component.text("Height", NamedTextColor.GRAY), -1.0f, 4.0f)
+                .step(0.1f).initial(cam.height()).width(260).build(),
+            DialogInput.numberRange("follow", Component.text("Position smoothing (low = smoother)", NamedTextColor.GRAY), 0.05f, 1.0f)
+                .step(0.01f).initial(cam.follow()).width(260).build(),
+            DialogInput.numberRange("turn", Component.text("Turn smoothing (low = smoother)", NamedTextColor.GRAY), 0.05f, 1.0f)
+                .step(0.01f).initial(cam.turn()).width(260).build());
+        ActionButton save = ActionButton.builder(Component.text("Save", NamedTextColor.GREEN)).width(120)
+            .action(DialogAction.customClick((view, audience) -> {
+                if (!(audience instanceof Player p)) return;
+                Float distance = view.getFloat("distance"), height = view.getFloat("height");
+                Float follow = view.getFloat("follow"), turn = view.getFloat("turn");
+                PlatformScheduler.entityNow(this, p, () -> {
+                    if (distance == null || height == null || follow == null || turn == null) return;
+                    this.saveAtrackCamera(p, new AtrackCamera(distance, height, follow, turn));
+                    p.sendActionBar(Component.text("Camera saved.", NamedTextColor.GRAY));
+                    p.closeDialog();
+                }, null);
+            }, net.kyori.adventure.text.event.ClickCallback.Options.builder().build()))
+            .build();
+        List<ActionButton> buttons = List.of(save,
+            this.atrackPresetButton("Reset to default", NamedTextColor.YELLOW, AtrackCamera.DEFAULT),
+            this.atrackPresetButton("Close", NamedTextColor.GRAY, AtrackCamera.CLOSE),
+            this.atrackPresetButton("Wide", NamedTextColor.GRAY, AtrackCamera.WIDE),
+            this.atrackPresetButton("Cinematic", NamedTextColor.GRAY, AtrackCamera.CINEMATIC));
+        Dialog dialog = buildDialog(Component.text("Tracking Camera", DIALOG_BRAND),
+            List.of(DialogBody.plainMessage(Component.text("Chase camera tuning. Applies to the current track right away. "
+                + "Presets save at once; Default is the original camera.", NamedTextColor.GRAY))),
+            inputs, DialogType.multiAction(buttons).columns(2)
+                .exitAction(dialogButton(Component.text("Done"), null, 120, null)).build());
+        tracker.showDialog(dialog);
+    }
+
+    /**
+     * Where the chase camera wants to be. It films the target's body from whichever angle shows it best: each angle
+     * around the target's heading is scored for an open view (not pulled in by walls, a clear line to the chest), for
+     * the situation (behind or over a shoulder while moving, the side when standing still, side-on when close to what
+     * they face, so both are in shot), a held shot preference, and continuity. A better angle wins by a margin before the
+     * camera moves there, and it then swings round smoothly instead of cutting.
+     */
+    private Vector atrackChasePosition(AtrackSession session, Player target, Location location, Vector velocity, Location focus) {
+        Vector flat = new Vector(velocity.getX(), 0.0, velocity.getZ());
+        if (session.headingVelocity == null) session.headingVelocity = flat.clone();
+        else session.headingVelocity.add(flat.clone().subtract(session.headingVelocity).multiply(0.12));
+        session.chaseMoving = atrackMoving(session.chaseMoving, flat.length());
+        boolean moving = session.chaseMoving;
+        Vector heading = moving ? session.headingVelocity.clone()
+            : session.headingDirection == null ? new Vector(location.getDirection().getX(), 0.0, location.getDirection().getZ())
+            : session.headingDirection.clone();
+        if (heading.lengthSquared() < 1.0E-6) heading = new Vector(0.0, 0.0, 1.0);
+        heading.normalize();
+        session.headingDirection = heading.clone();
+        double behindYaw = Math.atan2(-heading.getZ(), -heading.getX());
+        Vector head = location.toVector().add(new Vector(0.0, 1.6, 0.0));
+        Vector chest = location.toVector().add(new Vector(0.0, 1.0, 0.0));
+        Vector toFocus = focus.toVector().subtract(head);
+        toFocus.setY(0.0);
+        boolean close = toFocus.lengthSquared() > 1.0E-6 && toFocus.lengthSquared() < 64.0;
+        if (close) toFocus.normalize();
+        if (Double.isNaN(session.chaseYaw)) session.chaseYaw = behindYaw;
+        long sample = session.chaseSamples++;
+        // Reconsider the shot twice per second; motion still advances every tick.
+        if (sample % 10 == 0) {
+            double preferred = moving ? 35.0 : ATRACK_STILL_ANGLES[(int) ((sample / 120) % ATRACK_STILL_ANGLES.length)];
+            double preferredYaw = behindYaw + Math.toRadians(preferred);
+            double bestYaw = session.chaseYaw, bestScore = Double.NEGATIVE_INFINITY;
+            for (double degrees : ATRACK_ANGLES) {
+                double yaw = behindYaw + Math.toRadians(degrees);
+                double score = this.atrackAngleScore(this.atrackCamera(session.trackerId), target, head, chest, yaw, behindYaw, moving, close ? toFocus : null, preferredYaw)
+                    + 0.35 * (1.0 - Math.abs(atrackAngleDelta(yaw, session.chaseYaw)) / Math.PI);
+                if (score > bestScore) { bestScore = score; bestYaw = yaw; }
+            }
+            double currentScore = this.atrackAngleScore(this.atrackCamera(session.trackerId), target, head, chest, session.chaseYaw, behindYaw,
+                moving, close ? toFocus : null, preferredYaw) + 0.35;
+            if (bestScore > currentScore + 0.5 || Double.isNaN(session.chaseGoalYaw)) session.chaseGoalYaw = bestYaw;
+        }
+        // Swing toward the chosen angle a little each tick (about a quarter turn per second at most).
+        double step = atrackAngleDelta(session.chaseGoalYaw, session.chaseYaw);
+        session.chaseYaw += Math.max(-0.05, Math.min(0.05, step * 0.12));
+        AtrackCamera cam = this.atrackCamera(session.trackerId);
+        Vector offset = new Vector(Math.cos(session.chaseYaw), 0.0, Math.sin(session.chaseYaw)).multiply(cam.distance())
+            .add(new Vector(0.0, cam.height(), 0.0));
+        Vector placed = this.atrackPullIn(target, head, offset);
+        double available = placed.distance(head);
+        session.chaseDistance = atrackWallDistance(session.chaseDistance, available);
+        return head.clone().add(offset.normalize().multiply(session.chaseDistance));
+    }
+
+    static boolean atrackMoving(boolean moving, double speed) {
+        return moving ? speed >= 0.03 : speed > 0.08;
+    }
+
+    static double atrackWallDistance(double previous, double available) {
+        return Double.isNaN(previous) || available < previous ? available : previous + (available - previous) * 0.08;
+    }
+
+    /** A quick glide: half a second for a short hop, at most a second and a half. */
+    static int atrackGlideDuration(double distance) {
+        return Math.max(10, Math.min(30, (int) Math.ceil(10 + distance / 6.0)));
+    }
+
+    /** Blocks within which a new track glides there: the tracker's view distance, capped by atrack.glide-range. */
+    private double atrackGlideRange(Player tracker) {
+        int chunks = Math.max(2, Math.min(tracker.getClientViewDistance(), tracker.getWorld().getViewDistance()));
+        return Math.min(chunks * 16.0, getConfig().getDouble("atrack.glide-range", 128.0));
+    }
+
+    private double atrackSafeDistance(AtrackSession session, Player target, Location location, Vector desired) {
+        Location previous = session.cameraLocation;
+        if (previous == null || previous.getWorld() != location.getWorld()) return Double.POSITIVE_INFINITY;
+        Vector candidate = previous.toVector().add(desired.clone().subtract(previous.toVector()).multiply(this.atrackCamera(session.trackerId).follow()));
+        Vector head = location.toVector().add(new Vector(0.0, 1.6, 0.0));
+        Vector offset = candidate.subtract(head);
+        if (offset.lengthSquared() < 1.0E-6) return 0.0;
+        return this.atrackPullIn(target, head, offset).distance(head);
+    }
+
+    /** How well a camera at {@code yaw} (around the target) would show them; higher is better. */
+    private double atrackAngleScore(AtrackCamera cam, Player target, Vector head, Vector chest, double yaw, double behindYaw, boolean moving, Vector toFocus, double preferredYaw) {
+        Vector direction = new Vector(Math.cos(yaw), 0.0, Math.sin(yaw));
+        Vector wanted = head.clone().add(direction.clone().multiply(cam.distance())).add(new Vector(0.0, cam.height(), 0.0));
+        Vector placed = this.atrackPullIn(target, head, wanted.clone().subtract(head));
+        double open = placed.distance(head) / wanted.distance(head);
+        double score = 3.0 * open;
+        Vector toChest = chest.clone().subtract(placed);
+        double length = toChest.length();
+        if (length > 0.3) {
+            org.bukkit.util.RayTraceResult blocked = target.getWorld().rayTraceBlocks(placed.toLocation(target.getWorld()),
+                toChest.normalize(), length - 0.3, FluidCollisionMode.NEVER, true);
+            if (blocked != null) score -= 2.5;
+        }
+        if (open < 0.35) score -= 1.5; // squeezed against a wall: the shot is mostly the back of their head
+        // 1 directly behind the target's heading, -1 in front of it.
+        double behind = Math.cos(atrackAngleDelta(yaw, behindYaw));
+        // Moving: behind or over a shoulder shows where they go. Standing: the side shows the body and the action.
+        score += moving ? 1.5 * behind : 0.2 * (1.0 - Math.abs(behind));
+        // Hold a shot for six seconds, then favour another clear side/front view instead of staying behind forever.
+        score += (moving ? 0.4 : 1.2) * Math.cos(atrackAngleDelta(yaw, preferredYaw));
+        if (toFocus != null) {
+            // Close to what they face (a fight, a build): side-on keeps both in the shot; never between them.
+            score += 1.4 * (1.0 - Math.abs(direction.dot(toFocus)));
+            if (direction.dot(toFocus) > 0.5) score -= 1.5;
+        }
+        return score;
+    }
+
+    /** The signed smallest difference between two angles, in radians. */
+    static double atrackAngleDelta(double to, double from) {
+        double delta = (to - from) % (Math.PI * 2.0);
+        if (delta > Math.PI) delta -= Math.PI * 2.0;
+        if (delta < -Math.PI) delta += Math.PI * 2.0;
+        return delta;
+    }
+
+    private static Component atrackHud(AtrackPose pose) {
+        String item = pose.heldItem.isEmpty() ? "" : "   " + pose.heldItem;
+        return Component.text(String.format(Locale.ROOT, "%.0f/%.0f hp   %d %d %d%s",
+            pose.health, pose.maxHealth, (int) Math.floor(pose.x), (int) Math.floor(pose.y), (int) Math.floor(pose.z), item),
+            net.kyori.adventure.text.format.NamedTextColor.GRAY);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onAtrackDirectCameraSneak(org.bukkit.event.player.PlayerToggleSneakEvent event) {
+        if (!event.isSneaking()) return;
+        AtrackSession session = this.atrackSessions.get(event.getPlayer().getUniqueId());
+        if (session == null || !session.directJavaCamera || session.mode == AtrackMode.FIRST || !this.isCurrentAtrack(session)) return;
+        PlatformScheduler.entityNow(this, event.getPlayer(),
+            () -> this.stopAtrackSession(session, Component.text("Tracking stopped", net.kyori.adventure.text.format.NamedTextColor.GRAY)), () -> { });
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onAtrackStopSpectating(com.destroystokyo.paper.event.player.PlayerStopSpectatingEntityEvent event) {
+        AtrackSession session = this.atrackSessions.get(event.getPlayer().getUniqueId());
+        if (session == null || session.detaching || !this.isCurrentAtrack(session)) return;
+        // Our own camera swaps detach on purpose; a sneak (or the camera going away) ends the session.
+        if (session.mode != AtrackMode.FIRST && event.getSpectatorTarget() != session.camera) return;
+        // In first person the view also drops when the target dies or changes world; it is re-attached next tick.
+        if (session.mode == AtrackMode.FIRST && (!(event.getSpectatorTarget() instanceof Player target)
+                || target.isDead() || !target.isOnline() || target.getWorld() != event.getPlayer().getWorld())) return;
+        PlatformScheduler.entityNow(this, event.getPlayer(),
+            () -> this.stopAtrackSession(session, Component.text("Tracking stopped", net.kyori.adventure.text.format.NamedTextColor.GRAY)), () -> { });
     }
 
     private Location findAtrackFocus(Player target, Location eye) {
@@ -1977,8 +2435,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return eye.clone().add(direction.multiply(12.0));
     }
 
+    /** Mostly the body, with a little lead toward what they look at, so the shot tracks the player, not their aim. */
     static Vector atrackFramingPoint(Vector subject, Vector gazeFocus) {
-        return subject.clone().multiply(0.65).add(gazeFocus.clone().multiply(0.35));
+        Vector lead = gazeFocus.clone().subtract(subject);
+        if (lead.length() > 4.0) lead.normalize().multiply(4.0);
+        return subject.clone().add(lead.multiply(0.08));
     }
 
     static float smoothAtrackYaw(float current, float target, float alpha) {
@@ -1997,6 +2458,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (!session.stopped.compareAndSet(false, true)) return false;
         this.atrackSessions.remove(session.trackerId, session);
         session.cancelTargetTask();
+        this.removeAtrackCamera(session);
         return true;
     }
 
@@ -2020,6 +2482,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                     return;
                 }
 
+                this.clearBedrockCamera(tracker);
                 tracker.setSpectatorTarget(null);
                 GameMode previousMode = this.atrackPriorMode.get(trackerId);
                 if (previousMode == null) previousMode = this.readAtrackPriorMode(tracker);
@@ -2107,7 +2570,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (stored == null) return null;
         AtrackReturnLocation saved = decodeAtrackReturnLocation(stored);
         World world = Bukkit.getWorld(saved.worldId());
-        if (world == null) throw new IllegalStateException("Saved /atrack world is not loaded.");
+        if (world == null) {
+            // Player data travels between Canopy backends; a return point in a dimension another backend hosts cannot
+            // be reached from here, so it is dropped and only the game mode is restored.
+            player.getPersistentDataContainer().remove(this.atrackRestoreLocationKey);
+            return null;
+        }
         return new Location(world, saved.x(), saved.y(), saved.z(), saved.yaw(), saved.pitch());
     }
 
@@ -2263,14 +2731,28 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private record AtrackPose(World world, double x, double y, double z, float yaw, float pitch,
-                                      double velocityX, double velocityY, double velocityZ,
-                                      double focusX, double focusY, double focusZ) {
+                                      double cameraX, double cameraY, double cameraZ,
+                                      double focusX, double focusY, double focusZ,
+                                      double health, double maxHealth, String heldItem, double safeCameraDistance) {
         private Location toLocation() {
             return new Location(this.world, this.x, this.y, this.z, this.yaw, this.pitch);
         }
     }
 
     record AtrackReturnLocation(UUID worldId, double x, double y, double z, float yaw, float pitch) { }
+
+    enum AtrackMode {
+        CHASE, FIRST, ORBIT;
+
+        static AtrackMode parse(String value) {
+            return switch (value.toLowerCase(Locale.ROOT)) {
+                case "chase", "third", "3rd" -> CHASE;
+                case "first", "1st", "pov" -> FIRST;
+                case "orbit", "circle", "cinematic" -> ORBIT;
+                default -> null;
+            };
+        }
+    }
 
     private static final class AtrackSession {
         private final Player tracker;
@@ -2279,12 +2761,32 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         private final AtomicBoolean stopped = new AtomicBoolean();
         private final AtomicBoolean updatePending = new AtomicBoolean();
         private final AtomicReference<PlatformScheduler.TaskHandle> targetTask = new AtomicReference<>();
+        private final AtrackMode mode;
+        private final boolean entityCamera;
+        private boolean directJavaCamera;
         private Location cameraLocation;
+        private Location targetLocation;
+        private org.bukkit.entity.ItemDisplay camera;
+        private long ticks;
+        private long attachAt;
+        private long orbitStep;
+        private Location glideFrom;
+        private int glideTick;
+        private int glideDuration;
+        private Vector aimPoint, headingVelocity, headingDirection;
+        private boolean chaseMoving;
+        private double chaseDistance = Double.NaN;
+        private boolean detaching;
+        /** Chase camera: the angle around the target it films from now, and the one it is swinging to (radians). */
+        private double chaseYaw = Double.NaN, chaseGoalYaw = Double.NaN;
+        private long chaseSamples;
 
-        private AtrackSession(Player tracker, UUID trackerId, UUID targetId) {
+        private AtrackSession(Player tracker, UUID trackerId, UUID targetId, AtrackMode mode, boolean entityCamera) {
             this.tracker = tracker;
             this.trackerId = trackerId;
             this.targetId = targetId;
+            this.mode = mode;
+            this.entityCamera = entityCamera;
         }
 
         private void setTargetTask(PlatformScheduler.TaskHandle task) {
@@ -3831,6 +4333,20 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return player.hasPermission(PERM_HOME_ADMIN) || player.hasPermission(PERM_ADMIN_HOMES);
     }
 
+    private boolean handleAdminDeleteHomeConsole(CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage(color("&cUsage: /admindelhome <player> <home>"));
+            return true;
+        }
+        OfflinePlayer target = resolveKnownPlayer(args[0]);
+        if (target == null) {
+            sender.sendMessage(color("&cPlayer not found: &e" + args[0]));
+            return true;
+        }
+        adminDeleteHome(sender, target, String.join(" ", Arrays.copyOfRange(args, 1, args.length)));
+        return true;
+    }
+
     /** A player this server knows by name, online or offline; null when unknown. */
     private OfflinePlayer resolveKnownPlayer(String name) {
         Player online = Bukkit.getPlayerExact(name);
@@ -3839,14 +4355,23 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return cached != null && (cached.hasPlayedBefore() || homeFile(cached).exists()) ? cached : null;
     }
 
-    /** Staff: open another player's homes, online or offline. Left-click teleports, right-click deletes. */
+    /** Staff: Bedrock uses dialogs; Java keeps the existing inventory view for another player's homes. */
     private void openHomesOf(Player viewer, String name) {
+        if (!viewer.isOnline() || !isHomeAdmin(viewer)) {
+            return;
+        }
         OfflinePlayer target = resolveKnownPlayer(name);
         if (target == null) {
             viewer.sendMessage(color("&cPlayer not found: &e" + name));
             return;
         }
-        if (!homeFile(target).exists()) {
+        if (isBedrockPlayer(viewer)) {
+            this.adminHomesTarget.put(viewer.getUniqueId(), target.getUniqueId());
+            openStaffHomesDialog(viewer, target.getUniqueId(), 0);
+            return;
+        }
+        HomeFile file = homeFile(target);
+        if (file == null || !file.exists()) {
             viewer.sendMessage(color("&7" + safeName(target) + " has no homes."));
             return;
         }
@@ -3854,8 +4379,172 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         openHomesMenu(viewer, target);
     }
 
+    private OfflinePlayer staffHomesTarget(Player viewer, UUID targetId) {
+        if (viewer == null || !viewer.isOnline() || targetId == null || !isHomeAdmin(viewer)) {
+            return null;
+        }
+        OfflinePlayer target = Bukkit.getOfflinePlayer(targetId);
+        return target != null && target.getUniqueId().equals(targetId) ? target : null;
+    }
+
+    private FileConfiguration staffHomesConfig(OfflinePlayer target) {
+        HomeFile file = homeFile(target);
+        return file != null && file.exists() ? file.load() : null;
+    }
+
+    private void openStaffHomesDialog(Player viewer, UUID targetId, int requestedPage) {
+        OfflinePlayer target = staffHomesTarget(viewer, targetId);
+        if (target == null) {
+            viewer.closeDialog();
+            return;
+        }
+        FileConfiguration cfg = staffHomesConfig(target);
+        List<String> homes = new ArrayList<>();
+        if (cfg != null) {
+            for (String home : cfg.getStringList("homes")) {
+                if (home != null && !home.isBlank()) homes.add(home);
+            }
+        }
+        int pageSize = 6;
+        int pageCount = Math.max(1, (homes.size() + pageSize - 1) / pageSize);
+        int page = Math.max(0, Math.min(requestedPage, pageCount - 1));
+        List<DialogBody> body = List.of(
+            DialogBody.plainMessage(Component.text("Homes for " + safeName(target), NamedTextColor.GRAY)),
+            DialogBody.plainMessage(Component.text(homes.isEmpty() ? "No homes found."
+                : homes.size() + " homes · page " + (page + 1) + " of " + pageCount, NamedTextColor.GRAY)));
+        List<ActionButton> buttons = new ArrayList<>();
+        int start = page * pageSize;
+        int end = Math.min(start + pageSize, homes.size());
+        for (int index = start; index < end; index++) {
+            String home = homes.get(index);
+            buttons.add(dialogButton(Component.text(homeDisplayName(home), NamedTextColor.WHITE), homeWhere(cfg, home), 180,
+                p -> openStaffHomeDetailDialog(p, targetId, home, page)));
+        }
+        if (homes.isEmpty()) {
+            buttons.add(dialogButton(Component.text("No homes found", NamedTextColor.GRAY), null, 180, null));
+        } else if (pageCount > 1) {
+            if (page > 0) {
+                buttons.add(dialogButton(Component.text("Previous Page", NamedTextColor.GRAY), null, 150,
+                    p -> openStaffHomesDialog(p, targetId, page - 1)));
+            }
+            if (page + 1 < pageCount) {
+                buttons.add(dialogButton(Component.text("Next Page", NamedTextColor.GRAY), null, 150,
+                    p -> openStaffHomesDialog(p, targetId, page + 1)));
+            }
+        }
+        Dialog dialog = buildDialog(Component.text("Staff Homes", DIALOG_BRAND), body, List.of(),
+            DialogType.multiAction(buttons).columns(homes.isEmpty() ? 1 : 2)
+                .exitAction(staffHomesCloseButton()).build());
+        viewer.showDialog(dialog);
+    }
+
+    private void openStaffHomeDetailDialog(Player viewer, UUID targetId, String home, int page) {
+        OfflinePlayer target = staffHomesTarget(viewer, targetId);
+        if (target == null) {
+            viewer.closeDialog();
+            return;
+        }
+        FileConfiguration cfg = staffHomesConfig(target);
+        if (cfg == null || !cfg.getStringList("homes").contains(home)) {
+            openStaffHomesDialog(viewer, targetId, page);
+            return;
+        }
+        List<DialogBody> body = List.of(
+            DialogBody.plainMessage(Component.text("Home: " + homeDisplayName(home), NamedTextColor.GRAY)),
+            DialogBody.plainMessage(Component.text("Location: " + homeWhere(cfg, home), NamedTextColor.GRAY)));
+        List<ActionButton> buttons = List.of(
+            dialogButton(Component.text("Teleport", NamedTextColor.GREEN), null, 180,
+                p -> teleportToStaffHome(p, targetId, home, page)),
+            dialogButton(Component.text("Delete", NamedTextColor.RED), null, 180,
+                p -> openStaffHomeDeleteDialog(p, targetId, home, page)),
+            dialogButton(Component.text("Back", NamedTextColor.GRAY), null, 180,
+                p -> openStaffHomesDialog(p, targetId, page)));
+        Dialog dialog = buildDialog(Component.text("Homes for " + safeName(target), DIALOG_BRAND), body, List.of(),
+            DialogType.multiAction(buttons).columns(1).exitAction(staffHomesCloseButton()).build());
+        viewer.showDialog(dialog);
+    }
+
+    private void teleportToStaffHome(Player viewer, UUID targetId, String home, int page) {
+        OfflinePlayer target = staffHomesTarget(viewer, targetId);
+        if (target == null) {
+            viewer.closeDialog();
+            return;
+        }
+        if (!viewer.hasPermission(PERM_COMBAT_BYPASS) && isCombatTagged(viewer)) {
+            viewer.sendMessage(color("&cYou are in combat. Wait &e" + remainingCombatSeconds(viewer) + "s &cbefore teleporting home."));
+            openStaffHomeDetailDialog(viewer, targetId, home, page);
+            return;
+        }
+        FileConfiguration cfg = staffHomesConfig(target);
+        if (cfg == null || !cfg.getStringList("homes").contains(home)) {
+            viewer.sendMessage(color("&cThat home no longer exists."));
+            openStaffHomesDialog(viewer, targetId, page);
+            return;
+        }
+        Location location = readHomeLocation(cfg, home);
+        if (location == null) {
+            viewer.sendMessage(color("&cThat home is invalid or its world is missing."));
+            openStaffHomeDetailDialog(viewer, targetId, home, page);
+            return;
+        }
+        viewer.closeDialog();
+        startCountdownTeleport(viewer, location, "&fTeleported To " + safeName(target) + "'s Home.");
+    }
+
+    private void openStaffHomeDeleteDialog(Player viewer, UUID targetId, String home, int page) {
+        OfflinePlayer target = staffHomesTarget(viewer, targetId);
+        if (target == null) {
+            viewer.closeDialog();
+            return;
+        }
+        FileConfiguration cfg = staffHomesConfig(target);
+        if (cfg == null || !cfg.getStringList("homes").contains(home)) {
+            openStaffHomesDialog(viewer, targetId, page);
+            return;
+        }
+        List<Object> expectedHome = staffHomeSnapshot(cfg, home);
+        List<DialogBody> body = List.of(
+            DialogBody.plainMessage(Component.text("Delete " + homeDisplayName(home) + " for " + safeName(target) + "?",
+                NamedTextColor.WHITE)),
+            DialogBody.plainMessage(Component.text("This will remove the selected home.", NamedTextColor.GRAY)));
+        List<ActionButton> buttons = List.of(
+            dialogButton(Component.text("Delete", NamedTextColor.RED), null, 180, p -> {
+                OfflinePlayer currentTarget = staffHomesTarget(p, targetId);
+                if (currentTarget == null) {
+                    p.closeDialog();
+                    return;
+                }
+                FileConfiguration current = staffHomesConfig(currentTarget);
+                List<String> currentHomes = current == null ? List.of() : current.getStringList("homes");
+                String match = resolveHomeArg(home.toLowerCase(Locale.ROOT), currentHomes,
+                    current == null ? new YamlConfiguration() : current);
+                if (current == null || !currentHomes.contains(home) || !home.equals(match)
+                        || !expectedHome.equals(staffHomeSnapshot(current, home))) {
+                    p.sendMessage(color("&cThat home changed or is ambiguous; it was not deleted."));
+                    openStaffHomesDialog(p, targetId, page);
+                    return;
+                }
+                adminDeleteHome(p, currentTarget, home);
+                openStaffHomesDialog(p, targetId, page);
+            }),
+            dialogButton(Component.text("Back", NamedTextColor.GRAY), null, 180,
+                p -> openStaffHomeDetailDialog(p, targetId, home, page)));
+        Dialog dialog = buildDialog(Component.text("Confirm Home Delete", NamedTextColor.RED), body, List.of(),
+            DialogType.multiAction(buttons).columns(1).exitAction(staffHomesCloseButton()).build());
+        viewer.showDialog(dialog);
+    }
+
+    private static List<Object> staffHomeSnapshot(FileConfiguration cfg, String home) {
+        return Arrays.asList(cfg.get(home + ".world"), cfg.get(home + ".x"), cfg.get(home + ".y"),
+            cfg.get(home + ".z"), cfg.get(home + ".yaw"), cfg.get(home + ".pitch"));
+    }
+
+    private ActionButton staffHomesCloseButton() {
+        return dialogButton(Component.text("Close"), null, 150, Player::closeDialog);
+    }
+
     /** Staff delete of another player's home, with the same backup as /delhome. */
-    private void adminDeleteHome(Player admin, OfflinePlayer target, String homeArg) {
+    private void adminDeleteHome(CommandSender admin, OfflinePlayer target, String homeArg) {
         HomeFile file = homeFile(target);
         if (!file.exists()) {
             admin.sendMessage(color("&cNo homes found for &e" + safeName(target) + "&c."));
@@ -4044,8 +4733,11 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                 }
                 if (request.argPosition == 0) {
                     out = completeKnownHomeTargets(request.prefix);
-                } else if (request.argPosition == 1 && !request.args.isEmpty()) {
-                    out = completeTargetHomeSlots(request.args.get(0), request.prefix);
+                } else if (request.argPosition >= 1 && !request.args.isEmpty()) {
+                    // Words already typed after the player belong to the same (possibly multi-word) home name.
+                    List<String> words = new ArrayList<>(request.args.subList(1, Math.min(request.argPosition, request.args.size())));
+                    words.add(request.prefix);
+                    out = completeTargetHomeSlots(request.args.get(0), String.join(" ", words));
                 }
                 break;
             case "home":
@@ -4240,6 +4932,13 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (attacker == null) {
             return;
         }
+        // Ender pearls (a pearl hit, or the thrower's own landing damage) never start combat; they only reset the
+        // timer of a player already in combat. Hurting yourself starts nothing either.
+        if (event.getDamager() instanceof org.bukkit.entity.EnderPearl || attacker.equals(victim)) {
+            if (isCombatTagged(victim)) tagCombat(victim);
+            if (!attacker.equals(victim) && isCombatTagged(attacker)) tagCombat(attacker);
+            return;
+        }
         tagCombat(victim);
         tagCombat(attacker);
     }
@@ -4330,6 +5029,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
+        stopCombatCountdown(event.getPlayer());
         combatTaggedUntil.remove(uuid);
         adminTargetIndex.remove(uuid);
         pendingDeleteSlot.remove(uuid);
@@ -4465,20 +5165,8 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             viewer.sendMessage(color("&cYou are in combat. Wait &e" + remainingCombatSeconds(viewer) + "s &cbefore teleporting home."));
             return;
         }
-        HomeFile targetFile = homeFile(target);
-        String elsewhere = targetFile == null || !targetFile.exists() ? null : homeServerElsewhere(targetFile.load(), homeName);
-        if (elsewhere != null) {
-            viewer.sendMessage(color("&7That home is on &f" + elsewhere + "&7. Join that server to use it."));
-            return;
-        }
-        Location loc = readHomeLocation(target, homeName);
-        if (loc == null) {
-            viewer.sendMessage(color("&cThat home is invalid or its world is missing."));
-            return;
-        }
-        viewer.closeInventory();
         String msg = selfTarget ? "&fTeleported To Your Home." : "&fTeleported To " + target.getName() + "'s Home.";
-        startCountdownTeleport(viewer, loc, msg);
+        teleportHome(viewer, cfg, homeName, msg);
     }
 
     private void openHomeDeleteConfirmByName(Player viewer, String homeName) {
@@ -4518,18 +5206,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             player.sendMessage(color("&cHome not found. Use a valid home number or name."));
             return;
         }
-        String elsewhere = homeServerElsewhere(cfg, selectedHome);
-        if (elsewhere != null) {
-            player.sendMessage(color("&7That home is on &f" + elsewhere + "&7. Join that server to use it."));
-            return;
-        }
-        Location loc = readHomeLocation(cfg, selectedHome);
-        if (loc == null) {
-            player.sendMessage(color("&cThat home is invalid or its world is missing."));
-            return;
-        }
-        player.closeInventory();
-        startCountdownTeleport(player, loc, "&fTeleported To Your Home.");
+        teleportHome(player, cfg, selectedHome, "&fTeleported To Your Home.");
     }
 
     // ===================== Homes dialog frontend (#8) =====================
@@ -4555,12 +5232,21 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         }
     }
 
+    private boolean useHomesDialogUi(Player player) {
+        // The deployed Geyser dialog translator renders these screens as native Bedrock forms.
+        return isBedrockPlayer(player) || useDialogUi(player);
+    }
+
     private boolean isBedrockPlayer(Player player) {
+        // Floodgate gives Bedrock players UUIDs whose high bits are zero. This holds even when the Floodgate API is
+        // not visible to this plugin's class loader, where the lookup below fails and used to report Java.
+        if (player.getUniqueId().getMostSignificantBits() == 0L) return true;
         try {
-            if (Bukkit.getPluginManager().getPlugin("floodgate") == null) {
+            var floodgate = Bukkit.getPluginManager().getPlugin("floodgate");
+            if (floodgate == null) {
                 return false;
             }
-            Class<?> api = Class.forName("org.geysermc.floodgate.api.FloodgateApi");
+            Class<?> api = Class.forName("org.geysermc.floodgate.api.FloodgateApi", true, floodgate.getClass().getClassLoader());
             Object instance = api.getMethod("getInstance").invoke(null);
             return (Boolean) api.getMethod("isFloodgatePlayer", UUID.class).invoke(instance, player.getUniqueId());
         } catch (Throwable t) {
@@ -4614,10 +5300,15 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private String homeWhere(FileConfiguration cfg, String home) {
-        Location loc = readHomeLocation(cfg, home);
-        return (loc != null && loc.getWorld() != null)
-            ? loc.getWorld().getName() + "  " + (int) loc.getX() + ", " + (int) loc.getY() + ", " + (int) loc.getZ()
-            : "invalid";
+        HomeDestination destination = readHomeDestination(cfg, home);
+        if (destination == null) return "invalid";
+        String region = switch (destination.dimension()) {
+            case "minecraft:overworld" -> "Overworld";
+            case "minecraft:the_nether" -> "Nether";
+            case "minecraft:the_end" -> "The End";
+            default -> "Unknown region";
+        };
+        return region + "  " + (int) destination.x() + ", " + (int) destination.y() + ", " + (int) destination.z();
     }
 
     private String homeIcon(FileConfiguration cfg, String home) {
@@ -4687,7 +5378,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
      * Main homes screen: only slots the player can use (unset = "New Home").
      */
     private void openHomesDialog(Player player) {
-        if (!useDialogUi(player)) {
+        if (!useHomesDialogUi(player)) {
             setTargetToSelf(player);
             openHomesMenu(player, player);
             return;
@@ -4719,7 +5410,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
             List.of(),
             DialogType.multiAction(buttons)
                 .columns(grid ? 3 : 1)
-                .exitAction(dialogButton(Component.text("Close"), null, btnWidth, null))
+                .exitAction(dialogButton(Component.text("Close"), null, btnWidth, Player::closeDialog))
                 .build());
         player.showDialog(dialog);
     }
@@ -5413,6 +6104,10 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
                     && (homes.contains(canonical) || cfg.contains(canonical + ".x"))) {
                 return canonical;
             }
+            // A renamed home keeps its place in the list, so "N" is the Nth home, as the homes menu numbers them.
+            if (idx >= 1 && idx <= homes.size() && !homes.get(idx - 1).matches("home\\d+")) {
+                return homes.get(idx - 1);
+            }
             return null;
         } catch (NumberFormatException ignored) {
             // fall through
@@ -5464,6 +6159,76 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return prev[m] <= max ? prev[m] : -1;
     }
 
+    private record HomeDestination(String dimension, String worldName, double x, double y, double z, float yaw, float pitch) { }
+
+    private HomeDestination readHomeDestination(FileConfiguration cfg, String home) {
+        if (cfg == null || home == null || !cfg.contains(home + ".x")
+                || !cfg.contains(home + ".y") || !cfg.contains(home + ".z")) return null;
+        String worldName = cfg.getString(home + ".world");
+        String dimension = HomeDimensionResolver.resolve(cfg.getString(home + ".dimension"), worldName);
+        if (dimension == null) return null;
+        double x = cfg.getDouble(home + ".x");
+        double y = cfg.getDouble(home + ".y");
+        double z = cfg.getDouble(home + ".z");
+        float yaw = (float) cfg.getDouble(home + ".yaw", 0.0);
+        float pitch = (float) cfg.getDouble(home + ".pitch", 0.0);
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)
+                || Math.abs(x) > 29_999_984.0 || Math.abs(z) > 29_999_984.0
+                || y < -2048.0 || y > 2048.0 || !Float.isFinite(yaw) || !Float.isFinite(pitch)
+                || Math.abs(pitch) > 90.0f) return null;
+        return new HomeDestination(dimension, worldName, x, y, z, yaw, pitch);
+    }
+
+    private World localHomeWorld(HomeDestination destination) {
+        if (destination == null) return null;
+        for (World world : Bukkit.getWorlds()) {
+            if (world.getKey().toString().equals(destination.dimension())) return world;
+        }
+        return null;
+    }
+
+    /** Routes homes through Canopy's exact dimension handoff so remote-world names never resolve to local shadows. */
+    private void teleportHome(Player player, FileConfiguration cfg, String home, String successMessage) {
+        HomeDestination destination = readHomeDestination(cfg, home);
+        if (destination == null) {
+            player.sendMessage(color("&cThat home is invalid or its dimension is unknown."));
+            return;
+        }
+        if (Bukkit.getPluginCommand("canopydim") != null) {
+            String username = player.getName();
+            if (username == null || !username.matches("[A-Za-z0-9_]{1,16}")) {
+                player.sendMessage(color("&cCould not safely resolve your account for dimension travel."));
+                return;
+            }
+            String command = "canopydim transfer " + username + " " + destination.dimension() + " "
+                + Double.toString(destination.x()) + " " + Double.toString(destination.y()) + " "
+                + Double.toString(destination.z()) + " " + Float.toString(destination.yaw()) + " "
+                + Float.toString(destination.pitch());
+            player.closeInventory();
+            if (!Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command)) {
+                player.sendMessage(color("&cThat region is unavailable for home travel right now."));
+                return;
+            }
+            player.sendActionBar(color("&7Travelling to your home..."));
+            return;
+        }
+        // Without the dimension gateway a home set on another server cannot be reached from here.
+        String elsewhere = homeServerElsewhere(cfg, home);
+        if (elsewhere != null) {
+            player.sendMessage(color("&7That home is on &f" + elsewhere + "&7. Join that server to use it."));
+            return;
+        }
+        World world = localHomeWorld(destination);
+        if (world == null) {
+            player.sendMessage(color("&cThat region is unavailable for home travel right now."));
+            return;
+        }
+        Location location = new Location(world, destination.x(), destination.y(), destination.z(),
+            destination.yaw(), destination.pitch());
+        player.closeInventory();
+        startCountdownTeleport(player, location, successMessage);
+    }
+
     private Location readHomeLocation(OfflinePlayer target, String home) {
         HomeFile dataFile = homeFile(target);
         if (dataFile == null || !dataFile.exists()) {
@@ -5497,22 +6262,12 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private Location readHomeLocation(FileConfiguration cfg, String home) {
-        String worldName = cfg.getString(home + ".world");
-        World world = worldName == null ? null : Bukkit.getWorld(worldName);
+        HomeDestination destination = readHomeDestination(cfg, home);
+        World world = localHomeWorld(destination);
         if (world == null) {
             return null;
         }
-
-        if (!cfg.contains(home + ".x") || !cfg.contains(home + ".y") || !cfg.contains(home + ".z")) {
-            return null;
-        }
-
-        double x = cfg.getDouble(home + ".x");
-        double y = cfg.getDouble(home + ".y");
-        double z = cfg.getDouble(home + ".z");
-        float yaw = (float) cfg.getDouble(home + ".yaw", 0.0);
-        float pitch = (float) cfg.getDouble(home + ".pitch", 0.0);
-        return new Location(world, x, y, z, yaw, pitch);
+        return new Location(world, destination.x(), destination.y(), destination.z(), destination.yaw(), destination.pitch());
     }
 
     private boolean isHomesMenu(String title) {
@@ -6041,6 +6796,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         Location loc = player.getLocation();
         cfg.set(name + ".world", loc.getWorld() == null ? "world" : loc.getWorld().getName());
+        cfg.set(name + ".dimension", loc.getWorld() == null ? "minecraft:overworld" : loc.getWorld().getKey().toString());
         cfg.set(name + ".server", homeServerName());
         cfg.set(name + ".x", loc.getX());
         cfg.set(name + ".y", loc.getY());
@@ -6115,6 +6871,7 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
 
         Location loc = player.getLocation();
         cfg.set(homeName + ".world", loc.getWorld() == null ? "world" : loc.getWorld().getName());
+        cfg.set(homeName + ".dimension", loc.getWorld() == null ? "minecraft:overworld" : loc.getWorld().getKey().toString());
         cfg.set(homeName + ".server", homeServerName());
         cfg.set(homeName + ".x", loc.getX());
         cfg.set(homeName + ".y", loc.getY());
@@ -6177,7 +6934,32 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
     }
 
     private void tagCombat(Player player) {
+        if (player.hasPermission(PERM_COMBAT_BYPASS)) return;
         combatTaggedUntil.put(player.getUniqueId(), System.currentTimeMillis() + COMBAT_TAG_MILLIS);
+        PlatformScheduler.entityNow(this, player, () -> {
+            if (!player.isOnline() || !isCombatTagged(player) || player.hasPermission(PERM_COMBAT_BYPASS)) return;
+            player.sendActionBar(CombatCountdown.message(remainingCombatSeconds(player)));
+            if (combatCountdownTasks.containsKey(player)) return;
+            PlatformScheduler.TaskHandle task = PlatformScheduler.entityRepeating(this, player,
+                () -> refreshCombatCountdown(player), () -> stopCombatCountdown(player), 20L, 20L);
+            if (task.wasAccepted()) combatCountdownTasks.put(player, task);
+        }, () -> stopCombatCountdown(player));
+    }
+
+    private void refreshCombatCountdown(Player player) {
+        if (!player.isOnline()) { stopCombatCountdown(player); return; }
+        if (player.hasPermission(PERM_COMBAT_BYPASS) || !isCombatTagged(player)) {
+            combatTaggedUntil.remove(player.getUniqueId());
+            stopCombatCountdown(player);
+            player.sendActionBar(Component.empty());
+            return;
+        }
+        player.sendActionBar(CombatCountdown.message(remainingCombatSeconds(player)));
+    }
+
+    private void stopCombatCountdown(Player player) {
+        PlatformScheduler.TaskHandle task = combatCountdownTasks.remove(player);
+        if (task != null) task.cancel();
     }
 
     private boolean isCombatTagged(Player player) {
@@ -6197,12 +6979,9 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         if (until == null) {
             return 0;
         }
-        long remainingMs = until - System.currentTimeMillis();
-        if (remainingMs <= 0) {
-            combatTaggedUntil.remove(player.getUniqueId());
-            return 0;
-        }
-        return Math.max(1, (remainingMs + 999) / 1000);
+        long seconds = CombatCountdown.secondsRemaining(until, System.currentTimeMillis());
+        if (seconds == 0) combatTaggedUntil.remove(player.getUniqueId());
+        return seconds;
     }
 
     private void startCountdownTeleport(Player var1, Location var2, String var3) {
@@ -6339,29 +7118,33 @@ public final class PizzaAdminTools extends JavaPlugin implements CommandExecutor
         return out;
     }
 
-    private List<String> completeTargetHomeSlots(String targetArg, String prefix) {
+    /**
+     * The target's homes, each once: an unnamed slot by its number, a renamed one by its name. {@code typed} is
+     * everything typed after the player name; a name with spaces is completed word by word, since the client
+     * replaces only the word being typed.
+     */
+    private List<String> completeTargetHomeSlots(String targetArg, String typed) {
+        if (targetArg == null || targetArg.isBlank()) return Collections.emptyList(); // "/gtp  name": no player yet
         OfflinePlayer target = Bukkit.getOfflinePlayer(targetArg);
         HomeFile targetFile = homeFile(target);
         if (targetFile == null || !targetFile.exists()) {
             return Collections.emptyList();
         }
-        FileConfiguration cfg = targetFile.load();
-        List<String> homes = cfg.getStringList("homes");
-        List<String> out = new ArrayList<>();
-        String lower = prefix.toLowerCase(Locale.ROOT);
+        List<String> homes = targetFile.load().getStringList("homes");
+        List<String> choices = new ArrayList<>();
         for (int i = 0; i < homes.size(); i++) {
-            String idx = String.valueOf(i + 1);
-            if (idx.startsWith(lower)) {
-                out.add(idx);
-            }
+            String home = homes.get(i);
+            choices.add(home.matches("home\\d+") ? home.substring(4) : home);
         }
-        for (String home : homes) {
-            if (home.toLowerCase(Locale.ROOT).startsWith(lower)) {
-                out.add(home);
-            }
+        String lower = typed.toLowerCase(Locale.ROOT);
+        int wordStart = typed.lastIndexOf(' ') + 1;
+        List<String> out = new ArrayList<>();
+        for (String choice : choices) {
+            if (choice.toLowerCase(Locale.ROOT).startsWith(lower)) out.add(choice.substring(wordStart));
         }
         return out;
     }
+
 
     private List<String> completeTransferCommand(CommandSender sender, String[] args) {
         boolean canTransferOthers = hasAnyPermission(sender, PERM_TRANSFER_OTHERS_CMD);
