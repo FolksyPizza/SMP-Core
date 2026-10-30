@@ -6,7 +6,26 @@ All notable changes to SMP-Core are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- PizzaNetworkCore economy profile (`runtime.profile: economy`): the shop, `/sell`, auctions, orders and the
+  ecobot on a network whose teleports, chat and player state belong to other plugins. Optional features (HUD,
+  `/stats`, `/settings`, `/eco`, ecobot) are enabled one by one; every market route stays closed until configured.
+- Journaled market operations, so a crash or a server switch never duplicates or loses an item; shop and auction
+  purchases can settle instantly instead (`economy.market.instant-purchases`).
+- Quick auction buy removes the bought listing from view at once. Buy feedback sounds (`economy.sounds`) and
+  `/eco freebuy` for staff test purchases.
+- A 9x6 `/sell` GUI with a live sell button, held-item worth on the action bar, and `/eco give|take|set|reset` with
+  auction and market controls.
+- Fast Crystals removes a hit end crystal on the attacker's client at once; explosion particle and sound settings
+  keep the player's knockback.
+- `/atrack` chase, orbit and first-person cameras with per-staff settings and presets.
+- PizzaChatGuard filters item names, signs and books.
+- PizzaPunishment protected groups (`protected-groups`): their members cannot be punished by anyone outside them.
+
 ### Changed
+- Homes record their dimension; a home set on another server says where it is.
+- Combat shows a 20-second countdown, and ender pearls only reset a running combat tag.
+- Auction categories filter every listing before the page limit, and same-size menus repaint in place.
 - Corrected setup rerun guidance: branding and start scripts are regenerated, and the branding backup is replaced
   on each run. Clarified expanded ender-chest SQL/file storage and the scope and limits of shutdown saving.
 - Reorganized onboarding documentation with installation, architecture, build/test, plugin integration,
