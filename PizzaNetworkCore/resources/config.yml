@@ -3,6 +3,16 @@
 # shared database. Set "file" or "mysql" to force one.
 storage:
   backend: auto
+item-sanitizer:
+  # Inventory, container, drop and chunk sweeps that destroy items survival cannot hold. Turn off when another
+  # plugin enforces inventories; the shop and /sell still refuse illegal items either way.
+  enabled: true
+  # Survival-unobtainable items are removed in every world except these exact world names.
+  # Use this only for an isolated creative sandbox; player inventories in Creative mode are exempt too.
+  creative-worlds: []
+shards:
+  # Keep enabled by default for existing SMP networks; set false to disable the shard currency.
+  enabled: true
 sync:
   enabled: true
   server-name: auto
@@ -110,3 +120,20 @@ rtp:
   animation:
     # Arcing arrival effect for /rtp (players can also turn it off in /settings). Off until it is polished.
     enabled: false
+
+# The economy-only network profile is intentionally fail-closed until the matching Canopy
+# inventory transaction route is qualified and the owner enables it in the staged config.
+economy:
+  # Empty denies all player-facing economy commands. Set only the owner's UUID for the initial rollout.
+  allowed-uuids: []
+  sell-enabled: false
+  provide-vault: true
+  # The plugin that owns teleports, messages and the network sidebar, if any: its settings and privacy values are
+  # shown and changed from the economy's settings menu, and /pay accepts its nicknames. Empty: none.
+  network-plugin: ""
+  market:
+    shop-enabled: false
+    orders-enabled: false
+    auction-buy-enabled: false
+    auction-list-enabled: false
+    auction-cancel-enabled: false

@@ -34,6 +34,9 @@ commands:
     usage: /unblock <player>
   sell:
     usage: /sell [all|reload]
+  pay:
+    usage: /pay <player> <amount>
+    description: Send money to another player.
   ah:
     usage: /ah
     aliases: [auction]
@@ -73,6 +76,10 @@ commands:
     permission: pizzasmp.admin.console
   worth:
     usage: /worth [item]
+  eco:
+    description: Give, take, set or reset a player's balance
+    usage: /eco <give|take|set|reset> <player> [amount]
+    permission: pizzasmp.admin.eco
   sellmulti:
     usage: /sellmulti
   team:
@@ -249,6 +256,9 @@ permissions:
     default: true
   pizzasmp.staff.gtp:
     default: op
+  pizzasmp.itemsanitizer.exempt:
+    description: Items in this player's inventory and in containers they open are never removed by the item sanitizer
+    default: false
   pizzasmp.admin.eco:
     default: op
   pizzasmp.admin.debug:

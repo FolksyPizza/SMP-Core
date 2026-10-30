@@ -8,10 +8,14 @@ import net.milkbowl.vault.economy.EconomyResponse.ResponseType;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -43,10 +47,35 @@ import java.util.UUID;
  */
 public final class PizzaEconomy extends AbstractEconomy {
 
+    private static final BigDecimal MAX_BALANCE = new BigDecimal("9999999999999999.99");
+
+    enum TransferOutcome {
+        SUCCESS,
+        INSUFFICIENT,
+        FAILED,
+        UNKNOWN
+    }
+
+    record TransferResult(TransferOutcome outcome) { }
+
+    @FunctionalInterface
+    interface ConnectionFactory {
+        Connection open() throws SQLException;
+    }
+
     private final PizzaNetworkCore plugin;
+    private final ConnectionFactory transferConnections;
 
     PizzaEconomy(PizzaNetworkCore plugin) {
-        this.plugin = plugin;
+        this.plugin = Objects.requireNonNull(plugin, "plugin");
+        this.transferConnections = plugin::openSyncConnection;
+    }
+
+    // Package-private seam for the standalone fake-JDBC proof. Production construction still
+    // goes through PizzaNetworkCore's shared connection pool above.
+    PizzaEconomy(ConnectionFactory transferConnections) {
+        this.plugin = null;
+        this.transferConnections = Objects.requireNonNull(transferConnections, "transferConnections");
     }
 
     @Override public boolean isEnabled() { return true; }
@@ -129,6 +158,156 @@ public final class PizzaEconomy extends AbstractEconomy {
             return null;
         }
         return balanceOf(uuid);
+    }
+
+    /**
+     * Transfer money and write the matching PAY audit row as one database transaction.
+     *
+     * A commit exception is ambiguous: the database may have committed before the
+     * acknowledgment was lost. Callers must treat UNKNOWN as pending/manual reconciliation
+     * and must never retry it automatically.
+     */
+    TransferResult transfer(UUID source, String sourceName, UUID target, String targetName,
+                            double amount, String serverName) {
+        BigDecimal cents = transferAmount(amount);
+        if (source == null || target == null || source.equals(target) || cents == null
+                || sourceName == null || sourceName.isBlank()
+                || targetName == null || targetName.isBlank()
+                || serverName == null || serverName.isBlank()) {
+            return new TransferResult(TransferOutcome.FAILED);
+        }
+
+        Connection connection = null;
+        boolean transactionStarted = false;
+        boolean commitAttempted = false;
+        try {
+            connection = this.transferConnections.open();
+            if (connection == null) return new TransferResult(TransferOutcome.FAILED);
+            connection.setAutoCommit(false);
+            transactionStarted = true;
+
+            // Create and lock both rows in one stable UUID order. Transfers in opposite
+            // directions therefore acquire the same row locks in the same order.
+            UUID first = source.toString().compareTo(target.toString()) <= 0 ? source : target;
+            UUID second = first.equals(source) ? target : source;
+            try (PreparedStatement insert = connection.prepareStatement(
+                    "INSERT IGNORE INTO balances (uuid, money) VALUES (?, 0)")) {
+                insert.setString(1, first.toString());
+                insert.executeUpdate();
+                insert.setString(1, second.toString());
+                insert.executeUpdate();
+            }
+
+            java.util.Map<UUID, BigDecimal> balances = new java.util.HashMap<>();
+            try (PreparedStatement select = connection.prepareStatement(
+                    "SELECT money FROM balances WHERE uuid = ? FOR UPDATE")) {
+                for (UUID account : List.of(first, second)) {
+                    select.setString(1, account.toString());
+                    try (ResultSet rows = select.executeQuery()) {
+                        if (!rows.next()) throw new SQLException("locked balance row disappeared");
+                        BigDecimal balance = rows.getBigDecimal(1);
+                        if (balance == null || balance.signum() < 0 || balance.compareTo(MAX_BALANCE) > 0) {
+                            throw new SQLException("balance is outside the supported range");
+                        }
+                        balances.put(account, balance.setScale(2, RoundingMode.UNNECESSARY));
+                    }
+                }
+            }
+
+            BigDecimal sourceBalance = balances.get(source);
+            BigDecimal targetBalance = balances.get(target);
+            if (sourceBalance == null || targetBalance == null) throw new SQLException("locked balance missing");
+            if (sourceBalance.compareTo(cents) < 0) {
+                rollbackQuietly(connection, "insufficient funds");
+                return new TransferResult(TransferOutcome.INSUFFICIENT);
+            }
+            if (targetBalance.add(cents).compareTo(MAX_BALANCE) > 0) {
+                rollbackQuietly(connection, "target balance overflow");
+                return new TransferResult(TransferOutcome.FAILED);
+            }
+
+            try (PreparedStatement debit = connection.prepareStatement(
+                    "UPDATE balances SET money = money - ? WHERE uuid = ? AND money >= ?")) {
+                debit.setBigDecimal(1, cents);
+                debit.setString(2, source.toString());
+                debit.setBigDecimal(3, cents);
+                if (debit.executeUpdate() != 1) {
+                    rollbackQuietly(connection, "debit rejected");
+                    return new TransferResult(TransferOutcome.FAILED);
+                }
+            }
+
+            try (PreparedStatement credit = connection.prepareStatement(
+                    "UPDATE balances SET money = money + ? WHERE uuid = ? AND money <= ?")) {
+                credit.setBigDecimal(1, cents);
+                credit.setString(2, target.toString());
+                credit.setBigDecimal(3, MAX_BALANCE.subtract(cents));
+                if (credit.executeUpdate() != 1) {
+                    rollbackQuietly(connection, "credit rejected");
+                    return new TransferResult(TransferOutcome.FAILED);
+                }
+            }
+
+            try (PreparedStatement audit = connection.prepareStatement(
+                    "INSERT INTO transaction_audit_log "
+                    + "(player_uuid, player_name, event_type, item_key, amount, unit_price, total_price, extra_info, server_name) "
+                    + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                audit.setString(1, source.toString());
+                audit.setString(2, sourceName);
+                audit.setString(3, "PAY");
+                audit.setString(4, targetName);
+                audit.setInt(5, 1);
+                audit.setDouble(6, cents.doubleValue());
+                audit.setDouble(7, cents.doubleValue());
+                audit.setString(8, "to=" + target);
+                audit.setString(9, serverName);
+                if (audit.executeUpdate() != 1) throw new SQLException("PAY audit insert was not applied");
+            }
+
+            commitAttempted = true;
+            connection.commit();
+            return new TransferResult(TransferOutcome.SUCCESS);
+        } catch (Exception ex) {
+            if (commitAttempted) {
+                logTransferProblem("commit outcome unknown", source, target, ex);
+                return new TransferResult(TransferOutcome.UNKNOWN);
+            }
+            if (transactionStarted && connection != null) rollbackQuietly(connection, "transfer failed");
+            logTransferProblem("transfer failed", source, target, ex);
+            return new TransferResult(TransferOutcome.FAILED);
+        } finally {
+            if (connection != null) {
+                try {
+                    connection.close();
+                } catch (Exception ex) {
+                    logTransferProblem("connection close failed", source, target, ex);
+                }
+            }
+        }
+    }
+
+    private static BigDecimal transferAmount(double amount) {
+        if (!Double.isFinite(amount) || amount <= 0.0) return null;
+        try {
+            BigDecimal cents = BigDecimal.valueOf(amount).setScale(2, RoundingMode.UNNECESSARY);
+            return cents.signum() > 0 && cents.compareTo(MAX_BALANCE) <= 0 ? cents : null;
+        } catch (ArithmeticException ex) {
+            return null;
+        }
+    }
+
+    private void rollbackQuietly(Connection connection, String phase) {
+        try {
+            connection.rollback();
+        } catch (Exception ex) {
+            logTransferProblem(phase + " rollback failed", null, null, ex);
+        }
+    }
+
+    private void logTransferProblem(String phase, UUID source, UUID target, Exception ex) {
+        if (this.plugin == null) return;
+        String players = source == null ? "" : " for " + source + (target == null ? "" : " -> " + target);
+        this.plugin.getLogger().warning("economy: " + phase + players + " (" + ex.getClass().getSimpleName() + ")");
     }
 
     // ---- Vault surface ----------------------------------------------------------

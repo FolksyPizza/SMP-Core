@@ -232,14 +232,17 @@ CREATE TABLE IF NOT EXISTS player_mailbox (
   uuid CHAR(36) NOT NULL,
   item_blob LONGBLOB NOT NULL,
   reason VARCHAR(64) NOT NULL,
+  lock_operation_id CHAR(36) NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_mailbox_uuid (uuid)
+  INDEX idx_mailbox_uuid (uuid),
+  INDEX idx_mailbox_lock (lock_operation_id)
 );
 
 CREATE TABLE IF NOT EXISTS auction_listings (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   seller_uuid CHAR(36) NOT NULL,
   buyer_uuid CHAR(36) NULL,
+  lock_operation_id CHAR(36) NULL,
   item_blob LONGBLOB NOT NULL,
   item_key VARCHAR(96) NOT NULL,
   price DOUBLE NOT NULL,
@@ -314,6 +317,14 @@ CREATE TABLE IF NOT EXISTS death_chests (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   claimed_at TIMESTAMP NULL,
   INDEX idx_death_chest_unclaimed (player_uuid, claimed)
+);
+
+CREATE TABLE IF NOT EXISTS player_ignores (
+  ignorer_uuid CHAR(36) NOT NULL,
+  ignored_uuid CHAR(36) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (ignorer_uuid, ignored_uuid),
+  INDEX idx_ignored (ignored_uuid)
 );
 
 CREATE TABLE IF NOT EXISTS follows (
@@ -430,6 +441,8 @@ CREATE TABLE IF NOT EXISTS network_teleport_requests (
 
 CREATE TABLE IF NOT EXISTS order_deliveries (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  operation_id CHAR(36) NULL,
+  lock_operation_id CHAR(36) NULL,
   order_id BIGINT NOT NULL,
   fulfiller_uuid CHAR(36) NOT NULL,
   amount INT NOT NULL,
@@ -438,21 +451,26 @@ CREATE TABLE IF NOT EXISTS order_deliveries (
   claimed TINYINT(1) NOT NULL DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   claimed_at TIMESTAMP NULL DEFAULT NULL,
+  UNIQUE KEY uq_order_delivery_operation (operation_id),
   INDEX idx_order_delivery_order (order_id),
-  INDEX idx_order_delivery_claimed (claimed)
+  INDEX idx_order_delivery_claimed (claimed),
+  INDEX idx_order_delivery_lock (lock_operation_id)
 );
 
 CREATE TABLE IF NOT EXISTS order_listings (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  create_operation_id CHAR(36) NULL,
   creator_uuid CHAR(36) NOT NULL,
   item_key VARCHAR(96) NOT NULL,
   amount_total INT NOT NULL,
   amount_filled INT NOT NULL DEFAULT 0,
+  amount_reserved INT NOT NULL DEFAULT 0,
   unit_price DOUBLE NOT NULL,
   status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   expires_at TIMESTAMP NULL DEFAULT NULL,
+  UNIQUE KEY uq_order_create_operation (create_operation_id),
   INDEX idx_order_status_created (status, created_at),
   INDEX idx_order_creator_status (creator_uuid, status)
 );
@@ -571,6 +589,37 @@ CREATE TABLE IF NOT EXISTS transaction_audit_log (
   logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_audit_player (player_uuid, logged_at),
   INDEX idx_audit_event (event_type, logged_at)
+);
+
+-- Each item-changing economy operation reserves money before inventory mutation, then records
+-- the Canopy checkpoint before settling and releasing the player barrier. The operation UUID is
+-- the idempotency key used to resume an unknown database commit after a lost acknowledgment.
+CREATE TABLE IF NOT EXISTS economy_market_operations (
+  operation_id CHAR(36) PRIMARY KEY,
+  player_uuid CHAR(36) NOT NULL,
+  player_name VARCHAR(16) NOT NULL,
+  operation_kind VARCHAR(32) NOT NULL,
+  item_key VARCHAR(96) NOT NULL,
+  item_count INT NOT NULL,
+  total_price DECIMAL(18,2) NOT NULL,
+  backend_name VARCHAR(32) NOT NULL,
+  item_payload LONGBLOB NOT NULL,
+  request_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  phase VARCHAR(24) NOT NULL,
+  backend_connection_id CHAR(36) NULL,
+  pre_revision BIGINT NULL,
+  pre_digest CHAR(64) NULL,
+  post_revision BIGINT NULL,
+  post_digest CHAR(64) NULL,
+  review_from_phase VARCHAR(24) NULL,
+  result_detail VARCHAR(64) NULL,
+  gateway_terminal_ack TINYINT(1) NOT NULL DEFAULT 0,
+  gateway_terminal_forgotten TINYINT(1) NOT NULL DEFAULT 0,
+  market_limit INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_market_player_phase (player_uuid, phase, updated_at),
+  INDEX idx_market_phase_updated (phase, updated_at)
 );
 -- Seed the singleton maintenance row so the control plane always has state to read.
 INSERT IGNORE INTO maintenance_state (id, active, targets_csv) VALUES (1, 0, 'survival');

@@ -37,8 +37,9 @@ public final class MenuLock implements Listener {
 
     private static final class Holder implements Locked {
         private final IntPredicate deposit;
+        private final String title;
         private Inventory inventory;
-        Holder(IntPredicate deposit) { this.deposit = deposit; }
+        Holder(IntPredicate deposit, String title) { this.deposit = deposit; this.title = title; }
         @Override public boolean depositSlot(int slot) { return deposit.test(slot); }
         @Override public Inventory getInventory() { return inventory; }
     }
@@ -56,7 +57,7 @@ public final class MenuLock implements Listener {
     @SuppressWarnings("deprecation") // String titles: the suite still builds legacy-coloured menu titles
     public static Inventory create(int size, String title, IntPredicate deposit) {
         register();
-        Holder holder = new Holder(deposit);
+        Holder holder = new Holder(deposit, title);
         Inventory inventory = Bukkit.createInventory(holder, size, title);
         holder.inventory = inventory;
         return inventory;
@@ -71,6 +72,25 @@ public final class MenuLock implements Listener {
         JavaPlugin plugin = JavaPlugin.getProvidingPlugin(MenuLock.class);
         Bukkit.getPluginManager().registerEvents(new MenuLock(), plugin);
         registered = true;
+    }
+
+    /** The title a menu was created with, or null for other inventories. */
+    public static String title(Inventory inventory) {
+        return inventory != null && inventory.getHolder(false) instanceof Holder holder ? holder.title : null;
+    }
+
+    /**
+     * Whether {@code next} can replace {@code open}'s contents in place (a new page of the same menu): same size and
+     * title, and no deposit slots in either, so no player items can be lost. Saves a close and reopen, which Bedrock
+     * clients show as the menu disappearing and coming back.
+     */
+    public static boolean replaceable(Inventory open, String openTitle, Inventory next) {
+        if (open == null || next == null || open == next || open.getSize() != next.getSize()) return false;
+        if (!(open.getHolder(false) instanceof Locked a) || !(next.getHolder(false) instanceof Locked b)) return false;
+        String nextTitle = title(next);
+        if (nextTitle == null || !nextTitle.equals(openTitle)) return false;
+        for (int slot = 0; slot < open.getSize(); slot++) if (a.depositSlot(slot) || b.depositSlot(slot)) return false;
+        return true;
     }
 
     /** Whether this view's top inventory is a locked menu. */

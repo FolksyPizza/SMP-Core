@@ -113,6 +113,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.invoke.CallSite;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -131,9 +132,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -149,6 +153,12 @@ import net.milkbowl.vault.economy.Economy;
 import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
 import dev.pizzasmp.common.menu.MenuLock;
+import dev.pizzasmp.economy.InventoryCustody;
+import dev.pizzasmp.economy.MarketOperationCoordinator;
+import dev.pizzasmp.economy.MarketOperationJournal;
+import dev.pizzasmp.economy.MarketOperationRecoveryPolicy;
+import dev.pizzasmp.economy.SafeInventoryDelivery;
+import dev.pizzasmp.economy.ShopPricePolicy;
 import org.bukkit.GameMode;
 import org.bukkit.Difficulty;
 import org.bukkit.GameRule;
@@ -291,11 +301,31 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         "POWDER_SNOW","SCULK_SHRIEKER","BUNDLE","FARMLAND","DIRT_PATH"
     );
 
+    private volatile java.util.Set<String> ecobotConfigExcluded;
+
+    /**
+     * Items this network does not allow yet (economy.restricted-materials), such as End items while no End is
+     * open. The shop refuses them and the ecobot never lists or orders them.
+     */
+    private java.util.Set<String> ecobotConfigExcluded() {
+        java.util.Set<String> cached = this.ecobotConfigExcluded;
+        if (cached == null) {
+            java.util.Set<String> names = new java.util.HashSet<>();
+            for (String name : this.settings.getStringList("economy.restricted-materials")) {
+                Material m = Material.matchMaterial(name);
+                if (m != null) names.add(m.name());
+            }
+            this.ecobotConfigExcluded = cached = java.util.Set.copyOf(names);
+        }
+        return cached;
+    }
+
     // True for materials the EcoBot must skip (non-vanilla / not survival-obtainable).
     private boolean isEcobotExcluded(Material mat) {
         if (mat == null || !mat.isItem() || mat.isLegacy()) return true;
         String k = mat.name();
         return ECOBOT_EXCLUDED_KEYS.contains(k)
+            || this.ecobotConfigExcluded().contains(k)
             || k.endsWith("_SPAWN_EGG")
             || k.startsWith("INFESTED_")
             || k.startsWith("LEGACY_");
@@ -468,6 +498,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private static final String BRAND_PRIMARY_TOKEN = "&#00BFFF";   // literal that marks "primary colour" in code
     private NamespacedKey uiActionKey;
     private NamespacedKey sellWorthMarkerKey;
+    private VanillaItemSanitizer vanillaItemSanitizer;
     private final Set<UUID> sellGuiViewers = ConcurrentHashMap.newKeySet();
     private long lastAdaptiveSaveMs = System.currentTimeMillis();
 
@@ -651,6 +682,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private boolean rtpDebug;
     private volatile boolean autoEcoPaused = false;
     private volatile boolean shuttingDown = false;
+    private EconomyRuntimeProfile runtimeProfile = EconomyRuntimeProfile.FULL;
+    private EconomyAccessPolicy economyAccessPolicy = new EconomyAccessPolicy(List.of());
+    private boolean fullRuntimeStarted;
+    private volatile boolean economyRuntimeReady;
     // World access control (/admin console). Persisted under world_access.* in config.yml.
     private final java.util.Set<String> disabledWorlds = ConcurrentHashMap.newKeySet();
     private final java.util.Set<String> rtpDisabledWorlds = ConcurrentHashMap.newKeySet();
@@ -696,26 +731,35 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private volatile boolean mariadbDriverLoaded;
     private volatile com.zaxxer.hikari.HikariDataSource dataSource;
     private volatile boolean dbHealthy = true;
+    private volatile MarketOperationJournal marketOperationJournal;
+    private volatile MarketOperationCoordinator marketOperationCoordinator;
+    private final java.util.Set<UUID> journaledSalesInFlight = ConcurrentHashMap.newKeySet();
+    /** Staff test mode (/eco freebuy): shop, PvP shop and Server auction purchases cost nothing; audited as free. */
+    private final java.util.Set<UUID> freeBuyers = ConcurrentHashMap.newKeySet();
+
+    private boolean freeBuy(Player player) {
+        return player != null && this.freeBuyers.contains(player.getUniqueId()) && player.hasPermission("pizzasmp.admin.eco");
+    }
     private volatile List<String> cachedNetworkPlayerNames = List.of();
     private volatile long cachedNetworkPlayerNamesLoadedAt;
     private TaskHandle notificationPollTask;
-    private static final List<SettingDefinition> SETTINGS_DEFINITIONS = List.of(new SettingDefinition("public_chat", "Public Chat", Material.OAK_SIGN, 0, 1, true, List.of(), false, null), new SettingDefinition("private_messages", "Private Messages", Material.SPRUCE_SIGN, 1, 1, true, List.of(), false, null), new SettingDefinition("chat_server_messages", "Chat Server Messages", Material.BIRCH_SIGN, 2, 1, true, List.of(), false, null), new SettingDefinition("hotbar_server_messages", "Hotbar Server Messages", Material.JUNGLE_SIGN, 3, 1, true, List.of(), false, null), new SettingDefinition("pay_players", "Pay Players", Material.ACACIA_SIGN, 4, 1, true, List.of(), false, null), new SettingDefinition("bounty_alerts", "Bounty Alerts", Material.DARK_OAK_SIGN, 5, 1, true, List.of(), false, null), new SettingDefinition("auction_alerts", "Auction Alerts", Material.MANGROVE_SIGN, 6, 1, true, List.of(), false, null), new SettingDefinition("fast_crystals", "Fast Crystals", Material.END_CRYSTAL, 9, 1, false, List.of("Hide crystal explosion effects", "for faster crystal PvP"), false, null), new SettingDefinition("totem_particles", "Totem Particles", Material.TOTEM_OF_UNDYING, 10, 1, true, List.of("Off hides the particles of other players' totem pops.", "Totem sounds and your own pop animation stay."), false, null), new SettingDefinition("explosion_particles", "Explosion Particles", Material.TNT, 11, 1, true, List.of(), false, null), new SettingDefinition("explosion_sounds", "Explosion Sounds", Material.GOAT_HORN, 12, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_buy", "Quick Auction Buy", Material.GOLD_INGOT, 13, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_sell", "Quick Auction Sell", Material.EMERALD, 8, 1, false, List.of("List instantly with no confirm screen"), false, null), new SettingDefinition("chainmail_on_respawn", "Chainmail on Respawn", Material.CHAINMAIL_HELMET, 14, 1, true, List.of(), false, null), new SettingDefinition("mob_spawns", "Mob Spawns", Material.ZOMBIE_HEAD, 15, 1, true, List.of("Whether mobs spawn near you", "(hostile, passive, all types)"), false, null), new SettingDefinition("fast_anchor", "Fast Anchor", Material.RESPAWN_ANCHOR, 16, 1, false, List.of("Hide anchor explosion effects", "for faster anchor PvP"), false, null), new SettingDefinition("player_visibility", "Player Visibility", Material.PLAYER_HEAD, 18, 1, true, List.of(), false, null), new SettingDefinition("scoreboard_toggle", "Scoreboard Toggle", Material.LECTERN, 19, 1, true, List.of(), false, null), new SettingDefinition("tpa_confirm_menus", "TPA Confirm Menus", Material.FEATHER, 20, 1, true, List.of(), false, null), new SettingDefinition("music_sound_notifications", "Music/Sound Notifications", Material.MUSIC_DISC_MELLOHI, 21, 1, true, List.of(), false, null), new SettingDefinition("order_notifications", "Order Notifications", Material.PAPER, 22, 1, true, List.of(), false, null), new SettingDefinition("tpa_auto_accept", "Auto Accept TPAs", Material.SLIME_BALL, 23, 1, false, List.of("Instantly accept incoming", "TPA requests (/tpauto)"), false, null), new SettingDefinition("tpa_requests", "TPA Requests", Material.ENDER_PEARL, 28, 1, true, List.of(), false, null), new SettingDefinition("tpahere_requests", "TPAHere Requests", Material.ENDER_EYE, 29, 1, true, List.of(), false, null), new SettingDefinition("team_invites", "Team Invites", Material.SHIELD, 30, 1, true, List.of(), false, null), new SettingDefinition("payments", "Payments", Material.EMERALD, 31, 1, true, List.of(), false, null), new SettingDefinition("team_chat", "Team Chat", Material.BELL, 32, 1, false, List.of(), false, null), new SettingDefinition("worth_display", "Worth Display", Material.BOOK, 33, 1, true, List.of(), false, null), new SettingDefinition("night_vision", "Night Vision", Material.GOLDEN_CARROT, 17, 1, false, List.of(), false, null), new SettingDefinition("show_money", "Show Money", Material.SUNFLOWER, 24, 1, true, List.of(), false, null), new SettingDefinition("show_shards", "Show Shards", Material.AMETHYST_SHARD, 25, 1, true, List.of(), false, null), new SettingDefinition("show_kills", "Show Kills", Material.NETHERITE_SWORD, 26, 1, true, List.of(), false, null), new SettingDefinition("show_deaths", "Show Deaths", Material.SKELETON_SKULL, 27, 1, true, List.of(), false, null), new SettingDefinition("show_playtime", "Show Playtime", Material.CLOCK, 34, 1, true, List.of(), false, null), new SettingDefinition("auction_overflow", "Auction Overflow", Material.HOPPER, 7, 1, true, List.of("Drop bought items when your", "inventory is full instead of blocking"), false, null), new SettingDefinition("search_spell_check", "Search Spell Check", Material.NAME_TAG, 35, 1, true, List.of("Auto-correct typos in", "AH and orders search"), false, null), new SettingDefinition("money_nametags", "Money Nametags", Material.GOLD_NUGGET, 36, 1, true, List.of("Show each player's balance", "on a line below their name"), false, null));
+    private static final List<SettingDefinition> SETTINGS_DEFINITIONS = List.of(new SettingDefinition("public_chat", "Public Chat", Material.OAK_SIGN, 0, 1, true, List.of(), false, null), new SettingDefinition("private_messages", "Private Messages", Material.SPRUCE_SIGN, 1, 1, true, List.of(), false, null), new SettingDefinition("chat_server_messages", "Chat Server Messages", Material.BIRCH_SIGN, 2, 1, true, List.of(), false, null), new SettingDefinition("hotbar_server_messages", "Hotbar Server Messages", Material.JUNGLE_SIGN, 3, 1, true, List.of(), false, null), new SettingDefinition("pay_players", "Pay Players", Material.ACACIA_SIGN, 4, 1, true, List.of(), false, null), new SettingDefinition("bounty_alerts", "Bounty Alerts", Material.DARK_OAK_SIGN, 5, 1, true, List.of(), false, null), new SettingDefinition("auction_alerts", "Auction Alerts", Material.MANGROVE_SIGN, 6, 1, true, List.of(), false, null), new SettingDefinition("fast_crystals", "Fast Crystals", Material.END_CRYSTAL, 9, 1, false, List.of("Crystals you hit vanish at once", "and their explosion effects are hidden"), false, null), new SettingDefinition("totem_particles", "Totem Particles", Material.TOTEM_OF_UNDYING, 10, 1, true, List.of("Off hides the particles of other players' totem pops.", "Totem sounds and your own pop animation stay."), false, null), new SettingDefinition("explosion_particles", "Explosion Particles", Material.TNT, 11, 1, true, List.of(), false, null), new SettingDefinition("explosion_sounds", "Explosion Sounds", Material.GOAT_HORN, 12, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_buy", "Quick Auction Buy", Material.GOLD_INGOT, 13, 1, true, List.of(), false, null), new SettingDefinition("quick_auction_sell", "Quick Auction Sell", Material.EMERALD, 8, 1, false, List.of("List instantly with no confirm screen"), false, null), new SettingDefinition("chainmail_on_respawn", "Chainmail on Respawn", Material.CHAINMAIL_HELMET, 14, 1, true, List.of(), false, null), new SettingDefinition("mob_spawns", "Mob Spawns", Material.ZOMBIE_HEAD, 15, 1, true, List.of("Whether mobs spawn near you", "(hostile, passive, all types)"), false, null), new SettingDefinition("fast_anchor", "Fast Anchor", Material.RESPAWN_ANCHOR, 16, 1, false, List.of("Hide anchor explosion effects", "for faster anchor PvP"), false, null), new SettingDefinition("player_visibility", "Player Visibility", Material.PLAYER_HEAD, 18, 1, true, List.of(), false, null), new SettingDefinition("scoreboard_toggle", "Scoreboard Toggle", Material.LECTERN, 19, 1, true, List.of(), false, null), new SettingDefinition("tpa_confirm_menus", "TPA Confirm Menus", Material.FEATHER, 20, 1, true, List.of(), false, null), new SettingDefinition("music_sound_notifications", "Music/Sound Notifications", Material.MUSIC_DISC_MELLOHI, 21, 1, true, List.of(), false, null), new SettingDefinition("order_notifications", "Order Notifications", Material.PAPER, 22, 1, true, List.of(), false, null), new SettingDefinition("tpa_auto_accept", "Auto Accept TPAs", Material.SLIME_BALL, 23, 1, false, List.of("Instantly accept incoming", "TPA requests (/tpauto)"), false, null), new SettingDefinition("tpa_requests", "TPA Requests", Material.ENDER_PEARL, 28, 1, true, List.of(), false, null), new SettingDefinition("tpahere_requests", "TPAHere Requests", Material.ENDER_EYE, 29, 1, true, List.of(), false, null), new SettingDefinition("team_invites", "Team Invites", Material.SHIELD, 30, 1, true, List.of(), false, null), new SettingDefinition("payments", "Payments", Material.EMERALD, 31, 1, true, List.of(), false, null), new SettingDefinition("team_chat", "Team Chat", Material.BELL, 32, 1, false, List.of(), false, null), new SettingDefinition("worth_display", "Worth Display", Material.BOOK, 33, 1, true, List.of(), false, null), new SettingDefinition("night_vision", "Night Vision", Material.GOLDEN_CARROT, 17, 1, false, List.of(), false, null), new SettingDefinition("show_money", "Show Money", Material.SUNFLOWER, 24, 1, true, List.of(), false, null), new SettingDefinition("show_shards", "Show Shards", Material.AMETHYST_SHARD, 25, 1, true, List.of(), false, null), new SettingDefinition("show_kills", "Show Kills", Material.NETHERITE_SWORD, 26, 1, true, List.of(), false, null), new SettingDefinition("show_deaths", "Show Deaths", Material.SKELETON_SKULL, 27, 1, true, List.of(), false, null), new SettingDefinition("show_playtime", "Show Playtime", Material.CLOCK, 34, 1, true, List.of(), false, null), new SettingDefinition("auction_overflow", "Auction Overflow", Material.HOPPER, 7, 1, true, List.of("Drop bought items when your", "inventory is full instead of blocking"), false, null), new SettingDefinition("search_spell_check", "Search Spell Check", Material.NAME_TAG, 35, 1, true, List.of("Auto-correct typos in", "AH and orders search"), false, null), new SettingDefinition("money_nametags", "Money Nametags", Material.GOLD_NUGGET, 36, 1, true, List.of("Show each player's balance", "on a line below their name"), false, null));
     private static final List<ShopEntry> END_CATEGORY_ITEMS = List.of(
         new ShopEntry("ender_chest",        "Ender Chest",        Material.ENDER_CHEST,        2500.0,  1, List.of()),
-        new ShopEntry("ender_pearl",         "Ender Pearl",        Material.ENDER_PEARL,        75.0,    1, List.of()),
+        new ShopEntry("ender_pearl",         "Ender Pearl",        Material.ENDER_PEARL,        300.0,   1, List.of()),
         new ShopEntry("end_stone",            "End Stone",          Material.END_STONE,          8.0,     1, List.of()),
-        new ShopEntry("dragons_breath",      "Dragon's Breath",   Material.DRAGON_BREATH,      1000.0,  1, List.of()),
+        new ShopEntry("dragons_breath",      "Dragon's Breath",   Material.DRAGON_BREATH,      20000.0, 1, List.of()),
         new ShopEntry("end_rod",              "End Rod",            Material.END_ROD,            100.0,   1, List.of()),
         new ShopEntry("chorus_fruit",         "Chorus Fruit",       Material.CHORUS_FRUIT,       108.0,   1, List.of()),
         new ShopEntry("popped_chorus_fruit",  "Popped Chorus Fruit",Material.POPPED_CHORUS_FRUIT,24.0,   1, List.of()),
         new ShopEntry("shulker_shell",        "Shulker Shell",      Material.SHULKER_SHELL,      350.0,   1, List.of()),
         new ShopEntry("shulker_box",          "Shulker Box",        Material.SHULKER_BOX,        800.0,   1, List.of()));
     private static final List<ShopEntry> NETHER_CATEGORY_ITEMS = List.of(
-        new ShopEntry("blaze_rod",       "Blaze Rod",       Material.BLAZE_ROD,       150.0,  1, List.of()),
+        new ShopEntry("blaze_rod",       "Blaze Rod",       Material.BLAZE_ROD,       500.0,  1, List.of()),
         new ShopEntry("nether_wart",     "Nether Wart",     Material.NETHER_WART,     96.0,   1, List.of()),
         new ShopEntry("glowstone_dust",  "Glowstone Dust",  Material.GLOWSTONE_DUST,  15.0,   1, List.of()),
         new ShopEntry("magma_cream",     "Magma Cream",     Material.MAGMA_CREAM,     96.0,   1, List.of()),
-        new ShopEntry("ghast_tear",      "Ghast Tear",      Material.GHAST_TEAR,      350.0,  1, List.of()),
+        new ShopEntry("ghast_tear",      "Ghast Tear",      Material.GHAST_TEAR,      1000.0, 1, List.of()),
         new ShopEntry("nether_quartz",   "Nether Quartz",   Material.QUARTZ,          30.0,   1, List.of()),
         new ShopEntry("soul_sand",       "Soul Sand",       Material.SOUL_SAND,       50.0,   1, List.of()),
         new ShopEntry("magma_block",     "Magma Block",     Material.MAGMA_BLOCK,     35.0,   1, List.of()),
@@ -726,32 +770,29 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         new ShopEntry("respawn_anchor",      "Respawn Anchor",     Material.RESPAWN_ANCHOR,     1000.0,  1, List.of()),
         new ShopEntry("glowstone",           "Glowstone",          Material.GLOWSTONE,          100.0,   1, List.of()),
         new ShopEntry("totem",               "Totem of Undying",   Material.TOTEM_OF_UNDYING,   1500.0,  1, List.of()),
-        new ShopEntry("ender_pearl",         "Ender Pearl",        Material.ENDER_PEARL,        75.0,    1, List.of()),
+        new ShopEntry("ender_pearl",         "Ender Pearl",        Material.ENDER_PEARL,        300.0,   1, List.of()),
         new ShopEntry("golden_apple",        "Golden Apple",       Material.GOLDEN_APPLE,       250.0,   1, List.of()),
         new ShopEntry("bottle_o_enchanting", "XP Bottle",          Material.EXPERIENCE_BOTTLE,  100.0,   1, List.of()),
         new ShopEntry("elytra",              "Elytra",             Material.ELYTRA,             1000000.0,1, List.of()));
     private static final List<ShopEntry> GEAR_CATEGORY_ITEMS_P2 = List.of(
-        new ShopEntry("firework_rocket",     "Firework Rocket",    Material.FIREWORK_ROCKET,    50.0,    64, List.of("§7Flight Duration 3")),
+        new ShopEntry("firework_rocket",     "Firework Rocket",    Material.FIREWORK_ROCKET,    256.0,   64, List.of("§7Flight Duration 3")),
         new ShopEntry("diamond_sword",       "Diamond Sword",      Material.DIAMOND_SWORD,      10000.0,  1, List.of()),
         new ShopEntry("diamond_pickaxe",     "Diamond Pickaxe",    Material.DIAMOND_PICKAXE,    10000.0,  1, List.of()),
         new ShopEntry("netherite_sword",     "Netherite Sword",    Material.NETHERITE_SWORD,    300000.0,  1, List.of()),
         new ShopEntry("netherite_pickaxe",   "Netherite Pickaxe",  Material.NETHERITE_PICKAXE,  300000.0,  1, List.of()),
         new ShopEntry("netherite_axe",       "Netherite Axe",      Material.NETHERITE_AXE,      250000.0,  1, List.of()),
-        new ShopEntry("amethyst_drill",      "✦ Amethyst Pickaxe", Material.AMETHYST_SHARD,     1500000.0, 1, List.of()),
-        // amethyst_sellaxe REMOVED: the aAmethyst sell-axe sells via EconomyShopGUI/ShopGUIPlus hooks
-        // (not installed here) and meanwhile clears chests + setDropItems(false) -> destroys items for $0.
-        // Replaced its slot with the Amethyst Shovel (already fully wired in code) so the page stays full.
-        new ShopEntry("amethyst_multitool",  "✦ Amethyst Shovel",  Material.AMETHYST_SHARD,     1500000.0, 1, List.of()),
-        new ShopEntry("amethyst_treechopper","✦ Amethyst Axe",     Material.AMETHYST_SHARD,     1500000.0, 1, List.of()));
+        new ShopEntry("amethyst_drill",      "\u2726 Amethyst Pickaxe", Material.AMETHYST_SHARD,     1500000.0, 1, List.of()),
+        new ShopEntry("amethyst_multitool",  "\u2726 Amethyst Shovel",  Material.AMETHYST_SHARD,     1500000.0, 1, List.of()),
+        new ShopEntry("amethyst_treechopper","\u2726 Amethyst Axe",     Material.AMETHYST_SHARD,     1500000.0, 1, List.of()));
     private static final List<ShopEntry> FOOD_CATEGORY_ITEMS = List.of(
-        new ShopEntry("potato",                 "Potato",                Material.POTATO,                96.0,  64, List.of()),
-        new ShopEntry("sweet_berries",          "Sweet Berries",         Material.SWEET_BERRIES,         50.0,  64, List.of()),
-        new ShopEntry("melon_slice",            "Melon Slice",           Material.MELON_SLICE,           36.0,  64, List.of()),
-        new ShopEntry("carrot",                 "Carrot",                Material.CARROT,                96.0,  64, List.of()),
-        new ShopEntry("apple",                  "Apple",                 Material.APPLE,                 25.0,  64, List.of()),
-        new ShopEntry("cooked_chicken",         "Cooked Chicken",        Material.COOKED_CHICKEN,        48.0,  64, List.of()),
-        new ShopEntry("cooked_beef",            "Steak",                 Material.COOKED_BEEF,           35.0,  64, List.of()),
-        new ShopEntry("golden_carrot",          "Golden Carrot",         Material.GOLDEN_CARROT,         120.0, 64, List.of()),
+        new ShopEntry("potato",                 "Potato",                Material.POTATO,                256.0, 64, List.of()),
+        new ShopEntry("sweet_berries",          "Sweet Berries",         Material.SWEET_BERRIES,         256.0, 64, List.of()),
+        new ShopEntry("melon_slice",            "Melon Slice",           Material.MELON_SLICE,           256.0, 64, List.of()),
+        new ShopEntry("carrot",                 "Carrot",                Material.CARROT,                256.0, 64, List.of()),
+        new ShopEntry("apple",                  "Apple",                 Material.APPLE,                 256.0, 64, List.of()),
+        new ShopEntry("cooked_chicken",         "Cooked Chicken",        Material.COOKED_CHICKEN,        256.0, 64, List.of()),
+        new ShopEntry("cooked_beef",            "Steak",                 Material.COOKED_BEEF,           256.0, 64, List.of()),
+        new ShopEntry("golden_carrot",          "Golden Carrot",         Material.GOLDEN_CARROT,         256.0, 64, List.of()),
         new ShopEntry("enchanted_golden_apple", "Enchanted Golden Apple",Material.ENCHANTED_GOLDEN_APPLE,1000000.0, 1,  List.of()));
     private static final Map<String, Integer> SHARD_CRATE_PRICES = Map.of("common", 200, "amethyst", 4500, "crimson", 2500, "prime", 2000);
     // Direct-buy shard shop items (key -> shard price).
@@ -926,6 +967,21 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.duelReturnLocationKey = new NamespacedKey((Plugin)this, "duel_return_location");
         this.hubLeaderboardKindKey = new NamespacedKey((Plugin)this, "hub_leaderboard_kind");
         this.settings = this.getConfig();
+        this.vanillaItemSanitizer = new VanillaItemSanitizer(this, this::auditDestroyedItem);
+        // Off when another plugin owns inventory enforcement: the shop and /sell still refuse illegal items.
+        if (this.settings.getBoolean("item-sanitizer.enabled", true)) this.vanillaItemSanitizer.start();
+        else this.getLogger().info("[item-sanitizer] inventory sweeps off (item-sanitizer.enabled: false); sales still check items");
+        this.runtimeProfile = EconomyRuntimeProfile.parse(this.settings.getString("runtime.profile"))
+            .orElseThrow(() -> new IllegalStateException("Unknown SMP-Core runtime.profile"));
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            this.economyAccessPolicy = new EconomyAccessPolicy(this.settings.getStringList("economy.allowed-uuids"));
+            if (!this.economyAccessPolicy.configured()) {
+                this.getLogger().warning("Economy player access is closed: economy.allowed-uuids is empty or invalid.");
+            }
+            this.enableEconomyRuntime();
+            return;
+        }
+        this.fullRuntimeStarted = true;
         this.chatItemSpriteComponents = this.loadChatItemSpriteComponents();
         for (Player online : Bukkit.getOnlinePlayers()) {
             this.chatKnownPlayerNames.put(online.getName().toLowerCase(Locale.ROOT), online.getName());
@@ -1073,9 +1129,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (Bukkit.getPluginManager().getPlugin("ProtocolLib") != null) {
             this.registerPvpOptimizationListener();
             this.registerWorthDisplayListener();
+            new FastCrystals(this, id -> this.isSettingEnabledCached(id, "fast_crystals")).register();
         }
     }
     public void onDisable() {
+        if (!this.fullRuntimeStarted) {
+            this.disableEconomyRuntime();
+            return;
+        }
         this.notificationPollingActive = false;
         this.notificationLifecycleGeneration = this.notificationGenerationSequence.incrementAndGet();
         this.notificationSessionGenerations.clear();
@@ -1185,6 +1246,856 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.duelBorderApplied.clear();
         this.duelPreviousWorldBorders.clear();
     }
+    /** Reuses the canonical economy without installing a second player-state owner. */
+    private void enableEconomyRuntime() {
+        if (this.settings.getBoolean("sync.enabled", true) || this.shardsEnabled()
+                || this.usesFileStorage()) {
+            throw new IllegalStateException("Economy profile requires shared SQL, sync.enabled=false and shards.enabled=false");
+        }
+        this.settings.set("chat.intercept_async_chat", false);
+        this.settings.set("chat.global_chat_enabled", false);
+        this.settings.set("chat.icon-aliases-enabled", false);
+        java.util.List<String> unknownFeatures = EconomyRuntimeProfile.configureFeatures(this.settings.getStringList("economy.features"));
+        if (!unknownFeatures.isEmpty()) this.getLogger().warning("Unknown economy.features ignored: " + unknownFeatures);
+        this.settings.set("hud.sidebar_enabled", EconomyRuntimeProfile.featureEnabled("hud"));
+        this.loadBranding();
+        this.marketOperationJournal = new MarketOperationJournal(this::openSyncConnection);
+        this.marketOperationCoordinator = new MarketOperationCoordinator(this.marketOperationJournal, this::runAsyncTask);
+        this.ensureDataSource();
+        this.loadShopConfig();
+        this.loadSellConfig();
+        this.loadWorthConfig();
+        this.setupEconomy();
+        if (!(this.economy instanceof PizzaEconomy)) {
+            throw new IllegalStateException("Economy profile requires the canonical PizzaEconomy provider and Vault API");
+        }
+        for (String command : this.runtimeProfile.commandRootsToRegister(this.getDescription().getCommands().keySet())) {
+            this.registerCommand(command, this);
+        }
+        this.releaseUnservedCommands();
+        java.util.Set<String> registered = new java.util.HashSet<>();
+        for (java.lang.reflect.Method method : PizzaNetworkCore.class.getDeclaredMethods()) {
+            if (!EconomyRuntimeProfile.economyEventHandlers().contains(method.getName())) continue;
+            EventHandler annotation = method.getAnnotation(EventHandler.class);
+            if (annotation == null || method.getParameterCount() != 1
+                    || !org.bukkit.event.Event.class.isAssignableFrom(method.getParameterTypes()[0])) {
+                throw new IllegalStateException("Invalid economy event binding: " + method.getName());
+            }
+            @SuppressWarnings("unchecked")
+            Class<? extends org.bukkit.event.Event> eventType =
+                (Class<? extends org.bukkit.event.Event>)method.getParameterTypes()[0];
+            Bukkit.getPluginManager().registerEvent(eventType, this, annotation.priority(), (listener, event) -> {
+                if (!eventType.isInstance(event)) return;
+                try { method.invoke(this, event); }
+                catch (java.lang.reflect.InvocationTargetException ex) {
+                    throw new org.bukkit.event.EventException(ex.getCause());
+                } catch (ReflectiveOperationException ex) { throw new org.bukkit.event.EventException(ex); }
+            }, this, annotation.ignoreCancelled());
+            registered.add(method.getName());
+        }
+        if (!registered.equals(EconomyRuntimeProfile.economyEventHandlers())) {
+            throw new IllegalStateException("Canonical economy event bindings are incomplete");
+        }
+        Bukkit.getPluginManager().registerEvents(new Listener() {
+            @EventHandler public void join(PlayerJoinEvent event) { economyPlayerJoined(event.getPlayer()); }
+            @EventHandler public void quit(PlayerQuitEvent event) { economyPlayerLeft(event.getPlayer()); }
+        }, this);
+        this.runAsyncTask(() -> {
+            try (Connection c = this.openSyncConnection(); java.sql.Statement st = c.createStatement()) {
+                for (String probe : List.of(
+                        "SELECT uuid, username FROM players LIMIT 0",
+                        "SELECT uuid, money FROM balances LIMIT 0",
+                        "SELECT uuid, orders_created, orders_fulfilled FROM player_stats LIMIT 0",
+                        "SELECT uuid, settings_blob FROM player_settings LIMIT 0",
+                        "SELECT ignorer_uuid, ignored_uuid FROM player_ignores LIMIT 0",
+                        "SELECT follower_uuid, target_uuid, can_pay FROM follows LIMIT 0",
+                        "SELECT id, seller_uuid, buyer_uuid, lock_operation_id, item_blob, item_key, price, status, expires_at, created_at, updated_at FROM auction_listings LIMIT 0",
+                        "SELECT id, recipient_uuid, listing_id, amount, claimed FROM auction_payouts LIMIT 0",
+                        "SELECT id, create_operation_id, creator_uuid, item_key, amount_total, amount_filled, amount_reserved, unit_price, status, expires_at FROM order_listings LIMIT 0",
+                        "SELECT id, operation_id, lock_operation_id, order_id, fulfiller_uuid, amount, payout, item_blob, claimed FROM order_deliveries LIMIT 0",
+                        "SELECT id, uuid, item_blob, lock_operation_id FROM player_mailbox LIMIT 0",
+                        "SELECT operation_id, player_uuid, operation_kind, item_key, item_count, total_price, item_payload, request_sha256, phase, backend_connection_id, pre_revision, pre_digest, post_revision, post_digest, review_from_phase, gateway_terminal_ack, gateway_terminal_forgotten, market_limit FROM economy_market_operations LIMIT 0",
+                        "SELECT player_uuid, player_name, event_type, item_key, amount, unit_price, total_price, extra_info, server_name FROM transaction_audit_log LIMIT 0",
+                        "SELECT player_uuid, player_name, command, server_name FROM command_log LIMIT 0",
+                        "SELECT id, recipient_uuid, message, action, expires_at FROM network_player_notifications LIMIT 0")) {
+                    try (ResultSet ignored = st.executeQuery(probe)) { }
+                }
+                if (!this.shuttingDown) {
+                    this.economyRuntimeReady = true;
+                    this.notificationPollTask = this.runAsyncRepeatingTask(this::pollPendingPlayerNotifications, 20L, 20L);
+                    PlatformScheduler.globalNow(this, this::startEconomyFeatures);
+                    PlatformScheduler.globalNow(this, () -> {
+                        if (!this.shuttingDown) for (Player player : Bukkit.getOnlinePlayers()) this.economyPlayerJoined(player);
+                    });
+                }
+            } catch (SQLException ex) {
+                this.getLogger().severe("Economy schema is not ready; commands remain unavailable.");
+            }
+        });
+        this.startDbHealthCheck();
+        if (Bukkit.getPluginManager().getPlugin("ProtocolLib") != null) {
+            this.registerWorthDisplayListener();
+            // Fast crystals and anchors, totem and explosion particles and sounds (per-player packet filters).
+            this.registerPvpOptimizationListener();
+            new FastCrystals(this, id -> this.isSettingEnabledCached(id, "fast_crystals")).register();
+        }
+        this.getLogger().info("SMP-Core economy profile enabled; player-state and maintenance services are external."
+            + (EconomyRuntimeProfile.enabledFeatures().isEmpty() ? "" : " Features: " + EconomyRuntimeProfile.enabledFeatures()));
+    }
+
+    /**
+     * Bukkit registers every command in plugin.yml, so the economy profile would otherwise hold names it never
+     * serves (/tpa, /invsee, /rtp...) and refuse them. Those names are removed here and handed to another plugin
+     * that declares them.
+     */
+    private void releaseUnservedCommands() {
+        org.bukkit.command.CommandMap map = Bukkit.getCommandMap();
+        Map<String, org.bukkit.command.Command> known = map.getKnownCommands();
+        String namespace = this.getName().toLowerCase(Locale.ROOT);
+        List<String> released = new ArrayList<>();
+        List<String> releasedLabels = new ArrayList<>();
+        for (String root : this.getDescription().getCommands().keySet()) {
+            if (this.runtimeProfile.allowsCommand(root)) continue;
+            org.bukkit.command.PluginCommand command = this.getCommand(root);
+            if (command == null) continue;
+            List<String> labels = new ArrayList<>();
+            labels.add(command.getName());
+            labels.addAll(command.getAliases());
+            for (String raw : labels) {
+                String label = raw.toLowerCase(Locale.ROOT);
+                releasedLabels.add(label);
+                known.remove(namespace + ":" + label, command);
+                if (!known.remove(label, command)) continue;
+                // Hand the label to another plugin's command of that name, else to vanilla's (minecraft:msg and
+                // friends are not plugin commands); without this /msg, /tell and /r vanished from the server.
+                org.bukkit.command.Command heir = null;
+                for (Map.Entry<String, org.bukkit.command.Command> entry : List.copyOf(known.entrySet())) {
+                    if (entry.getKey().endsWith(":" + label) && entry.getValue() instanceof org.bukkit.command.PluginCommand other
+                            && other.getPlugin() != this) {
+                        heir = other;
+                        break;
+                    }
+                }
+                if (heir == null) heir = known.get("minecraft:" + label);
+                if (heir != null) known.put(label, heir);
+            }
+            command.unregister(map);
+            released.add(root);
+        }
+        if (!released.isEmpty()) this.getLogger().info("Economy profile released " + released.size() + " commands it does not serve.");
+        // Vanilla commands may join the map after this plugin enables: once the server has started, any released
+        // label still unclaimed goes to its vanilla command.
+        PlatformScheduler.globalLater(this, () -> {
+            Map<String, org.bukkit.command.Command> now = Bukkit.getCommandMap().getKnownCommands();
+            List<String> restored = new ArrayList<>();
+            for (String label : releasedLabels) {
+                org.bukkit.command.Command vanilla = now.get("minecraft:" + label);
+                if (!now.containsKey(label) && vanilla != null) { now.put(label, vanilla); restored.add(label); }
+            }
+            if (!restored.isEmpty()) {
+                this.getLogger().info("Released labels back to vanilla: " + restored);
+                for (Player online : Bukkit.getOnlinePlayers()) PlatformScheduler.entityNow(this, online, online::updateCommands, null);
+            }
+        }, 1L);
+    }
+
+    /** Background work for the enabled economy features, once the schema is confirmed. */
+    private void startEconomyFeatures() {
+        if (this.shuttingDown) return;
+        if (EconomyRuntimeProfile.featureEnabled("stats")) this.startPlaytimeAndAfkTask();
+        this.runAsyncRepeatingTask(this::refreshOrderAverageWorth, 40L, 400L);
+        if (EconomyRuntimeProfile.featureEnabled("hud")) this.runAsyncRepeatingTask(this::refreshNametagBalances, 20L, 100L);
+        if (EconomyRuntimeProfile.featureEnabled("amethyst"))
+            PlatformScheduler.globalRepeating(this, this::runAmethystExpirySweep, 1200L, 1200L);
+        // Each ecobot pass also waits for its market route (ecobotRouteOpen).
+        if (EconomyRuntimeProfile.featureEnabled("ecobot")) PlatformScheduler.asyncLater(this, this::initAutoEco, 100L);
+    }
+
+    /**
+     * /eco give|take|set|reset <player> [amount]: staff balance changes through the economy provider, so cached
+     * balances stay correct. Every change is in the transaction audit with the actor and the before/after balance.
+     */
+    private void handleEcoCommand(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("pizzasmp.admin.eco")) { sender.sendMessage("§cYou do not have permission."); return; }
+        String usage = "§7Usage: §f/eco <give|take|set|reset> <player> [amount]§7, §f/eco ah <remove <id>|clear <player>> [delete]§7, "
+            + "§f/eco market <shop|auction|orders|sell> <on|off>§7, §f/eco set <sell-multiplier|shop-multiplier> <value>§7, §f/eco shop reload§7, "
+            + "§f/eco freebuy [on|off]";
+        if (args.length >= 1 && this.handleEcoAdmin(sender, args)) return;
+        if (args.length < 2) { sender.sendMessage(usage); return; }
+        String action = args[0].toLowerCase(Locale.ROOT);
+        if (!Set.of("give", "take", "set", "reset").contains(action)) { sender.sendMessage(usage); return; }
+        double amount = 0.0;
+        if (!"reset".equals(action)) {
+            ParsedAmount parsed = args.length < 3 ? null : this.parseCompactAmount(args[2]);
+            if (parsed == null || !Double.isFinite(parsed.value) || parsed.value < 0.0 || parsed.value > 1.0E15) {
+                sender.sendMessage("§cEnter a valid amount, such as 500, 2.5k or 1m.");
+                return;
+            }
+            amount = java.math.BigDecimal.valueOf(parsed.value).setScale(2, java.math.RoundingMode.HALF_UP).doubleValue();
+        }
+        final String target = args[1];
+        final double value = amount;
+        final String actor = sender.getName();
+        final UUID actorId = sender instanceof Player p ? p.getUniqueId() : null;
+        this.runAsyncTask(() -> {
+            String reply;
+            if (!this.economy.hasAccount(target)) {
+                reply = "§cNo economy account for §f" + target + "§c.";
+            } else {
+                double before = this.economy.getBalance(target);
+                double delta = switch (action) {
+                    case "give" -> value;
+                    case "take" -> -Math.min(value, before);
+                    case "set" -> value - before;
+                    default -> -before;
+                };
+                net.milkbowl.vault.economy.EconomyResponse result = delta >= 0.0
+                    ? this.economy.depositPlayer(target, delta) : this.economy.withdrawPlayer(target, -delta);
+                double after = this.economy.getBalance(target);
+                this.logTransactionAudit(actorId == null ? null : actorId.toString(), actor, "ECO_ADMIN_" + action.toUpperCase(Locale.ROOT),
+                    target, 0, value, delta, "target=" + target + ";before=" + before + ";after=" + after + ";ok=" + result.transactionSuccess());
+                reply = result.transactionSuccess()
+                    ? "§7" + target + "'s balance: §f$" + this.fmtMoney(before) + " §7-> §f$" + this.fmtMoney(after)
+                    : "§cBalance change failed: " + result.errorMessage;
+            }
+            final String message = reply;
+            if (sender instanceof Player p) this.runOnPlayerThread(p, () -> p.sendMessage(message));
+            else PlatformScheduler.globalNow(this, () -> sender.sendMessage(message));
+        });
+    }
+
+    /**
+     * Opens a menu. A new page of the menu the player already has open (same size and title, no deposit slots) only
+     * swaps the contents, so the menu does not close and reopen; Bedrock shows every reopen as a flicker.
+     */
+    private void openMenu(Player player, Inventory next) {
+        org.bukkit.inventory.InventoryView view = player.getOpenInventory();
+        Inventory open = view.getTopInventory();
+        if (MenuLock.replaceable(open, view.getTitle(), next)) {
+            open.setContents(next.getContents());
+            return;
+        }
+        player.openInventory(next);
+    }
+
+    /** Completions for /eco, /sell and /ecobot; null for other commands. */
+    private List<String> economyTabComplete(CommandSender sender, String command, String[] args) {
+        java.util.function.BiFunction<String, java.util.Collection<String>, List<String>> match = (typed, options) -> {
+            String prefix = typed == null ? "" : typed.toLowerCase(Locale.ROOT);
+            return options.stream().filter(o -> o.toLowerCase(Locale.ROOT).startsWith(prefix)).sorted().toList();
+        };
+        UUID viewer = sender instanceof Player p ? p.getUniqueId() : null;
+        switch (command) {
+            case "eco" -> {
+                if (!sender.hasPermission("pizzasmp.admin.eco")) return List.of();
+                if (args.length == 1) return match.apply(args[0], FIXED_SUBCOMMANDS.get("eco"));
+                String sub = args[0].toLowerCase(Locale.ROOT);
+                if (Set.of("give", "take", "set", "reset").contains(sub) && args.length == 2) {
+                    List<String> out = new ArrayList<>(this.completeKnownPlayerNames(args[1], viewer));
+                    if ("set".equals(sub)) out.addAll(match.apply(args[1], List.of("sell-multiplier", "shop-multiplier")));
+                    return out;
+                }
+                if (Set.of("give", "take", "set").contains(sub) && args.length == 3) return match.apply(args[2], List.of("100", "1000", "10k", "100k", "1m"));
+                if ("freebuy".equals(sub) && args.length == 2) return match.apply(args[1], List.of("on", "off"));
+                if ("sound".equals(sub) && args.length == 2) return match.apply(args[1], List.of("click", "done", "denied"));
+                if ("sound".equals(sub) && args.length == 3) return match.apply(args[2], List.of("0.6", "0.7", "0.8", "0.9", "1.0", "1.2"));
+                if ("ah".equals(sub)) {
+                    if (args.length == 2) return match.apply(args[1], List.of("remove", "clear"));
+                    if (args.length == 3 && "clear".equalsIgnoreCase(args[1])) return this.completeKnownPlayerNames(args[2], viewer);
+                    if (args.length == 4) return match.apply(args[3], List.of("delete"));
+                }
+                if ("market".equals(sub)) {
+                    if (args.length == 2) return match.apply(args[1], List.of("shop", "auction", "orders", "sell"));
+                    if (args.length == 3) return match.apply(args[2], List.of("on", "off"));
+                }
+                if ("shop".equals(sub) && args.length == 2) return match.apply(args[1], List.of("reload"));
+                return List.of();
+            }
+            case "sell" -> { return args.length == 1 ? match.apply(args[0], List.of("hand", "all")) : List.of(); }
+            case "ecobot" -> {
+                if (!sender.hasPermission("pizzasmp.admin.eco")) return List.of();
+                return args.length == 1 ? match.apply(args[0], FIXED_SUBCOMMANDS.get("ecobot")) : List.of();
+            }
+            default -> { return null; }
+        }
+    }
+
+    /** Market administration under /eco; returns false when the arguments are a balance command. */
+    private boolean handleEcoAdmin(CommandSender sender, String[] args) {
+        String sub = args[0].toLowerCase(Locale.ROOT);
+        switch (sub) {
+            case "sound" -> {
+                // /eco sound <click|done|denied> <pitch> [sound key] [volume]: live, until restart (then config.yml).
+                if (args.length < 3 || !BUY_SOUND_DEFAULTS.containsKey(args[1].toLowerCase(Locale.ROOT))) {
+                    for (String name : List.of("click", "done", "denied")) {
+                        Object[] d = BUY_SOUND_DEFAULTS.get(name);
+                        String base = "economy.sounds." + name + ".";
+                        sender.sendMessage("§7" + name + ": §f" + this.settings.getString(base + "sound", (String) d[0])
+                            + " §7volume §f" + this.settings.getDouble(base + "volume", (Float) d[1])
+                            + " §7pitch §f" + this.settings.getDouble(base + "pitch", (Float) d[2]));
+                    }
+                    sender.sendMessage("§7Usage: §f/eco sound <click|done|denied> <pitch 0.5-2> [sound key] [volume]");
+                    return true;
+                }
+                String name = args[1].toLowerCase(Locale.ROOT);
+                double pitch;
+                try { pitch = Math.max(0.5, Math.min(2.0, Double.parseDouble(args[2]))); }
+                catch (NumberFormatException bad) { sender.sendMessage("§cPitch must be a number from 0.5 to 2."); return true; }
+                String base = "economy.sounds." + name + ".";
+                this.settings.set(base + "pitch", pitch);
+                if (args.length >= 4) this.settings.set(base + "sound", args[3].contains(":") ? args[3] : "minecraft:" + args[3]);
+                if (args.length >= 5) {
+                    try { this.settings.set(base + "volume", Math.max(0.0, Math.min(2.0, Double.parseDouble(args[4])))); }
+                    catch (NumberFormatException ignored) { }
+                }
+                if (sender instanceof Player player) this.playBuySound(player, name);
+                sender.sendMessage("§7" + name + " sound set for this run. To keep it, put §feconomy.sounds." + name
+                    + "§7 in config.yml: sound §f" + this.settings.getString(base + "sound", (String) BUY_SOUND_DEFAULTS.get(name)[0])
+                    + "§7, pitch §f" + pitch + "§7.");
+                return true;
+            }
+            case "freebuy" -> {
+                if (!(sender instanceof Player player)) { sender.sendMessage("§cOnly players can use free buy."); return true; }
+                boolean on = args.length >= 2 ? "on".equalsIgnoreCase(args[1]) : !this.freeBuyers.contains(player.getUniqueId());
+                if (on) this.freeBuyers.add(player.getUniqueId()); else this.freeBuyers.remove(player.getUniqueId());
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ECO_FREEBUY", on ? "ON" : "OFF", 0, 0.0, 0.0, null);
+                player.sendMessage(on ? "§7Free buy §aon§7: shop, PvP shop and Server auction listings cost you nothing. Player listings still charge."
+                    : "§7Free buy §coff§7.");
+                return true;
+            }
+            case "ah" -> {
+                if (args.length < 3) { sender.sendMessage("§7Usage: §f/eco ah remove <listing id> [delete]§7 or §f/eco ah clear <player> [delete]"); return true; }
+                boolean delete = args.length >= 4 && "delete".equalsIgnoreCase(args[3]);
+                String what = args[1].toLowerCase(Locale.ROOT);
+                String target = args[2];
+                this.runAsyncTask(() -> {
+                    List<Long> ids = new ArrayList<>();
+                    try (Connection conn = this.openSyncConnection()) {
+                        if ("remove".equals(what)) {
+                            ids.add(Long.parseLong(target));
+                        } else if ("clear".equals(what)) {
+                            try (PreparedStatement ps = conn.prepareStatement("SELECT al.id FROM auction_listings al JOIN players p ON p.uuid = al.seller_uuid "
+                                    + "WHERE LOWER(p.username) = LOWER(?) AND al.status = 'ACTIVE' AND al.lock_operation_id IS NULL")) {
+                                ps.setString(1, target);
+                                try (ResultSet rs = ps.executeQuery()) { while (rs.next()) ids.add(rs.getLong(1)); }
+                            }
+                        }
+                    } catch (NumberFormatException | SQLException failure) {
+                        this.replyTo(sender, "§cCould not read those listings: " + failure.getMessage());
+                        return;
+                    }
+                    int done = 0;
+                    for (long id : ids) if (this.staffRemoveListing(sender, id, !delete)) done++;
+                    this.replyTo(sender, "§7Removed " + done + " of " + ids.size() + " listing(s); items " + (delete ? "deleted." : "returned to the seller."));
+                });
+                return true;
+            }
+            case "market" -> {
+                if (args.length < 3) { sender.sendMessage("§7Usage: §f/eco market <shop|auction|orders|sell> <on|off>"); return true; }
+                boolean on = "on".equalsIgnoreCase(args[2]) || "true".equalsIgnoreCase(args[2]);
+                List<String> keys = switch (args[1].toLowerCase(Locale.ROOT)) {
+                    case "shop" -> List.of("economy.market.shop-enabled");
+                    case "auction", "ah" -> List.of("economy.market.auction-buy-enabled", "economy.market.auction-list-enabled", "economy.market.auction-cancel-enabled");
+                    case "orders", "order" -> List.of("economy.market.orders-enabled");
+                    case "sell" -> List.of("economy.sell-enabled");
+                    default -> List.of();
+                };
+                if (keys.isEmpty()) { sender.sendMessage("§7Markets: shop, auction, orders, sell."); return true; }
+                for (String key : keys) this.settings.set(key, on);
+                this.saveConfig();
+                this.logTransactionAudit(sender instanceof Player p ? p.getUniqueId().toString() : null, sender.getName(), "ECO_ADMIN_MARKET",
+                    args[1].toLowerCase(Locale.ROOT), 0, 0.0, 0.0, "enabled=" + on);
+                sender.sendMessage("§7" + args[1] + " is now §f" + (on ? "open" : "closed") + "§7.");
+                return true;
+            }
+            case "set" -> {
+                if (args.length < 3 || !Set.of("sell-multiplier", "shop-multiplier", "shop-price-multiplier").contains(args[1].toLowerCase(Locale.ROOT))) return false;
+                double value;
+                try { value = Double.parseDouble(args[2]); } catch (NumberFormatException bad) { sender.sendMessage("§cEnter a number, such as 0.5."); return true; }
+                if (!Double.isFinite(value) || value <= 0.0 || value > 100.0) { sender.sendMessage("§cThe multiplier must be above 0 and at most 100."); return true; }
+                String key = args[1].toLowerCase(Locale.ROOT).startsWith("sell") ? "economy.sell-multiplier" : "economy.shop-price-multiplier";
+                this.settings.set(key, value);
+                this.saveConfig();
+                this.logTransactionAudit(sender instanceof Player p ? p.getUniqueId().toString() : null, sender.getName(), "ECO_ADMIN_SET",
+                    key, 0, value, 0.0, null);
+                sender.sendMessage("§7" + key + " is now §f" + value + "§7.");
+                return true;
+            }
+            case "shop" -> {
+                if (args.length >= 2 && "reload".equalsIgnoreCase(args[1])) {
+                    this.loadShopConfig();
+                    this.loadSellConfig();
+                    sender.sendMessage("§7Shop catalogue and sell prices reloaded.");
+                } else {
+                    sender.sendMessage("§7Usage: §f/eco shop reload");
+                }
+                return true;
+            }
+            default -> { return false; }
+        }
+    }
+
+    /** Takes one active listing off the auction house; the item goes back to the seller's mailbox unless deleted. */
+    private boolean staffRemoveListing(CommandSender actor, long listingId, boolean returnItem) {
+        byte[] blob = null;
+        String seller = null;
+        try (Connection conn = this.openSyncConnection()) {
+            conn.setAutoCommit(false);
+            try (PreparedStatement sel = conn.prepareStatement("SELECT item_blob, seller_uuid FROM auction_listings WHERE id=? AND status='ACTIVE' AND lock_operation_id IS NULL FOR UPDATE");
+                 PreparedStatement upd = conn.prepareStatement("UPDATE auction_listings SET status='REMOVED', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='ACTIVE' AND lock_operation_id IS NULL")) {
+                sel.setLong(1, listingId);
+                try (ResultSet rs = sel.executeQuery()) { if (rs.next()) { blob = rs.getBytes(1); seller = rs.getString(2); } }
+                upd.setLong(1, listingId);
+                if (blob == null || upd.executeUpdate() <= 0) { conn.rollback(); return false; }
+                conn.commit();
+            } finally { conn.setAutoCommit(true); }
+        } catch (SQLException failure) {
+            this.getLogger().warning("[ah] staff removal of listing " + listingId + " failed: " + failure.getMessage());
+            return false;
+        }
+        ItemStack item = this.deserializeItem(blob);
+        UUID sellerId = null;
+        try { sellerId = UUID.fromString(seller); } catch (RuntimeException ignored) { }
+        boolean serverListing = SERVER_UUID.equals(seller);
+        if (returnItem && item != null && sellerId != null && !serverListing) this.mailItem(sellerId, item, "auction listing removed by staff");
+        this.logTransactionAudit(actor instanceof Player p ? p.getUniqueId().toString() : null, actor.getName(), "AH_ADMIN_REMOVE",
+            item == null ? "UNKNOWN" : item.getType().name(), item == null ? 0 : item.getAmount(), 0.0, 0.0,
+            "listing=" + listingId + ";seller=" + seller + ";item_returned=" + (returnItem && !serverListing));
+        this.broadcastAhListingSold(listingId, null);
+        return true;
+    }
+
+    private void replyTo(CommandSender sender, String message) {
+        if (sender instanceof Player p) this.runOnPlayerThread(p, () -> p.sendMessage(message));
+        else PlatformScheduler.globalNow(this, () -> sender.sendMessage(message));
+    }
+
+    /** Economy-profile kill and death counts only; death messages, combat tags and bounties are left alone. */
+    @EventHandler(priority=EventPriority.MONITOR)
+    public void onDeathRecordStats(PlayerDeathEvent e) {
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY) return;
+        Player victim = e.getPlayer();
+        UUID victimId = victim.getUniqueId();
+        Player killer = victim.getKiller();
+        UUID killerId = killer != null && !killer.getUniqueId().equals(victimId) ? killer.getUniqueId() : null;
+        this.runAsyncTask(() -> {
+            this.incrementLongStat(victimId, "deaths", 1L);
+            if (killerId != null) this.incrementLongStat(killerId, "kills", 1L);
+        });
+        this.refreshSidebarSoon(victim);
+        if (killer != null && killerId != null) this.refreshSidebarSoon(killer);
+    }
+
+    private void economyPlayerJoined(Player player) {
+        if (!this.economyRuntimeReady || this.shuttingDown) return;
+        UUID uuid = player.getUniqueId();
+        long generation = this.notificationGenerationSequence.incrementAndGet();
+        this.notificationSessionGenerations.put(uuid, generation);
+        this.chatKnownPlayerNames.put(player.getName().toLowerCase(Locale.ROOT), player.getName());
+        String name = player.getName();
+        // Show the HUD at once with default settings; it is drawn again when the player's settings load.
+        if (this.economyHudFor(player)) {
+            this.networkPrivacy.disableNetworkSidebar(player);
+            this.refreshSidebar(player);
+        }
+        this.runAsyncTask(() -> {
+            this.ensurePlayerRow(uuid, name);
+            Map<String, Boolean> values = this.loadPlayerSettings(uuid);
+            this.runOnPlayerThread(player, () -> {
+                if (player.isOnline() && java.util.Objects.equals(this.notificationSessionGenerations.get(uuid), generation)) {
+                    this.playerSettingsCache.put(uuid, values);
+                    if (this.economyHudFor(player)) this.refreshSidebar(player);
+                }
+            });
+        });
+        this.runAsyncTask(() -> this.reconcileMarketOnJoin(player, generation));
+        this.runPlayerTaskLater(player, () -> {
+            if (this.economyRuntimeReady && player.isOnline()
+                    && java.util.Objects.equals(this.notificationSessionGenerations.get(uuid), generation)) {
+                this.runAsyncTask(() -> this.notifyPendingOrderDeliveries(uuid));
+                this.deliverMailbox(player);
+            }
+        }, 60L);
+    }
+
+    private <T> CompletableFuture<T> economyDbCall(Supplier<T> query) {
+        return CompletableFuture.supplyAsync(query, this::runAsyncTask);
+    }
+
+    /** Reconcile Canopy's durable item snapshot before the gateway releases this join. */
+    private void reconcileMarketOnJoin(Player player, long generation) {
+        MarketOperationJournal journal = this.marketOperationJournal;
+        if (!this.economyRuntimeReady || this.shuttingDown || journal == null || player == null) return;
+        UUID playerId = player.getUniqueId();
+        this.economyDbCall(() -> journal.findUnresolvedForPlayer(playerId)).whenComplete((operation, failure) -> {
+            if (failure != null) {
+                this.getLogger().warning("Could not inspect pending market recovery for " + playerId);
+                return;
+            }
+            this.runPlayerTaskLater(player, () -> {
+                if (!this.economyRecoverySessionCurrent(player, generation)) return;
+                if (MarketOperationJournal.isOrderCreate(operation == null ? null : operation.request().operationKind())
+                        || MarketOperationJournal.isOrderCancel(operation == null ? null : operation.request().operationKind())) {
+                    this.reconcileDatabaseOnlyOrderOperation(player, generation, operation, journal);
+                    return;
+                }
+                RegisteredServiceProvider<InventoryCustody> registration = Bukkit.getServicesManager().getRegistration(InventoryCustody.class);
+                InventoryCustody custody = registration == null ? null : registration.getProvider();
+                if (operation != null) {
+                    if (custody == null) {
+                        this.getLogger().warning("Market operation remains held because Canopy custody is unavailable for " + playerId);
+                        return;
+                    }
+                    this.beginMarketRecovery(player, generation, operation, custody, journal);
+                } else if (custody != null) {
+                    this.reconcileMarketTerminalQueue(player, generation, custody, journal, 0);
+                }
+            }, 1L);
+        });
+    }
+
+    private void reconcileDatabaseOnlyOrderOperation(Player player, long generation,
+            MarketOperationJournal.Operation operation, MarketOperationJournal journal) {
+        if (operation == null || journal == null) return;
+        this.runAsyncTask(() -> {
+            MarketOperationJournal.Operation current = operation;
+            if (current.phase() == MarketOperationJournal.Phase.REFUNDED) {
+                journal.completeAbort(current.request().operationId());
+            } else if (current.phase() == MarketOperationJournal.Phase.PREPARED) {
+                MarketOperationJournal.Status status = MarketOperationJournal.isOrderCreate(current.request().operationKind())
+                    ? journal.createOrder(current.request().operationId()) : journal.cancelOrder(current.request().operationId());
+                if (status == MarketOperationJournal.Status.UNKNOWN) {
+                    try { current = journal.find(current.request().operationId()); } catch (RuntimeException ignored) { }
+                    if (current != null && current.phase() == MarketOperationJournal.Phase.PREPARED) {
+                        status = MarketOperationJournal.isOrderCreate(current.request().operationKind())
+                            ? journal.createOrder(current.request().operationId()) : journal.cancelOrder(current.request().operationId());
+                    }
+                }
+                if (status == MarketOperationJournal.Status.INSUFFICIENT_FUNDS
+                        || status == MarketOperationJournal.Status.LIMIT_REACHED
+                        || status == MarketOperationJournal.Status.INVALID
+                        || status == MarketOperationJournal.Status.NOT_FOUND) {
+                    MarketOperationJournal.Status aborted = journal.abortUntouched(current.request().operationId(), true,
+                        status == MarketOperationJournal.Status.INSUFFICIENT_FUNDS ? "insufficient_escrow" : "order_operation_rejected");
+                    if (aborted == MarketOperationJournal.Status.APPLIED || aborted == MarketOperationJournal.Status.DUPLICATE)
+                        journal.completeAbort(current.request().operationId());
+                }
+            }
+            MarketOperationJournal.Operation finalState;
+            try { finalState = journal.find(operation.request().operationId()); }
+            catch (RuntimeException failure) { finalState = null; }
+            if (finalState == null || finalState.phase() != MarketOperationJournal.Phase.RELEASED
+                    && finalState.phase() != MarketOperationJournal.Phase.ABORTED) {
+                this.getLogger().warning("Database-only order operation remains unresolved for " + player.getUniqueId());
+                return;
+            }
+            this.runOnPlayerThread(player, () -> {
+                if (this.economyRecoverySessionCurrent(player, generation)) this.deliverMailbox(player);
+            });
+        });
+    }
+
+    private boolean economyRecoverySessionCurrent(Player player, long generation) {
+        return !this.shuttingDown && this.economyRuntimeReady && player != null && player.isOnline()
+            && java.util.Objects.equals(this.notificationSessionGenerations.get(player.getUniqueId()), generation);
+    }
+
+    private void beginMarketRecovery(Player player, long generation, MarketOperationJournal.Operation operation,
+                                     InventoryCustody custody, MarketOperationJournal journal) {
+        try {
+            custody.inspectRecovery(player, operation.request().operationId()).whenComplete((offer, failure) -> {
+                if (failure != null || offer == null || !this.economyRecoverySessionCurrent(player, generation)) {
+                    this.getLogger().warning("Market recovery remains held for " + player.getUniqueId() + " (Canopy receipt unavailable)");
+                    return;
+                }
+                if (!offer.operationId().equals(operation.request().operationId())
+                        || !offer.playerId().equals(operation.request().playerId())) {
+                    this.getLogger().severe("Market recovery binding mismatch; player remains held: " + player.getUniqueId());
+                    return;
+                }
+                MarketOperationRecoveryPolicy.Decision decision = MarketOperationRecoveryPolicy.decide(operation, offer);
+                switch (decision.action()) {
+                    case COMPLETE_COMMIT -> this.finishRecoveredCommit(player, generation, operation, custody, journal);
+                    case COMPLETE_ABORT -> this.finishRecoveredAbort(player, generation, operation, custody, journal);
+                    case RESTORE_POST_AND_SETTLE -> this.recoverMarketPost(player, generation, operation, offer, custody, journal);
+                    case RESTORE_PRE_AND_ABORT -> this.recoverMarketPre(player, generation, operation, offer, custody, journal);
+                    case HOLD_FOR_REVIEW -> this.getLogger().severe("Market recovery held for " + player.getUniqueId()
+                        + " (" + decision.reason() + ")");
+                }
+            });
+        } catch (RuntimeException unavailable) {
+            this.getLogger().warning("Market recovery could not contact Canopy for " + player.getUniqueId());
+        }
+    }
+
+    private void recoverMarketPost(Player player, long generation, MarketOperationJournal.Operation operation,
+                                  InventoryCustody.RecoveryOffer offer, InventoryCustody custody,
+                                  MarketOperationJournal journal) {
+        if (!MarketOperationJournal.isJournaledItemKind(operation.request().operationKind())) {
+            this.getLogger().severe("Unsupported market recovery kind remains held: " + operation.request().operationKind());
+            return;
+        }
+        MarketOperationJournal.Phase effective = operation.phase() == MarketOperationJournal.Phase.REVIEW
+            ? operation.reviewFrom() : operation.phase();
+        if (effective != MarketOperationJournal.Phase.FUNDS_RESERVED && effective != MarketOperationJournal.Phase.ITEM_CHECKPOINTED
+                && effective != MarketOperationJournal.Phase.SETTLED) {
+            this.getLogger().severe("Market journal and Canopy post-state disagree; player remains held: " + player.getUniqueId());
+            return;
+        }
+        custody.applyRecovery(player, offer, true).whenComplete((receipt, applyFailure) -> {
+            if (applyFailure != null || receipt == null || !receipt.stateApplied() || !receipt.restoredPostState()
+                    || !this.economyRecoverySessionCurrent(player, generation)) {
+                this.getLogger().warning("Could not verify recovered shop inventory for " + player.getUniqueId());
+                return;
+            }
+            this.economyDbCall(() -> {
+                MarketOperationJournal.Operation current = journal.find(operation.request().operationId());
+                if (current == null) return null;
+                MarketOperationJournal.Phase phase = current.phase() == MarketOperationJournal.Phase.REVIEW
+                    ? current.reviewFrom() : current.phase();
+                MarketOperationJournal.Status status;
+                if (current.phase() == MarketOperationJournal.Phase.REVIEW) {
+                    if (phase != MarketOperationJournal.Phase.FUNDS_RESERVED && phase != MarketOperationJournal.Phase.ITEM_CHECKPOINTED)
+                        return null;
+                    status = journal.resumeReviewWithPostCheckpoint(current.request().operationId(), offer.postRevision(), offer.postDigest());
+                    if (!this.marketStatusApplied(status)) return null;
+                    current = journal.find(operation.request().operationId());
+                    if (current == null) return null;
+                    phase = current.phase();
+                } else if (phase == MarketOperationJournal.Phase.FUNDS_RESERVED) {
+                    status = journal.markItemCheckpointed(current.request().operationId(), offer.postRevision(), offer.postDigest());
+                    if (!this.marketStatusApplied(status)) return null;
+                    current = journal.find(operation.request().operationId());
+                    if (current == null) return null;
+                    phase = current.phase();
+                }
+                if (phase == MarketOperationJournal.Phase.ITEM_CHECKPOINTED
+                        && (current.postRevision() != offer.postRevision() || !offer.postDigest().equals(current.postDigest()))) return null;
+                if (phase == MarketOperationJournal.Phase.ITEM_CHECKPOINTED) {
+                    status = journal.settleShopPurchase(current.request().operationId(), current.request().backend());
+                    current = journal.find(operation.request().operationId());
+                    if (current == null) return null;
+                    if (status == MarketOperationJournal.Status.UNKNOWN && current.phase() == MarketOperationJournal.Phase.ITEM_CHECKPOINTED) {
+                        status = journal.settleShopPurchase(current.request().operationId(), current.request().backend());
+                        current = journal.find(operation.request().operationId());
+                    }
+                    if (current == null || current.phase() != MarketOperationJournal.Phase.SETTLED
+                            && current.phase() != MarketOperationJournal.Phase.RELEASED) return null;
+                }
+                return current;
+            }).whenComplete((settled, settlementFailure) -> {
+                if (settlementFailure != null || settled == null || settled.phase() != MarketOperationJournal.Phase.SETTLED
+                        && settled.phase() != MarketOperationJournal.Phase.RELEASED) {
+                    this.getLogger().severe("Recovered shop settlement is unresolved; player remains held: " + player.getUniqueId());
+                    return;
+                }
+                custody.completeRecovery(player, receipt, true).whenComplete((ignored, releaseFailure) -> {
+                    if (releaseFailure != null || !this.economyRecoverySessionCurrent(player, generation)) {
+                        this.getLogger().severe("Gateway did not confirm committed inventory recovery for " + player.getUniqueId());
+                        return;
+                    }
+                    this.economyDbCall(() -> {
+                        MarketOperationJournal.Operation current = journal.find(operation.request().operationId());
+                        if (current == null) return null;
+                        if (current.phase() == MarketOperationJournal.Phase.SETTLED) {
+                            MarketOperationJournal.Status status = journal.markReleased(current.request().operationId());
+                            if (!this.marketStatusApplied(status)) current = journal.find(operation.request().operationId());
+                            else current = journal.find(operation.request().operationId());
+                        }
+                        return current;
+                    }).whenComplete((terminal, terminalFailure) -> {
+                        if (terminalFailure != null || terminal == null || terminal.phase() != MarketOperationJournal.Phase.RELEASED) {
+                            this.getLogger().severe("Recovered shop journal is not released; player remains held: " + player.getUniqueId());
+                            return;
+                        }
+                        this.acknowledgeAndForgetMarketTerminal(player, generation, terminal, custody, journal);
+                    });
+                });
+            });
+        });
+    }
+
+    private void recoverMarketPre(Player player, long generation, MarketOperationJournal.Operation operation,
+                                  InventoryCustody.RecoveryOffer offer, InventoryCustody custody,
+                                  MarketOperationJournal journal) {
+        if (!MarketOperationJournal.isJournaledItemKind(operation.request().operationKind())) return;
+        MarketOperationJournal.Phase effective = operation.phase() == MarketOperationJournal.Phase.REVIEW
+            ? operation.reviewFrom() : operation.phase();
+        if (effective != MarketOperationJournal.Phase.PREPARED && effective != MarketOperationJournal.Phase.LEASED
+                && effective != MarketOperationJournal.Phase.FUNDS_RESERVED && effective != MarketOperationJournal.Phase.REFUNDED) {
+            this.getLogger().severe("Market journal requires a post-state but Canopy has none; player remains held: " + player.getUniqueId());
+            return;
+        }
+        CompletionStage<InventoryCustody.RecoveryReceipt> restored;
+        if (offer.hasPreState()) restored = custody.applyRecovery(player, offer, false);
+        else restored = CompletableFuture.completedFuture(new InventoryCustody.RecoveryReceipt(offer, false, false, -1, null));
+        restored.whenComplete((receipt, restoreFailure) -> {
+            if (restoreFailure != null || receipt == null || offer.hasPreState() && !receipt.stateApplied()
+                    || !this.economyRecoverySessionCurrent(player, generation)) {
+                this.getLogger().warning("Could not verify pre-operation inventory for " + player.getUniqueId());
+                return;
+            }
+            this.economyDbCall(() -> {
+                MarketOperationJournal.Status status = journal.abortUntouched(operation.request().operationId(), true, "recovered_before_mutation");
+                if (status != MarketOperationJournal.Status.APPLIED && status != MarketOperationJournal.Status.DUPLICATE) {
+                    MarketOperationJournal.Operation current = journal.find(operation.request().operationId());
+                    if (current == null || current.phase() != MarketOperationJournal.Phase.REFUNDED
+                            && current.phase() != MarketOperationJournal.Phase.ABORTED) return null;
+                }
+                return journal.find(operation.request().operationId());
+            }).whenComplete((refunded, refundFailure) -> {
+                if (refundFailure != null || refunded == null || refunded.phase() != MarketOperationJournal.Phase.REFUNDED
+                        && refunded.phase() != MarketOperationJournal.Phase.ABORTED) {
+                    this.getLogger().severe("Could not safely refund recovered shop reservation for " + player.getUniqueId());
+                    return;
+                }
+                custody.completeRecovery(player, receipt, false).whenComplete((ignored, releaseFailure) -> {
+                    if (releaseFailure != null || !this.economyRecoverySessionCurrent(player, generation)) {
+                        this.getLogger().severe("Gateway did not confirm aborted inventory recovery for " + player.getUniqueId());
+                        return;
+                    }
+                    this.economyDbCall(() -> {
+                        MarketOperationJournal.Operation current = journal.find(operation.request().operationId());
+                        if (current != null && current.phase() == MarketOperationJournal.Phase.REFUNDED) {
+                            MarketOperationJournal.Status status = journal.completeAbort(current.request().operationId());
+                            if (!this.marketStatusApplied(status)) current = journal.find(operation.request().operationId());
+                            else current = journal.find(operation.request().operationId());
+                        }
+                        return current;
+                    }).whenComplete((terminal, terminalFailure) -> {
+                        if (terminalFailure != null || terminal == null || terminal.phase() != MarketOperationJournal.Phase.ABORTED) {
+                            this.getLogger().severe("Recovered shop refund is not terminal; player remains held: " + player.getUniqueId());
+                            return;
+                        }
+                        this.acknowledgeAndForgetMarketTerminal(player, generation, terminal, custody, journal);
+                    });
+                });
+            });
+        });
+    }
+
+    private void finishRecoveredCommit(Player player, long generation, MarketOperationJournal.Operation operation,
+                                       InventoryCustody custody, MarketOperationJournal journal) {
+        if (operation.phase() == MarketOperationJournal.Phase.SETTLED) {
+            this.economyDbCall(() -> journal.markReleased(operation.request().operationId())).whenComplete((status, failure) -> {
+                if (failure != null || !this.marketStatusApplied(status)) { this.getLogger().warning("Committed market receipt remains pending for " + player.getUniqueId()); return; }
+                this.economyDbCall(() -> journal.find(operation.request().operationId())).whenComplete((terminal, readFailure) -> {
+                    if (readFailure == null && terminal != null && terminal.phase() == MarketOperationJournal.Phase.RELEASED)
+                        this.acknowledgeAndForgetMarketTerminal(player, generation, terminal, custody, journal);
+                });
+            });
+        } else if (operation.phase() == MarketOperationJournal.Phase.RELEASED) {
+            this.acknowledgeAndForgetMarketTerminal(player, generation, operation, custody, journal);
+        } else this.getLogger().severe("Canopy committed a market operation before PNC settlement; player remains held: " + player.getUniqueId());
+    }
+
+    private void finishRecoveredAbort(Player player, long generation, MarketOperationJournal.Operation operation,
+                                      InventoryCustody custody, MarketOperationJournal journal) {
+        if (operation.phase() == MarketOperationJournal.Phase.REFUNDED) {
+            this.economyDbCall(() -> journal.completeAbort(operation.request().operationId())).whenComplete((status, failure) -> {
+                if (failure != null || !this.marketStatusApplied(status)) { this.getLogger().warning("Aborted market receipt remains pending for " + player.getUniqueId()); return; }
+                this.economyDbCall(() -> journal.find(operation.request().operationId())).whenComplete((terminal, readFailure) -> {
+                    if (readFailure == null && terminal != null && terminal.phase() == MarketOperationJournal.Phase.ABORTED)
+                        this.acknowledgeAndForgetMarketTerminal(player, generation, terminal, custody, journal);
+                });
+            });
+        } else if (operation.phase() == MarketOperationJournal.Phase.ABORTED) {
+            this.acknowledgeAndForgetMarketTerminal(player, generation, operation, custody, journal);
+        } else this.getLogger().severe("Canopy aborted a market operation without a PNC refund receipt; player remains held: " + player.getUniqueId());
+    }
+
+    private void acknowledgeAndForgetMarketTerminal(Player player, long generation, MarketOperationJournal.Operation operation,
+                                                    InventoryCustody custody, MarketOperationJournal journal) {
+        boolean committed = operation.phase() == MarketOperationJournal.Phase.RELEASED;
+        if (!committed && operation.phase() != MarketOperationJournal.Phase.ABORTED) return;
+        this.economyDbCall(() -> journal.acknowledgeGatewayTerminal(operation.request().operationId()).equals(MarketOperationJournal.Status.APPLIED)
+            || journal.find(operation.request().operationId()).gatewayTerminalAck()).whenComplete((acknowledged, failure) -> {
+            if (failure != null || !Boolean.TRUE.equals(acknowledged) || !this.economyRecoverySessionCurrent(player, generation)) return;
+            custody.forgetTerminal(player, operation.request().operationId(), committed).whenComplete((ignored, forgetFailure) -> {
+                if (forgetFailure != null || !this.economyRecoverySessionCurrent(player, generation)) {
+                    this.getLogger().warning("Canopy terminal receipt cleanup will retry on next login for " + player.getUniqueId());
+                    return;
+                }
+                this.economyDbCall(() -> journal.markGatewayTerminalForgotten(operation.request().operationId()))
+                    .whenComplete((status, markFailure) -> {
+                        if (markFailure != null || !this.marketStatusApplied(status)) {
+                            this.getLogger().warning("Canopy terminal cleanup receipt will retry on next login for " + player.getUniqueId());
+                            return;
+                        }
+                        if (this.marketOperationCoordinator != null)
+                            this.marketOperationCoordinator.clearRecoveredFence(operation.request().playerId(), operation.request().operationId());
+                        this.reconcileMarketTerminalQueue(player, generation, custody, journal, 0);
+                    });
+            });
+        });
+    }
+
+    private void reconcileMarketTerminalQueue(Player player, long generation, InventoryCustody custody,
+                                              MarketOperationJournal journal, int processed) {
+        if (processed >= 64 || !this.economyRecoverySessionCurrent(player, generation)) return;
+        this.economyDbCall(() -> {
+            MarketOperationJournal.Operation pending = journal.findPendingGatewayTerminal(player.getUniqueId());
+            return pending != null ? pending : journal.findPendingGatewayForget(player.getUniqueId());
+        }).whenComplete((operation, failure) -> {
+            if (failure != null || operation == null) return;
+            boolean committed = operation.phase() == MarketOperationJournal.Phase.RELEASED;
+            if (!committed && operation.phase() != MarketOperationJournal.Phase.ABORTED) return;
+            this.economyDbCall(() -> journal.acknowledgeGatewayTerminal(operation.request().operationId()))
+                .whenComplete((ack, ackFailure) -> {
+                    if (ackFailure != null || !this.marketStatusApplied(ack)) return;
+                    custody.forgetTerminal(player, operation.request().operationId(), committed).whenComplete((ignored, forgetFailure) -> {
+                        if (forgetFailure != null) return;
+                        this.economyDbCall(() -> journal.markGatewayTerminalForgotten(operation.request().operationId()))
+                            .whenComplete((forgotten, markFailure) -> {
+                                if (markFailure == null && this.marketStatusApplied(forgotten))
+                                    if (this.marketOperationCoordinator != null)
+                                        this.marketOperationCoordinator.clearRecoveredFence(operation.request().playerId(), operation.request().operationId());
+                                if (markFailure == null && this.marketStatusApplied(forgotten))
+                                    this.reconcileMarketTerminalQueue(player, generation, custody, journal, processed + 1);
+                            });
+                    });
+                });
+        });
+    }
+
+    private boolean marketStatusApplied(MarketOperationJournal.Status status) {
+        return status == MarketOperationJournal.Status.APPLIED || status == MarketOperationJournal.Status.DUPLICATE;
+    }
+
+    private void economyPlayerLeft(Player player) {
+        UUID uuid = player.getUniqueId();
+        this.notificationSessionGenerations.remove(uuid);
+        this.playerSettingsCache.remove(uuid);
+        this.shopSelectionState.remove(uuid);
+        this.ordersViewState.remove(uuid);
+        this.orderBuilderState.remove(uuid);
+        this.ahViewState.remove(uuid);
+        this.pendingTextInputs.remove(uuid);
+        this.payDispatchBypass.remove(uuid);
+        this.cancelSidebarTask(uuid);
+        this.lastPlaytimeFlush.remove(uuid);
+        this.economyHudBoards.remove(uuid);
+        this.economyHudObjective.remove(uuid);
+    }
+
+    private void disableEconomyRuntime() {
+        this.economyRuntimeReady = false;
+        this.notificationPollingActive = false;
+        this.notificationLifecycleGeneration = this.notificationGenerationSequence.incrementAndGet();
+        this.notificationSessionGenerations.clear();
+        this.notificationRecipientsInFlight.clear();
+        this.shuttingDown = true;
+        if (this.notificationPollTask != null) this.notificationPollTask.cancel();
+        this.playerSettingsCache.clear();
+        this.pendingTextInputs.clear();
+        this.shopSelectionState.clear();
+        this.ordersViewState.clear();
+        this.orderBuilderState.clear();
+        this.ahViewState.clear();
+        Bukkit.getServicesManager().unregisterAll(this);
+        if (this.dataSource != null) { this.dataSource.close(); this.dataSource = null; }
+    }
+
     private void setupEconomy() {
         try {
             // Register OUR economy first, at Highest, so it outranks EssentialsX.
@@ -1227,6 +2138,32 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
+    private boolean shardsEnabled() {
+        return shardsEnabled(this.settings);
+    }
+
+    static boolean shardsEnabled(ConfigurationSection config) {
+        return config == null || config.getBoolean("shards.enabled", true);
+    }
+
+    private boolean requireShardsEnabled(CommandSender sender) {
+        if (this.shardsEnabled()) return true;
+        if (sender != null) sender.sendMessage("§cThis feature is disabled.");
+        return false;
+    }
+
+    private boolean rejectDisabledShardUi(Player player) {
+        if (this.shardsEnabled()) return false;
+        if (player != null && player.isOnline()) {
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                player.closeInventory();
+                player.sendActionBar(Component.text("§cThis feature is disabled."));
+            });
+        }
+        return true;
+    }
+
     private boolean isFoliaRuntime() {
         return Bukkit.getName().toLowerCase().contains("folia");
     }
@@ -1260,6 +2197,91 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.getLogger().info("[shop] using the bundled shop.yml; put categories.yml and items/ in "
             + (root != null ? new File(root, "configs/shop").getAbsolutePath() : "configs/shop") + " to replace it.");
     }
+    /**
+     * Economy profile (sell.cap-crafted-at-inputs, on by default): a crafted, smelted, cut or smithed item never sells
+     * for more than its cheapest recipe's inputs, so no recipe turns cheap items into money. Prices only go down.
+     */
+    private void capCraftedPrices() {
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY || this.sellConfig == null
+                || !this.settings.getBoolean("sell.cap-crafted-at-inputs", true)) return;
+        ConfigurationSection prices = this.sellConfig.getConfigurationSection("prices");
+        if (prices == null) return;
+        Map<Material, Double> price = new java.util.EnumMap<>(Material.class);
+        for (String key : prices.getKeys(false)) {
+            Material m = Material.matchMaterial(key);
+            double v = prices.getDouble(key, 0.0);
+            if (m != null && Double.isFinite(v) && v > 0.0) price.put(m, v);
+        }
+        List<org.bukkit.inventory.Recipe> recipes = new ArrayList<>();
+        Bukkit.recipeIterator().forEachRemaining(recipes::add);
+        Map<Material, Double> capped = new java.util.EnumMap<>(Material.class);
+        for (int pass = 0; pass < 6; pass++) {
+            boolean changed = false;
+            for (org.bukkit.inventory.Recipe recipe : recipes) {
+                ItemStack result = recipe.getResult();
+                if (result == null || result.getType().isAir()) continue;
+                Double current = price.get(result.getType());
+                if (current == null) continue;
+                List<org.bukkit.inventory.RecipeChoice> inputs = this.recipeInputs(recipe);
+                if (inputs.isEmpty()) continue;
+                double cost = 0.0;
+                boolean known = true;
+                for (org.bukkit.inventory.RecipeChoice choice : inputs) {
+                    double cheapest = this.cheapestChoice(choice, price);
+                    if (cheapest <= 0.0) { known = false; break; }
+                    cost += cheapest;
+                }
+                if (!known) continue;
+                double unit = Math.max(0.01, cost / Math.max(1, result.getAmount()));
+                if (unit < current - 0.005) {
+                    price.put(result.getType(), unit);
+                    capped.put(result.getType(), unit);
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+        }
+        for (Map.Entry<Material, Double> entry : capped.entrySet()) {
+            prices.set(entry.getKey().name(), java.math.BigDecimal.valueOf(entry.getValue()).setScale(2, java.math.RoundingMode.DOWN).max(new java.math.BigDecimal("0.01")).doubleValue());
+        }
+        if (!capped.isEmpty()) this.getLogger().info("[sell] capped " + capped.size() + " crafted item prices at their recipe inputs");
+    }
+
+    private List<org.bukkit.inventory.RecipeChoice> recipeInputs(org.bukkit.inventory.Recipe recipe) {
+        List<org.bukkit.inventory.RecipeChoice> inputs = new ArrayList<>();
+        if (recipe instanceof org.bukkit.inventory.ShapedRecipe shaped) {
+            Map<Character, org.bukkit.inventory.RecipeChoice> choices = shaped.getChoiceMap();
+            for (String row : shaped.getShape()) for (char c : row.toCharArray()) {
+                org.bukkit.inventory.RecipeChoice choice = choices.get(c);
+                if (choice != null) inputs.add(choice);
+            }
+        } else if (recipe instanceof org.bukkit.inventory.ShapelessRecipe shapeless) {
+            inputs.addAll(shapeless.getChoiceList());
+        } else if (recipe instanceof org.bukkit.inventory.CookingRecipe<?> cooking) {
+            inputs.add(cooking.getInputChoice());
+        } else if (recipe instanceof org.bukkit.inventory.StonecuttingRecipe cutting) {
+            inputs.add(cutting.getInputChoice());
+        } else if (recipe instanceof org.bukkit.inventory.SmithingTransformRecipe smithing) {
+            inputs.add(smithing.getBase());
+            inputs.add(smithing.getAddition());
+        }
+        inputs.removeIf(java.util.Objects::isNull);
+        return inputs;
+    }
+
+    private double cheapestChoice(org.bukkit.inventory.RecipeChoice choice, Map<Material, Double> price) {
+        java.util.Collection<Material> options;
+        if (choice instanceof org.bukkit.inventory.RecipeChoice.MaterialChoice materials) options = materials.getChoices();
+        else if (choice instanceof org.bukkit.inventory.RecipeChoice.ExactChoice exact) options = exact.getChoices().stream().map(ItemStack::getType).toList();
+        else return -1.0;
+        double best = -1.0;
+        for (Material m : options) {
+            Double v = price.get(m);
+            if (v != null && v > 0.0 && (best < 0.0 || v < best)) best = v;
+        }
+        return best;
+    }
+
     private void loadSellConfig() {
         File absData = this.getDataFolder().getAbsoluteFile();
         File root = absData.getParentFile() != null ? absData.getParentFile().getParentFile() : null;
@@ -1270,6 +2292,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 ConfigurationSection prices = this.sellConfig.getConfigurationSection("prices");
                 int count = prices != null ? prices.getKeys(false).size() : 0;
                 this.getLogger().info("[sell] Loaded " + count + " prices from " + externalFile.getAbsolutePath());
+                this.capCraftedPrices();
                 return;
             }
         }
@@ -1919,10 +2942,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             // Follow broadcast: people who follow the killer see their kill.
             this.notifyFollowers(killer.getUniqueId(), killer.getName(), "killed §f" + victim.getName() + "§7.", false);
             UUID killerUuid = killer.getUniqueId();
-            final long killShards = this.isPizzaPlusPlus(killer) ? 20L : 10L; // pizza++ earns double
+            final boolean shardRewardEnabled = this.shardsEnabled();
+            final long killShards = shardRewardEnabled ? (this.isPizzaPlusPlus(killer) ? 20L : 10L) : 0L; // pizza++ earns double
             this.runAsyncTask(() -> {
                 this.incrementLongStat(killerUuid, "kills", 1L);
-                this.depositShards(killerUuid, killShards);
+                if (shardRewardEnabled) this.depositShards(killerUuid, killShards);
             });
             killer.sendActionBar((Component)Component.text("§c+1"));
             this.claimBountiesOnKill(killer, victim);
@@ -2155,6 +3179,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         String label = split[0].toLowerCase(Locale.ROOT);
         if (label.contains(":")) label = label.substring(label.indexOf(':') + 1);
         if ("pay".equals(label)) {
+            if (this.denyEconomyPlayerAccess(player, "pay", "command_preprocess")) {
+                e.setCancelled(true);
+                return;
+            }
             if (this.payDispatchBypass.remove(player.getUniqueId())) return;
             if (this.handlePayCommandGate(player, split)) {
                 e.setCancelled(true);
@@ -2177,12 +3205,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * worlds are ready, and menus the player has no use permission for.
      */
     private boolean routePlayerCommand(Player player, String label, String[] args) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY
+                && EconomyRuntimeProfile.economyCommandRoots().contains(label.toLowerCase(Locale.ROOT))
+                && this.denyEconomyPlayerAccess(player, label, "shared_command_route")) return true;
         String[] split = new String[args.length + 1];
         split[0] = label;
         System.arraycopy(args, 0, split, 1, args.length);
         switch (label) {
             case "bal", "balance", "money" -> this.handleBalanceCommand(player, args);
             case "shards" -> {
+                if (!this.requireShardsEnabled(player)) return true;
                 if (args.length >= 1 && "give".equalsIgnoreCase(args[0])) {
                     if (!player.hasPermission("pizzasmp.admin.shards")) {
                         player.sendMessage("§cYou do not have permission.");
@@ -2207,6 +3239,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         this.loadShopConfig();
                         player.sendMessage("§7Shop catalogue reloaded.");
                     }
+                    return true;
+                }
+                if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+                    if (!this.economyShopRouteEnabled()) {
+                        player.sendMessage("§cThe shop is temporarily unavailable.");
+                        return true;
+                    }
+                    this.openShopMain(player);
                     return true;
                 }
                 if (!player.hasPermission("pizzasmp.use.shop")) return false;
@@ -2240,13 +3280,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             case "ah", "auction" -> {
                 if (args.length >= 2 && "admin".equalsIgnoreCase(args[0]) && player.hasPermission(PERM_ADMIN_AUCTION)) {
                     this.openAdminAhListingsByName(player, args[1]);
+                } else if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+                    if (args.length >= 1 && "sell".equalsIgnoreCase(args[0])) {
+                        if (args.length >= 2) this.handleAhSellInHandCommand(player, args[1]);
+                        else player.sendMessage("§7Usage: §f/ah sell <price>§7 (hold the item; 1k/1m/1b work).");
+                    } else this.openAuctionFromCommand(player, args);
                 } else if (player.hasPermission("pizzasmp.use.ah")) {
                     if (args.length >= 2 && "sell".equalsIgnoreCase(args[0])) this.handleAhSellInHandCommand(player, args[1]);
                     else this.openAuctionFromCommand(player, args);
                 }
             }
             case "orders", "order" -> {
-                if (player.hasPermission("pizzasmp.use.orders")) this.openOrdersFromCommand(player, args);
+                if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY || player.hasPermission("pizzasmp.use.orders"))
+                    this.openOrdersFromCommand(player, args);
                 else player.sendMessage("§cYou do not have permission to use /orders.");
             }
             case "msg", "tell", "w" -> this.handleMsgCommand(player, args);
@@ -2665,7 +3711,70 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         Player p = (Player)humanEntity;
+        if (!this.isOwnMenu(e.getView())) return;
         String title = e.getView().getTitle();
+        // A fast double-click arrives as two clicks plus a DOUBLE_CLICK; on a button that would run its action a
+        // third time (an extra purchase). Only the sell GUI's item slots use the gesture.
+        if (e.getClick() == ClickType.DOUBLE_CLICK && !TITLE_SELL_GUI.equals(title)) {
+            e.setCancelled(true);
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && isEconomyInventory(title)
+                && !this.economyPlayerAllowed(p)) {
+            e.setCancelled(true);
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "ECONOMY_ACCESS_DENIED",
+                marketAuditMenu(title), 0, 0.0, 0.0, "reason=staff_access_required;surface=inventory");
+            p.closeInventory();
+            p.sendMessage("§cThe economy is currently restricted to the owner, admins and operators.");
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && TITLE_AH.equals(title)
+                && "ah_sell".equals(this.uiActionId(e.getCurrentItem())) && this.economyAuctionListRouteEnabled()) {
+            e.setCancelled(true);
+            // Economy listings come from the held item (it stays in its slot until custody starts): ask for the
+            // price, then list it as /ah sell would.
+            ItemStack held = p.getInventory().getItemInMainHand();
+            if (held == null || held.getType().isAir()) {
+                p.sendMessage("§7Hold the item you want to sell, then click Sell again (or use §f/ah sell <price>§7).");
+                return;
+            }
+            AhSellState sell = new AhSellState();
+            sell.item = held.clone();
+            sell.held = true;
+            this.ahSellState.put(p.getUniqueId(), sell);
+            p.closeInventory();
+            this.requestTextInput(p, TextInputMode.AH_SELL_PRICE, "Type listing price in chat (supports 1k/1m/1b).");
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && isItemMarketInventory(title)) {
+            String actionId = this.uiActionId(e.getCurrentItem());
+            boolean shopAction = (title.startsWith(TITLE_SHOP) || TITLE_PVP_SHOP.equals(title))
+                && this.economyShopRouteEnabled();
+            // The sell GUI only gathers items; closing it returns them and sells through the journal.
+            shopAction |= TITLE_SELL_GUI.equals(title) && this.economySellRouteEnabled();
+            boolean auctionAction = this.economyAuctionMenuClickAllowed(title, actionId);
+            boolean orderAction = this.economyOrderMenuClickAllowed(title, actionId);
+            if (shopAction || auctionAction || orderAction) {
+                // Each enabled market family has a journaled item boundary or a database-only atomic transition.
+            } else {
+            e.setCancelled(true);
+            ItemStack clicked = e.getCurrentItem();
+            String action = actionId == null ? "none" : actionId.split(":", 2)[0];
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "MARKET_INTERACTION_BLOCKED",
+                clicked == null || clicked.getType().isAir() ? "NONE" : clicked.getType().name(),
+                clicked == null || clicked.getType().isAir() ? 0 : clicked.getAmount(), 0.0, 0.0,
+                "menu=" + marketAuditMenu(title) + ";action=" + action + ";click=" + e.getClick().name());
+            p.sendActionBar(Component.text("§cItem trading is temporarily unavailable while inventory protection is being completed."));
+            return;
+            }
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY
+                && (!this.economyRuntimeReady || !this.dbHealthy)
+                && e.getView().getTopInventory().getHolder(false) instanceof MenuLock.Locked) {
+            e.setCancelled(true);
+            p.sendActionBar(Component.text("§cThe economy is temporarily unavailable."));
+            return;
+        }
         if (TITLE_DUEL_SETUP.equals(title)) {
             e.setCancelled(true);
             if (e.getClickedInventory() == null || !e.getClickedInventory().equals(e.getView().getTopInventory())) return;
@@ -2923,6 +4032,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             String id = this.uiActionId(current);
             if (id == null) {
+                return;
+            }
+            if ("nav_shard_shop".equals(id) && !this.shardsEnabled()) {
+                this.requireShardsEnabled(p);
                 return;
             }
             switch (id) {
@@ -3295,8 +4408,173 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
         }
     }
+
+    private InventoryCustody currentInventoryCustody() {
+        org.bukkit.plugin.RegisteredServiceProvider<InventoryCustody> registration =
+            Bukkit.getServicesManager().getRegistration(InventoryCustody.class);
+        return registration == null ? null : registration.getProvider();
+    }
+
+    private boolean economyMarketCoreReady() {
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY || !this.economyRuntimeReady || !this.dbHealthy
+                || this.marketOperationJournal == null || this.marketOperationCoordinator == null) return false;
+        InventoryCustody custody = this.currentInventoryCustody();
+        return custody != null && custody.qualified();
+    }
+
+    private boolean denyEconomyPlayerAccess(Player player, String command, String surface) {
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY || player == null
+                || this.economyPlayerAllowed(player)) return false;
+        String safeCommand = command == null ? "unknown" : command.toLowerCase(Locale.ROOT);
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ECONOMY_ACCESS_DENIED",
+            safeCommand, 0, 0.0, 0.0, "reason=staff_access_required;surface=" + surface);
+        player.sendMessage("§cThe economy is currently restricted to the owner, admins and operators.");
+        return true;
+    }
+
+    private boolean economyPlayerAllowed(Player player) {
+        return player != null && this.economyAccessPolicy.allows(player.getUniqueId(), player.isOp(),
+            player.hasPermission("pizzasmp.admin.eco"));
+    }
+
+    /** One market route is enabled only after explicit opt-in, schema readiness and Canopy qualification. */
+    private boolean economyShopRouteEnabled() {
+        return this.economyMarketCoreReady() && this.settings.getBoolean("economy.market.shop-enabled", false);
+    }
+
+    private boolean economySellRouteEnabled() {
+        return this.economyMarketCoreReady() && this.settings.getBoolean("economy.sell-enabled", false);
+    }
+
+    private boolean economyOrderRouteEnabled() {
+        return this.economyMarketCoreReady() && this.settings.getBoolean("economy.market.orders-enabled", false);
+    }
+
+    /**
+     * Shop and auction purchases settle directly (money first, then the item, as in the full profile) instead of through the
+     * journaled custody round trips, so they are instant and can be spam-clicked. A purchase cannot duplicate: the
+     * worst failure is a crash between the debit and the next save. Sales stay journaled.
+     */
+    private boolean instantPurchases() {
+        return this.settings.getBoolean("economy.market.instant-purchases", false);
+    }
+
+    private boolean economyAuctionBuyRouteEnabled() {
+        return this.economyMarketCoreReady() && this.settings.getBoolean("economy.market.auction-buy-enabled", false);
+    }
+
+    private boolean economyAuctionListRouteEnabled() {
+        return this.economyMarketCoreReady() && this.settings.getBoolean("economy.market.auction-list-enabled", false);
+    }
+
+    private boolean economyAuctionCancelRouteEnabled() {
+        return this.economyMarketCoreReady() && this.settings.getBoolean("economy.market.auction-cancel-enabled", false);
+    }
+
+    private boolean economyPurchaseRouteEnabled(String operationKind) {
+        if ("AUCTION_BUY".equals(operationKind)) return this.economyAuctionBuyRouteEnabled();
+        if ("AUCTION_LIST".equals(operationKind)) return this.economyAuctionListRouteEnabled();
+        if ("AUCTION_CANCEL".equals(operationKind)) return this.economyAuctionCancelRouteEnabled();
+        return this.economyShopRouteEnabled();
+    }
+
+    /** Read-only AH browsing plus individually qualified journaled item actions. */
+    private boolean economyAuctionMenuClickAllowed(String title, String action) {
+        if (title == null || action == null) return false;
+        if (TITLE_AH_ADMIN.equals(title)) return action.startsWith("ah_admin_remove:");
+        if (TITLE_AH.equals(title)) {
+            boolean browse = this.economyAuctionBuyRouteEnabled()
+                && (Set.of("ah_refresh", "ah_prev", "ah_next", "ah_sort", "ah_filter", "ah_search").contains(action)
+                    || action.startsWith("ah_listing:"));
+            return browse || ("ah_my_items".equals(action)
+                && (this.economyAuctionCancelRouteEnabled() || this.economyAuctionListRouteEnabled()))
+                || ("ah_sell".equals(action) && this.economyAuctionListRouteEnabled());
+        }
+        if (TITLE_AH_BUY_CONFIRM.equals(title)) {
+            return this.economyAuctionBuyRouteEnabled()
+                && ("ah_buy_cancel".equals(action) || "ah_buy_confirm".equals(action));
+        }
+        if (TITLE_AH_MY.equals(title)) {
+            boolean readOnly = Set.of("ah_my_refresh", "ah_my_prev", "ah_my_next", "ah_my_tx", "ah_my_back_main").contains(action);
+            return readOnly && (this.economyAuctionBuyRouteEnabled() || this.economyAuctionCancelRouteEnabled()
+                    || this.economyAuctionListRouteEnabled())
+                || "ah_new_slot".equals(action) && this.economyAuctionListRouteEnabled()
+                || action.startsWith("ah_mine_listing:") && this.economyAuctionCancelRouteEnabled();
+        }
+        if (TITLE_AH_TX.equals(title)) {
+            return (this.economyAuctionBuyRouteEnabled() || this.economyAuctionCancelRouteEnabled()
+                    || this.economyAuctionListRouteEnabled())
+                && Set.of("ah_tx_prev", "ah_tx_next", "ah_tx_back").contains(action);
+        }
+        return false;
+    }
+
+    private boolean economyOrderMenuClickAllowed(String title, String action) {
+        if (!this.economyOrderRouteEnabled() || !isOrdersInventory(title)) return false;
+        if (TITLE_ORDER_DELIVER.equals(title) || TITLE_ORDER_DELIVER_CONFIRM.equals(title)
+                || TITLE_ORDER_SELL_CONFIRM.equals(title)) return false;
+        return !Set.of("orders_claims_drop_page", "orders_claims_sell_page", "orders_sell_confirm")
+            .contains(action == null ? "" : action);
+    }
+
+    private static boolean isOrdersInventory(String title) {
+        return TITLE_ORDERS.equals(title) || TITLE_ORDERS_ITEM.equals(title) || TITLE_ORDERS_MY.equals(title)
+            || TITLE_ORDERS_DELIVERIES.equals(title) || TITLE_ORDERS_NEW.equals(title) || TITLE_ORDERS_PICK.equals(title)
+            || TITLE_ORDER_DETAIL.equals(title) || TITLE_ORDER_DELIVER.equals(title) || TITLE_ORDER_DELIVER_CONFIRM.equals(title)
+            || TITLE_ORDER_CANCEL_CONFIRM.equals(title) || TITLE_ORDER_SELL_CONFIRM.equals(title);
+    }
+
+    /**
+     * PNC's menus are all MenuLock inventories (the staff /invsee view, full profile only, is the one exception).
+     * A container that merely carries a menu's title, such as a chest renamed "Sell Items" in an anvil, is not one.
+     */
+    private boolean isOwnMenu(org.bukkit.inventory.InventoryView view) {
+        if (view == null) return false;
+        if (view.getTopInventory().getHolder(false) instanceof MenuLock.Locked) return true;
+        return this.runtimeProfile != EconomyRuntimeProfile.ECONOMY && view.getTitle().startsWith(TITLE_INVSEE_PREFIX);
+    }
+
+    private static boolean isItemMarketInventory(String title) {
+        if (title == null) return false;
+        return title.startsWith(TITLE_SHOP) || TITLE_PVP_SHOP.equals(title) || TITLE_SELL_GUI.equals(title)
+            || TITLE_AH.equals(title) || TITLE_AH_MY.equals(title) || TITLE_AH_TX.equals(title)
+            || TITLE_AH_SELL.equals(title) || TITLE_AH_CONFIRM.equals(title) || TITLE_AH_BUY_CONFIRM.equals(title)
+            || TITLE_AH_ADMIN.equals(title) || TITLE_ORDERS.equals(title) || TITLE_ORDERS_ITEM.equals(title)
+            || TITLE_ORDERS_MY.equals(title) || TITLE_ORDERS_DELIVERIES.equals(title) || TITLE_ORDERS_NEW.equals(title)
+            || TITLE_ORDERS_PICK.equals(title) || TITLE_ORDER_DETAIL.equals(title) || TITLE_ORDER_DELIVER.equals(title)
+            || TITLE_ORDER_DELIVER_CONFIRM.equals(title) || TITLE_ORDER_CANCEL_CONFIRM.equals(title)
+            || TITLE_ORDER_SELL_CONFIRM.equals(title);
+    }
+
+    private static boolean isEconomyInventory(String title) {
+        return isItemMarketInventory(title) || title != null && title.contains("Item Worth (Page");
+    }
+
+    private static String marketAuditMenu(String title) {
+        if (title == null) return "unknown";
+        if (title.startsWith(TITLE_SHOP) || TITLE_PVP_SHOP.equals(title)) return "shop";
+        if (title.equals(TITLE_SELL_GUI)) return "sell";
+        if (title.startsWith(TITLE_AH)) return "auction";
+        if (title.equals(TITLE_ORDERS) || title.equals(TITLE_ORDERS_ITEM) || title.equals(TITLE_ORDERS_MY)
+                || title.equals(TITLE_ORDERS_DELIVERIES) || title.equals(TITLE_ORDERS_NEW)
+                || title.equals(TITLE_ORDERS_PICK) || title.equals(TITLE_ORDER_DETAIL)
+                || title.equals(TITLE_ORDER_DELIVER) || title.equals(TITLE_ORDER_DELIVER_CONFIRM)
+                || title.equals(TITLE_ORDER_CANCEL_CONFIRM) || title.equals(TITLE_ORDER_SELL_CONFIRM)) return "orders";
+        return "market";
+    }
     @EventHandler(ignoreCancelled=true)
     public void onInventoryDrag(InventoryDragEvent e) {
+        if (!this.isOwnMenu(e.getView())) return;
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && e.getWhoClicked() instanceof Player player
+                && isEconomyInventory(e.getView().getTitle())
+                && !this.economyPlayerAllowed(player)) {
+            e.setCancelled(true);
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ECONOMY_ACCESS_DENIED",
+                marketAuditMenu(e.getView().getTitle()), 0, 0.0, 0.0, "reason=staff_access_required;surface=drag");
+            player.closeInventory();
+            player.sendMessage("§cThe economy is currently restricted to the owner, admins and operators.");
+            return;
+        }
         // Leaderboard head GUIs are view-only: block dragging items into/over them.
         if (e.getView().getTitle().startsWith("§fTop ")) {
             e.setCancelled(true);
@@ -3322,10 +4600,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (!TITLE_SELL_GUI.equals(e.getView().getTitle())) {
             return;
         }
+        if (e.getWhoClicked() instanceof Player dragger) this.refreshSellGuiSoon(dragger, e.getView().getTopInventory());
     }
 
     @EventHandler
     public void onInventoryClose(InventoryCloseEvent e) {
+        if (!this.isOwnMenu(e.getView())) return;
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && e.getPlayer() instanceof Player player
+                && isEconomyInventory(e.getView().getTitle())
+                && !this.economyPlayerAllowed(player)) return;
         // Reset AH/Orders search when player explicitly closes those GUIs (not when navigating between pages)
         InventoryCloseEvent.Reason _reason = e.getReason();
         boolean _playerClose = _reason == InventoryCloseEvent.Reason.PLAYER || _reason == InventoryCloseEvent.Reason.TELEPORT
@@ -3395,6 +4678,45 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.healSellMarkers(p.getEnderChest());
     }
 
+    /** The held item's worth on the action bar when the player switches to it (worth-lore.held-item). */
+    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
+    public void onHeldShowWorth(org.bukkit.event.player.PlayerItemHeldEvent e) {
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY || !this.settings.getBoolean("worth-lore.enabled", true)
+                || !this.settings.getBoolean("worth-lore.held-item", true)) return;
+        Player player = e.getPlayer();
+        if (!this.isSettingEnabledCached(player.getUniqueId(), "worth_display")) return;
+        ItemStack held = player.getInventory().getItem(e.getNewSlot());
+        if (held == null || held.getType().isAir()) return;
+        boolean shulker = held.getType().name().contains("SHULKER");
+        double unit = shulker ? this.getItemWorth(held) : this.computeUnitWorth(held);
+        if (!Double.isFinite(unit) || unit <= 0.0) return;
+        String text = shulker ? "§7Contents worth: §a$" + this.fmtMoney(unit)
+            : held.getAmount() > 1 ? "§7Worth: §a$" + this.fmtMoney(unit) + " §7each, §a$" + this.fmtMoney(unit * held.getAmount()) + " §7stack"
+            : "§7Worth: §a$" + this.fmtMoney(unit);
+        player.sendActionBar(Component.text(text));
+    }
+
+    /**
+     * A creative client sends back the item it was shown, worth lore included; the lore is removed before the
+     * server keeps the item, so creative players see worth like everyone else and items still stack.
+     */
+    @EventHandler(priority=EventPriority.LOWEST)
+    public void onCreativeStripDisplayData(org.bukkit.event.inventory.InventoryCreativeEvent e) {
+        if (!this.settings.getBoolean("item-cleanup.enabled", true)) return;
+        ItemStack cursor = e.getCursor();
+        if (cursor == null || cursor.getType().isAir() || !cursor.hasItemMeta()) return;
+        ItemStack healed = this.stripLeakedDisplayData(cursor);
+        if (healed != cursor) e.setCursor(healed);
+    }
+
+    /** Leaving Creative: clean what the creative client may have written back (worth lore). */
+    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
+    public void onGameModeHealDisplayData(PlayerGameModeChangeEvent e) {
+        if (e.getNewGameMode() == GameMode.CREATIVE) return;
+        Player p = e.getPlayer();
+        PlatformScheduler.entityLater(this, p, () -> { if (p.isOnline()) { this.healSellMarkers(p.getInventory()); this.healSellMarkers(p.getEnderChest()); } }, null, 1L);
+    }
+
     @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=true)
     public void onContainerOpenHealSellMarkers(org.bukkit.event.inventory.InventoryOpenEvent e) {
         Inventory top = e.getInventory();
@@ -3405,16 +4727,50 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void healSellMarkers(Inventory inv) {
-        if (inv == null || this.sellWorthMarkerKey == null) {
+        if (inv == null || this.sellWorthMarkerKey == null || !this.settings.getBoolean("item-cleanup.enabled", true)) {
             return;
         }
         for (int slot = 0; slot < inv.getSize(); ++slot) {
             ItemStack stack = inv.getItem(slot);
             if (stack == null || stack.getType() == Material.AIR || !stack.hasItemMeta()) continue;
             ItemMeta meta = stack.getItemMeta();
-            if (meta == null || !meta.getPersistentDataContainer().has(this.sellWorthMarkerKey, PersistentDataType.BYTE)) continue;
-            inv.setItem(slot, this.stripSellWorthMarker(stack));
+            if (meta == null) continue;
+            if (meta.getPersistentDataContainer().has(this.sellWorthMarkerKey, PersistentDataType.BYTE)) {
+                inv.setItem(slot, this.stripSellWorthMarker(stack));
+            } else {
+                ItemStack healed = this.stripLeakedDisplayData(stack);
+                if (healed != stack) inv.setItem(slot, healed);
+            }
         }
+    }
+
+    private static final NamespacedKey ITEMGUARD_ORIGIN = new NamespacedKey("vanillaitemguard", "origin");
+
+    /**
+     * Worth lore is packet-only, but a creative client sends its displayed copy back, so the lore can end up on
+     * the real item (which then no longer stacks). Those lines, and the retired item guard's creative tag, are
+     * removed. Returns the same instance when nothing changed.
+     */
+    private ItemStack stripLeakedDisplayData(ItemStack stack) {
+        ItemMeta meta = stack.getItemMeta();
+        if (meta == null) return stack;
+        boolean changed = false;
+        if (meta.getPersistentDataContainer().has(ITEMGUARD_ORIGIN)) {
+            meta.getPersistentDataContainer().remove(ITEMGUARD_ORIGIN);
+            changed = true;
+        }
+        if (meta.hasLore()) {
+            List<String> lore = new ArrayList<>(meta.getLore());
+            if (lore.removeIf(line -> line != null && (line.startsWith("\u00a77Worth: ") || line.startsWith("\u00a77Contents worth: ")
+                    || line.startsWith("\u00a7a$")))) {
+                meta.setLore(lore.isEmpty() ? null : lore);
+                changed = true;
+            }
+        }
+        if (!changed) return stack;
+        ItemStack clone = stack.clone();
+        clone.setItemMeta(meta);
+        return clone;
     }
 
     private final java.util.Set<UUID> voidRescueInProgress = ConcurrentHashMap.newKeySet();
@@ -3608,13 +4964,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             });
             return;
         }
+        if ("settings_network".equals(id)) {
+            player.closeInventory();
+            this.openNetworkSettings(player);
+            return;
+        }
         if (!id.startsWith("settings_toggle:")) {
             return;
         }
         SettingDefinition def = this.findSettingByKey(id.substring("settings_toggle:".length()));
-        if (def == null) {
+        if (def == null || !this.settingShown(def.key)) {
             return;
         }
+        if ("show_shards".equals(def.key) && !this.shardsEnabled()) return;
         if (def.pizzaPlusOnly && (def.requiredPermission == null || !player.hasPermission(def.requiredPermission))) {
             return;
         }
@@ -4081,6 +5443,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (id == null || id.isBlank()) {
             return;
         }
+        if (!this.shardsEnabled() && ("shop_open_shards".equals(id)
+                || "shop_main_open:shards".equalsIgnoreCase(id) || id.startsWith("shard_"))) {
+            this.rejectDisabledShardUi(p);
+            return;
+        }
         if ("shop_close".equals(id) || "shop_back_close".equals(id)) {
             p.closeInventory();
             return;
@@ -4118,8 +5485,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.adjustShopQuantity(p, -this.parseIntSafe(id.substring("shop_qty_sub:".length()), 0));
             return;
         }
+        if (id.startsWith("shop_confirm:")) {
+            this.confirmShopPurchase(p, id.substring("shop_confirm:".length()));
+            return;
+        }
         if ("shop_confirm".equals(id)) {
-            this.confirmShopPurchase(p);
+            this.confirmShopPurchase(p, null);
             return;
         }
         if (id.equals("shop_cancel") || id.startsWith("shop_cancel:")) {
@@ -4191,8 +5562,95 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return this.formatCompactNumber(value);
     }
 
-    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+    /** Commands whose first argument is always one of these words; a close typo is corrected. */
+    private static final Map<String, List<String>> FIXED_SUBCOMMANDS = Map.of(
+        "sell", List.of("hand", "all", "reload"),
+        "eco", List.of("give", "take", "set", "reset", "ah", "market", "shop", "freebuy", "sound"),
+        "ecobot", List.of("status", "list", "order", "buy", "deliver", "clear", "reload", "pause", "resume"));
+
+    /**
+     * A typed subcommand that is a unique prefix of, or one keyboard slip away from, exactly one known subcommand
+     * becomes that subcommand; anything else is left as typed.
+     */
+    private String[] correctSubcommand(CommandSender sender, String command, String label, String[] args) {
+        List<String> options = FIXED_SUBCOMMANDS.get(command);
+        if (options == null || args.length == 0 || args[0].isEmpty()) return args;
+        String typed = args[0].toLowerCase(Locale.ROOT);
+        if (options.contains(typed)) return args;
+        String match = null;
+        List<String> prefixed = options.stream().filter(option -> option.startsWith(typed)).toList();
+        if (prefixed.size() == 1) match = prefixed.get(0);
+        else if (prefixed.isEmpty() && typed.length() >= 3) {
+            double best = 1.5;
+            for (String option : options) {
+                double d = this.weightedEditDistance(typed, option, best + 0.001);
+                if (d < best) { best = d; match = option; }
+                else if (d == best) match = null;
+            }
+        }
+        if (match == null) return args;
+        String[] fixed = args.clone();
+        fixed[0] = match;
+        sender.sendMessage("§7Ran §f/" + label + " " + String.join(" ", fixed));
+        return fixed;
+    }
+
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] typedArgs) {
         String cmdNameLower = command.getName().toLowerCase(Locale.ROOT);
+        String[] args = this.correctSubcommand(sender, cmdNameLower, label, typedArgs);
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            if (!this.runtimeProfile.allowsCommand(cmdNameLower) || !this.runtimeProfile.allowsCommand(label)) {
+                sender.sendMessage("§cThis command is unavailable in this runtime profile.");
+                return true;
+            }
+            if (sender instanceof Player player && this.denyEconomyPlayerAccess(player, cmdNameLower, "command")) return true;
+            if (!this.economyRuntimeReady || !this.dbHealthy) {
+                sender.sendMessage("§cThe economy is temporarily unavailable. Please try again later.");
+                return true;
+            }
+            if (Set.of("shop", "sell", "ah", "auction", "orders", "order").contains(cmdNameLower)) {
+                boolean listingCommand = args.length > 0 && "sell".equalsIgnoreCase(args[0]);
+                boolean auctionRoute = listingCommand ? this.economyAuctionListRouteEnabled()
+                    : this.economyAuctionBuyRouteEnabled() || this.economyAuctionCancelRouteEnabled();
+                boolean sellReload = "sell".equals(cmdNameLower) && args.length > 0
+                    && "reload".equalsIgnoreCase(args[0]);
+                boolean sellRoute = sellReload || this.economySellRouteEnabled();
+                boolean ordersRoute = this.economyOrderRouteEnabled();
+                if (!this.runtimeProfile.allowsEconomyItemMarketCommand(cmdNameLower,
+                        this.economyShopRouteEnabled(), auctionRoute, sellRoute, ordersRoute)) {
+                    if ("sell".equals(cmdNameLower) && sender instanceof Player player) {
+                        String mode = args.length == 0 ? "open" : args[0].toLowerCase(Locale.ROOT);
+                        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SELL_ATTEMPT",
+                            mode, 0, 0.0, 0.0, "source=command");
+                        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SELL_REJECTED",
+                            mode, 0, 0.0, 0.0, "reason=route_disabled_or_custody_unqualified");
+                    }
+                    sender.sendMessage("§cThe item market is temporarily unavailable while inventory transfer protection is being completed.");
+                    return true;
+                }
+            }
+            if ("pay".equals(cmdNameLower)) {
+                if (!(sender instanceof Player player)) { sender.sendMessage("Player-only command."); return true; }
+                String[] split = new String[args.length + 1];
+                split[0] = "pay";
+                System.arraycopy(args, 0, split, 1, args.length);
+                this.handlePayCommandGate(player, split);
+                return true;
+            }
+            if ("eco".equals(cmdNameLower)) {
+                this.handleEcoCommand(sender, args);
+                return true;
+            }
+        }
+        // /pay is normally handled before Bukkit dispatch; keep direct command dispatch consistent too.
+        if ("pay".equals(cmdNameLower)) {
+            if (!(sender instanceof Player player)) { sender.sendMessage("Player-only command."); return true; }
+            String[] split = new String[args.length + 1];
+            split[0] = "pay";
+            System.arraycopy(args, 0, split, 1, args.length);
+            this.handlePayCommandGate(player, split);
+            return true;
+        }
         if ("pizzasusflag".equals(cmdNameLower)) {
             this.handlePizzaSusFlagCommand(sender, args);
             return true;
@@ -4217,6 +5675,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         // Console-capable: shards give <player> <amount> (used by PizzaAdminTools for Pizza+/++ stipends).
         if ("shards".equals(cmdNameLower) && !(sender instanceof Player)) {
+            if (!this.requireShardsEnabled(sender)) return true;
             if (args.length >= 3 && "give".equalsIgnoreCase(args[0])) {
                 this.handleShardsGiveFromConsole(sender, args[1], args[2]);
             } else {
@@ -5747,7 +7206,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             System.arraycopy(contents, 0, safe, 0, copy);
         }
         inv.setContents(safe);
-        viewer.openInventory(inv);
+        this.openMenu(viewer, inv);
     }
 
     /*
@@ -5828,6 +7287,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void handleSellCommand(Player player, String[] args) {
+        String sellMode = args.length == 0 ? "open" : args[0].toLowerCase(Locale.ROOT);
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SELL_ATTEMPT",
+            sellMode, 0, 0.0, 0.0, null);
         if (args.length > 0 && "reload".equalsIgnoreCase(args[0])) {
             if (!player.hasPermission("pizzasmp.sell.reload")) {
                 player.sendMessage("\u00a7cNo permission.");
@@ -5835,6 +7297,33 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             this.loadSellConfig();
             player.sendMessage("\u00a7aSell prices reloaded.");
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            if (!this.economySellRouteEnabled()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SELL_REJECTED",
+                    sellMode, 0, 0.0, 0.0, "reason=route_disabled_or_custody_unqualified");
+                player.sendMessage("\u00a77Server selling is temporarily unavailable.");
+                return;
+            }
+            if (args.length == 0) {
+                this.openSellGui(player);
+                return;
+            }
+            if (!"hand".equalsIgnoreCase(args[0]) && !"all".equalsIgnoreCase(args[0])) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SELL_REJECTED",
+                    sellMode, 0, 0.0, 0.0, "reason=invalid_mode");
+                player.sendMessage("\u00a77Usage: \u00a7f/sell hand \u00a77or \u00a7f/sell all\u00a77.");
+                return;
+            }
+            this.beginJournaledEconomySell(player, "hand".equalsIgnoreCase(args[0]));
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY
+                && !this.settings.getBoolean("economy.sell-enabled", false)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SELL_REJECTED",
+                sellMode, 0, 0.0, 0.0, "reason=disabled");
+            player.sendMessage("§7Server selling is disabled.");
             return;
         }
         if (args.length == 0) {
@@ -5876,6 +7365,339 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.sellItemsAsync(player, taken, "SELL_ALL", false);
     }
 
+    private void beginJournaledEconomySell(Player player, boolean handOnly) {
+        this.beginJournaledEconomySell(player, handOnly, null);
+    }
+
+    /** {@code slots}, when set, limits the sale to those storage slots (the sell GUI); otherwise hand or all. */
+    private void beginJournaledEconomySell(Player player, boolean handOnly, java.util.Set<Integer> slots) {
+        if (player == null || !this.journaledSalesInFlight.add(player.getUniqueId())) {
+            if (player != null) player.sendMessage("§7A sale is already being processed.");
+            return;
+        }
+        this.processJournaledEconomySell(player, slots == null && handOnly, slots, 0);
+    }
+
+    private void processJournaledEconomySell(Player player, boolean handOnly, java.util.Set<Integer> slots, int completedFills) {
+        if (!player.isOnline()) { this.journaledSalesInFlight.remove(player.getUniqueId()); return; }
+        if (completedFills >= 24) {
+            this.journaledSalesInFlight.remove(player.getUniqueId());
+            player.sendMessage("§7Several order fills completed. Run /sell again to continue with remaining items.");
+            return;
+        }
+        if (!marketCursorEmpty(player)) {
+            this.journaledSalesInFlight.remove(player.getUniqueId());
+            player.sendMessage("§cMove the cursor item into your inventory before selling.");
+            return;
+        }
+        ItemStack[] storage = player.getInventory().getStorageContents();
+        int start = handOnly ? player.getInventory().getHeldItemSlot() : 0;
+        int end = handOnly ? start + 1 : storage.length;
+        List<SaleInventoryCandidate> candidates = new ArrayList<>();
+        for (int slot = start; slot < end; slot++) {
+            if (slots != null && !slots.contains(slot)) continue;
+            ItemStack stack = storage[slot];
+            if (stack == null || stack.getType().isAir() || stack.getType().name().contains("SHULKER")) continue;
+            if (this.vanillaItemSanitizer == null || this.vanillaItemSanitizer.violationReason(stack) != null) continue;
+            double worth = this.getItemWorth(stack);
+            if (Double.isFinite(worth) && worth > 0.0)
+                candidates.add(new SaleInventoryCandidate(slot, stack.clone(), java.math.BigDecimal.valueOf(worth)));
+        }
+        if (candidates.isEmpty()) {
+            this.journaledSalesInFlight.remove(player.getUniqueId());
+            if (completedFills == 0) this.beginJournaledShopSell(player, handOnly, slots);
+            else player.sendMessage("§7No more sellable items remain.");
+            return;
+        }
+        if (!this.economyOrderRouteEnabled()) {
+            this.journaledSalesInFlight.remove(player.getUniqueId());
+            this.beginJournaledShopSell(player, handOnly, slots);
+            return;
+        }
+        UUID seller = player.getUniqueId();
+        this.runAsyncTask(() -> {
+            BetterOrderOffer best;
+            try { best = this.findBetterOrderForSale(seller, candidates); }
+            catch (SQLException failure) {
+                this.logTransactionAudit(seller.toString(), player.getName(), "SELL_REJECTED", "INVENTORY", 0,
+                    0.0, 0.0, "reason=order_lookup_failed");
+                this.runOnPlayerThread(player, () -> {
+                    this.journaledSalesInFlight.remove(seller);
+                    player.sendMessage("§cOrder prices could not be checked; no items were sold.");
+                });
+                return;
+            }
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) { this.journaledSalesInFlight.remove(seller); return; }
+                if (best == null) {
+                    this.journaledSalesInFlight.remove(seller);
+                    this.beginJournaledShopSell(player, handOnly, slots);
+                    return;
+                }
+                this.beginJournaledOrderFill(player, best, handOnly, slots, completedFills);
+            });
+        });
+    }
+
+    private BetterOrderOffer findBetterOrderForSale(UUID seller, List<SaleInventoryCandidate> candidates) throws SQLException {
+        if (seller == null || candidates == null || candidates.isEmpty()) return null;
+        List<String> materials = candidates.stream().map(c -> c.expected().getType().name()).distinct().toList();
+        String placeholders = String.join(",", java.util.Collections.nCopies(materials.size(), "?"));
+        String sql = "SELECT id,item_key,unit_price,amount_total,amount_filled,amount_reserved FROM order_listings "
+            + "WHERE status='ACTIVE' AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP) "
+            + "AND creator_uuid<>? AND creator_uuid<>? AND UPPER(item_key) IN (" + placeholders + ") "
+            + "AND amount_total>amount_filled+amount_reserved ORDER BY unit_price DESC,created_at ASC LIMIT 450";
+        try (Connection connection = this.openSyncConnection(); PreparedStatement query = connection.prepareStatement(sql)) {
+            query.setString(1, seller.toString()); query.setString(2, SERVER_UUID);
+            int p = 3; for (String material : materials) query.setString(p++, material);
+            try (ResultSet rows = query.executeQuery()) {
+                while (rows.next()) {
+                    String itemKey = rows.getString(2);
+                    BigDecimal unitPrice = BigDecimal.valueOf(rows.getDouble(3)).setScale(2, java.math.RoundingMode.HALF_UP);
+                    int available = rows.getInt(4) - rows.getInt(5) - rows.getInt(6);
+                    if (available <= 0 || unitPrice.signum() <= 0) continue;
+                    for (SaleInventoryCandidate candidate : candidates) {
+                        if (!candidate.expected().getType().name().equalsIgnoreCase(itemKey)) continue;
+                        if (unitPrice.compareTo(candidate.shopWorth()) <= 0) continue;
+                        return new BetterOrderOffer(candidate.slot(), candidate.expected(), rows.getLong(1), available, unitPrice);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private void beginJournaledOrderFill(Player player, BetterOrderOffer offer, boolean handOnly, java.util.Set<Integer> slots, int completedFills) {
+        if (player == null || offer == null || !this.economyOrderRouteEnabled()) {
+            if (player != null) this.journaledSalesInFlight.remove(player.getUniqueId());
+            return;
+        }
+        int amount = Math.min(offer.expected().getAmount(), offer.available());
+        if (amount <= 0) {
+            this.processJournaledEconomySell(player, handOnly, slots, completedFills + 1);
+            return;
+        }
+        ItemStack soldStack = offer.expected().clone(); soldStack.setAmount(amount);
+        final byte[] payload;
+        try { payload = encodeJournaledSellItems(List.of(new JournaledSellItem(offer.slot(), soldStack, offer.unitPrice()))); }
+        catch (java.io.IOException failure) {
+            this.journaledSalesInFlight.remove(player.getUniqueId());
+            player.sendMessage("§cThat order fill could not be encoded safely.");
+            return;
+        }
+        UUID operationId = UUID.randomUUID();
+        java.math.BigDecimal payout = offer.unitPrice().multiply(java.math.BigDecimal.valueOf(amount));
+        MarketOperationJournal.Request request;
+        try {
+            request = new MarketOperationJournal.Request(operationId, player.getUniqueId(), player.getName(), "ORDER_FILL",
+                "ORDER_FILL:" + offer.orderId(), amount, payout, this.detectServerName(), payload);
+        } catch (IllegalArgumentException invalidRequest) {
+            this.journaledSalesInFlight.remove(player.getUniqueId());
+            player.sendMessage("§cThat order fill could not be prepared safely.");
+            return;
+        }
+        InventoryCustody custody = this.currentInventoryCustody();
+        if (custody == null || !custody.qualified()) {
+            this.journaledSalesInFlight.remove(player.getUniqueId());
+            player.sendMessage("§cInventory protection is temporarily unavailable.");
+            return;
+        }
+        UUID seller = player.getUniqueId();
+        String sellerName = player.getName();
+        MarketOperationCoordinator.CustodyFlow flow = this.journaledCustodyFlow(player, custody,
+            (op, lease) -> onPlayerStage(player, () -> {
+                ItemStack actual = player.getInventory().getItem(offer.slot());
+                if (!player.isOnline() || !lease.playerId().equals(seller) || !marketCursorEmpty(player)
+                        || actual == null || !actual.isSimilar(offer.expected()) || actual.getAmount() != offer.expected().getAmount())
+                    return java.util.concurrent.CompletableFuture.completedFuture(
+                        new MarketOperationCoordinator.Mutation(false, false, "inventory_changed"));
+                int remaining = actual.getAmount() - amount;
+                if (remaining <= 0) player.getInventory().setItem(offer.slot(), null);
+                else { ItemStack left = actual.clone(); left.setAmount(remaining); player.getInventory().setItem(offer.slot(), left); }
+                return java.util.concurrent.CompletableFuture.completedFuture(
+                    new MarketOperationCoordinator.Mutation(true, true, null));
+            }));
+        this.marketOperationCoordinator.executeItemOperation(request, flow).whenComplete((result, failure) ->
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) { this.journaledSalesInFlight.remove(seller); return; }
+                if (failure != null || result == null || result.outcome() == MarketOperationCoordinator.Outcome.PENDING_REVIEW) {
+                    this.journaledSalesInFlight.remove(seller);
+                    player.closeInventory();
+                    player.sendMessage("§cOrder fill is being reconciled; your inventory remains protected.");
+                } else if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                    player.sendActionBar(Component.text("§aSold " + amount + "x " + this.humanName(offer.expected().getType())
+                        + " to an order for $" + this.fmtMoney(payout.doubleValue()) + "."));
+                    player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.7f, 1.1f);
+                    this.notifyFollowers(seller, sellerName, "sold items to an order for §f$" + this.fmtMoney(payout.doubleValue()) + "§7.", true);
+                    this.processJournaledEconomySell(player, handOnly, slots, completedFills + 1);
+                } else if (result.outcome() == MarketOperationCoordinator.Outcome.REJECTED) {
+                    if (completedFills < 2) this.processJournaledEconomySell(player, handOnly, slots, completedFills + 1);
+                    else {
+                        this.journaledSalesInFlight.remove(seller);
+                        player.sendMessage("§cOrder changed before the fill completed; no unsold items were removed.");
+                    }
+                } else {
+                    this.journaledSalesInFlight.remove(seller);
+                    player.sendMessage("§cAnother item operation is still active.");
+                }
+            }));
+    }
+
+    /** Fixed-worth sale for the economy profile. Items are removed only after Canopy has checkpointed pre-state. */
+    private void beginJournaledShopSell(Player player, boolean handOnly, java.util.Set<Integer> slots) {
+        UUID playerId = player.getUniqueId();
+        String playerName = player.getName();
+        if (!this.economySellRouteEnabled() || this.vanillaItemSanitizer == null || !player.isOnline()) {
+            this.logTransactionAudit(playerId.toString(), playerName, "SELL_REJECTED", "INVENTORY", 0,
+                0.0, 0.0, "reason=route_unavailable");
+            player.sendMessage("§cSelling is temporarily unavailable.");
+            return;
+        }
+        if (!marketCursorEmpty(player)) {
+            this.logTransactionAudit(playerId.toString(), playerName, "SELL_REJECTED", "INVENTORY", 0,
+                0.0, 0.0, "reason=cursor_item_present");
+            player.sendMessage("§cMove the cursor item into your inventory before selling.");
+            return;
+        }
+
+        List<JournaledSellItem> selected = new java.util.ArrayList<>();
+        ItemStack[] storage = player.getInventory().getStorageContents();
+        int heldSlot = player.getInventory().getHeldItemSlot();
+        int first = handOnly ? heldSlot : 0;
+        int last = handOnly ? heldSlot + 1 : storage.length;
+        BigDecimal total = BigDecimal.ZERO;
+        int itemCount = 0;
+        String singleKey = null;
+        for (int slot = first; slot < last; slot++) {
+            if (slots != null && !slots.contains(slot)) continue;
+            ItemStack stack = storage[slot];
+            if (stack == null || stack.getType().isAir()) continue;
+            String invalid = this.vanillaItemSanitizer.violationReason(stack);
+            if (invalid != null) {
+                if (handOnly) {
+                    this.logTransactionAudit(playerId.toString(), playerName, "SELL_REJECTED", stack.getType().name(),
+                        stack.getAmount(), 0.0, 0.0, "reason=invalid_item;rule=" + invalid);
+                    player.sendMessage("§cThat item is not vanilla-valid and cannot be sold.");
+                    return;
+                }
+                continue;
+            }
+            double worth = this.getItemWorth(stack);
+            if (!Double.isFinite(worth) || worth <= 0.0) continue;
+            BigDecimal unitWorth = BigDecimal.valueOf(worth);
+            selected.add(new JournaledSellItem(slot, stack.clone(), unitWorth));
+            total = total.add(unitWorth.multiply(BigDecimal.valueOf(stack.getAmount())));
+            itemCount = Math.addExact(itemCount, stack.getAmount());
+            String key = stack.getType().name();
+            if (singleKey == null) singleKey = key;
+            else if (!singleKey.equals(key)) singleKey = "MIXED";
+        }
+        if (selected.isEmpty() || itemCount <= 0 || total.signum() <= 0) {
+            this.logTransactionAudit(playerId.toString(), playerName, "SELL_REJECTED", "INVENTORY", 0,
+                0.0, 0.0, "reason=no_sellable_items");
+            player.sendActionBar(Component.text(handOnly ? "§cThat item has no sell price." : "§7No sellable items found."));
+            return;
+        }
+        final int saleItemCount = itemCount;
+        final BigDecimal saleTotal = total.setScale(2, java.math.RoundingMode.CEILING);
+        final byte[] payload;
+        try { payload = encodeJournaledSellItems(selected); }
+        catch (java.io.IOException failure) {
+            this.logTransactionAudit(playerId.toString(), playerName, "SELL_REJECTED", "INVENTORY", saleItemCount,
+                0.0, 0.0, "reason=item_encode_failed");
+            player.sendMessage("§cThat sale is too large to process safely.");
+            return;
+        }
+
+        UUID operationId = UUID.randomUUID();
+        MarketOperationJournal.Request request;
+        try {
+            request = new MarketOperationJournal.Request(operationId, playerId, playerName, "SHOP_SELL",
+                singleKey == null ? "INVENTORY" : singleKey, saleItemCount, saleTotal, this.detectServerName(), payload);
+        } catch (IllegalArgumentException invalidRequest) {
+            this.logTransactionAudit(playerId.toString(), playerName, "SELL_REJECTED", "INVENTORY", saleItemCount,
+                0.0, 0.0, "reason=invalid_request");
+            player.sendMessage("§cThat sale could not be prepared safely.");
+            return;
+        }
+        InventoryCustody custody = this.currentInventoryCustody();
+        if (custody == null || !custody.qualified()) {
+            this.logTransactionAudit(playerId.toString(), playerName, "SELL_REJECTED", request.itemKey(), saleItemCount,
+                0.0, 0.0, "reason=custody_unqualified");
+            player.sendMessage("§cSelling is temporarily unavailable while inventory protection is being completed.");
+            return;
+        }
+        this.logTransactionAudit(playerId.toString(), playerName, "SELL_PROCESS_ATTEMPT", request.itemKey(), saleItemCount,
+            saleTotal.doubleValue() / saleItemCount, saleTotal.doubleValue(), "operation=" + operationId + ";mode=" + (slots != null ? "gui" : handOnly ? "hand" : "all"));
+        MarketOperationCoordinator.CustodyFlow flow = new MarketOperationCoordinator.CustodyFlow() {
+            @Override public boolean qualified() { return custody.qualified(); }
+            @Override public java.util.concurrent.CompletionStage<InventoryCustody.Lease> begin(MarketOperationJournal.Request op) {
+                return onPlayerStage(player, () -> custody.begin(player, op.operationId()));
+            }
+            @Override public java.util.concurrent.CompletionStage<MarketOperationCoordinator.Mutation> applyItems(
+                    MarketOperationJournal.Request op, InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> {
+                    if (!lease.playerId().equals(playerId) || !player.isOnline() || !marketCursorEmpty(player))
+                        return java.util.concurrent.CompletableFuture.completedFuture(
+                            new MarketOperationCoordinator.Mutation(false, false, "player_or_cursor_changed"));
+                    ItemStack[] current = player.getInventory().getStorageContents();
+                    for (JournaledSellItem item : selected) {
+                        ItemStack actual = current[item.slot()];
+                        if (actual == null || !actual.isSimilar(item.expected())
+                                || actual.getAmount() != item.expected().getAmount())
+                            return java.util.concurrent.CompletableFuture.completedFuture(
+                                new MarketOperationCoordinator.Mutation(false, false, "inventory_changed"));
+                    }
+                    boolean started = false;
+                    try {
+                        for (JournaledSellItem item : selected) {
+                            started = true;
+                            player.getInventory().setItem(item.slot(), null);
+                        }
+                        return java.util.concurrent.CompletableFuture.completedFuture(
+                            new MarketOperationCoordinator.Mutation(true, true, null));
+                    } catch (RuntimeException failure) {
+                        return java.util.concurrent.CompletableFuture.completedFuture(
+                            new MarketOperationCoordinator.Mutation(started, false, "partial_sell_inventory_change"));
+                    }
+                });
+            }
+            @Override public java.util.concurrent.CompletionStage<InventoryCustody.CheckpointReceipt> checkpoint(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.checkpoint(player, lease));
+            }
+            @Override public java.util.concurrent.CompletionStage<Void> finish(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.finish(player, lease));
+            }
+            @Override public java.util.concurrent.CompletionStage<Void> abortUntouched(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.abortUntouched(player, lease));
+            }
+            @Override public java.util.concurrent.CompletionStage<Void> forgetTerminal(UUID id, boolean committed) {
+                return onPlayerStage(player, () -> custody.forgetTerminal(player, id, committed));
+            }
+        };
+        this.marketOperationCoordinator.executeItemOperation(request, flow).whenComplete((result, failure) ->
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                if (failure != null || result == null) {
+                    player.closeInventory();
+                    player.sendMessage("§cSale status is being reconciled; your inventory remains protected.");
+                } else if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                    player.sendActionBar(Component.text("§aSold " + saleItemCount + " items for $" + this.fmtMoney(saleTotal.doubleValue())));
+                    player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
+                    this.notifyFollowers(playerId, playerName, "sold items for §f$" + this.fmtMoney(saleTotal.doubleValue()) + "§7.", true);
+                } else if (result.outcome() == MarketOperationCoordinator.Outcome.REJECTED) {
+                    this.logTransactionAudit(playerId.toString(), playerName, "SELL_REJECTED", request.itemKey(), saleItemCount,
+                        0.0, 0.0, "operation=" + operationId + ";reason=" + result.reason());
+                    player.sendMessage("§cSale could not be completed; your items were not sold.");
+                } else if (result.outcome() == MarketOperationCoordinator.Outcome.BUSY) {
+                    player.sendActionBar(Component.text("§7Finishing your last sale..."));
+                } else {
+                    player.closeInventory();
+                    player.sendMessage("§cSale is being reconciled; your inventory remains protected.");
+                }
+            }));
+    }
+
     /**
      * Sells items that have ALREADY been removed from the player's inventory. Dynamic-economy routing:
      * each stack is delivered into the highest-paying matching active buy order (EcoBot or players,
@@ -5884,6 +7706,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      */
     private void sellItemsAsync(Player player, java.util.List<ItemStack> items, String auditTag, boolean handMode) {
         UUID id = player.getUniqueId();
+        String playerName = player.getName();
+        int requestedItems = items.stream().filter(java.util.Objects::nonNull).mapToInt(ItemStack::getAmount).sum();
+        this.logTransactionAudit(id.toString(), playerName, "SELL_PROCESS_ATTEMPT", "INVENTORY", requestedItems,
+            0.0, 0.0, "mode=" + auditTag);
         this.runAsyncTask(() -> {
             double orderPayout = 0.0;
             double shopPayout = 0.0;
@@ -5895,6 +7721,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 int remaining = stack.getAmount();
                 double baseUnit = this.sellUnitPrice(mat);        // order floor / plain-item shop price
                 double perItem = this.getItemWorth(stack);        // shulkers -> summed contents + box worth
+                int stackOrderSold = 0;
+                double stackOrderPayout = 0.0;
+                int stackShopSold = 0;
                 // Filled shulkers aren't order-routed (a wildcard order would pay only the box price and
                 // lose the contents); they sell at their contents worth.
                 boolean special = mat.name().contains("SHULKER");
@@ -5905,15 +7734,27 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     int sold = (int) r[0];
                     orderSold += sold;
                     orderPayout += r[1];
+                    stackOrderSold += sold;
+                    stackOrderPayout += r[1];
                     remaining -= sold;
                 }
                 // 2) base worth for the remainder (getItemWorth covers shulker contents)
                 if (remaining > 0 && perItem > 0.0) {
                     shopPayout += perItem * remaining;
+                    stackShopSold = remaining;
                     remaining = 0;
+                }
+                int stackSold = stackOrderSold + stackShopSold;
+                double stackPayout = stackOrderPayout + perItem * stackShopSold;
+                if (stackSold > 0) {
+                    this.logTransactionAudit(id.toString(), playerName, "SELL_ITEM", mat.name(), stackSold,
+                        stackPayout / stackSold, stackPayout,
+                        "mode=" + auditTag + ";orders=" + stackOrderSold + ";shop=" + stackShopSold);
                 }
                 // 3) nothing wanted it -> hand it back
                 if (remaining > 0) {
+                    this.logTransactionAudit(id.toString(), playerName, "SELL_RETURN", mat.name(), remaining,
+                        0.0, 0.0, "mode=" + auditTag + ";reason=no_buyer_or_worth");
                     ItemStack back = stack.clone();
                     back.setAmount(remaining);
                     unsold.add(back);
@@ -5939,8 +7780,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     ? "\u00a77You sold items for $" + this.fmtMoney(totalPayout)
                     : "\u00a7a+" + this.fmtMoney(totalPayout))));
                 player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
-                this.logTransactionAudit(id.toString(), player.getName(), auditTag, "INVENTORY", 1, 0, totalPayout,
-                    fOrderSold > 0 ? "orders=" + fOrderSold : null);
+                this.logTransactionAudit(id.toString(), playerName, auditTag, "INVENTORY", requestedItems,
+                    requestedItems > 0 ? totalPayout / requestedItems : 0.0, totalPayout,
+                    "orders=" + fOrderSold + ";items=" + requestedItems);
                 this.notifyFollowers(id, player.getName(), "sold items for \u00a7f$" + this.fmtMoney(totalPayout) + "\u00a77.", true);
             });
         });
@@ -5984,18 +7826,25 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openSellGui(Player player) {
-        Inventory inv = MenuLock.create((int)36, (String)TITLE_SELL_GUI, slot -> slot < 36);
+        Inventory inv = MenuLock.create(54, TITLE_SELL_GUI, slot -> slot < SELL_GUI_SLOTS);
+        this.drawSellGuiControls(inv);
         // Worth display in the sell GUI is packet-only (sellGuiViewers gate in the worth
         // listener). NEVER write lore/PDC onto the real items: marked items that escaped
         // the GUI had different NBT and silently refused to stack with clean ones.
         this.sellGuiViewers.add(player.getUniqueId());
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void handleSellGuiClick(Player player, InventoryClickEvent e) {
         int raw = e.getRawSlot();
         Inventory top = e.getView().getTopInventory();
         if (raw < 0) {
+            return;
+        }
+        this.refreshSellGuiSoon(player, top);
+        if (raw == SELL_GUI_BUTTON) {
+            e.setCancelled(true);
+            this.sellGuiSell(player, top, false);
             return;
         }
         if (raw < top.getSize()) {
@@ -6017,12 +7866,131 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
+    /**
+     * Economy profile: closing the sell GUI sells its legal, sellable items at worth in one balance deposit and
+     * hands back everything else; if the deposit fails, the items are handed back too.
+     */
+    private static final int SELL_GUI_SLOTS = 45;
+    private static final int SELL_GUI_BUTTON = 53;
+
+    /** Locked bottom row and, in its last slot, the sell button with the current total. */
+    private void drawSellGuiControls(Inventory gui) {
+        ItemStack filler = this.named(Material.GRAY_STAINED_GLASS_PANE, " ", "sell_gui_filler");
+        for (int slot = SELL_GUI_SLOTS; slot < SELL_GUI_BUTTON; slot++) gui.setItem(slot, filler);
+        double total = this.sellGuiTotal(gui);
+        gui.setItem(SELL_GUI_BUTTON, this.namedWithLore(Material.LIME_STAINED_GLASS_PANE, "§aSell for $" + this.fmtMoney(total),
+            "sell_gui_sell", List.of("§7Click here to sell items")));
+    }
+
+    /** What the items in the GUI would sell for now (legal items with a price). */
+    private double sellGuiTotal(Inventory gui) {
+        java.math.BigDecimal total = java.math.BigDecimal.ZERO;
+        for (int i = 0; i < Math.min(SELL_GUI_SLOTS, gui.getSize()); i++) {
+            ItemStack item = gui.getItem(i);
+            if (item == null || item.getType().isAir()) continue;
+            if (this.vanillaItemSanitizer != null && this.vanillaItemSanitizer.violationReason(item) != null) continue;
+            double worth = this.getItemWorth(item);
+            if (!Double.isFinite(worth) || worth <= 0.0) continue;
+            total = total.add(java.math.BigDecimal.valueOf(item.getType().name().contains("SHULKER") ? worth : worth * item.getAmount()));
+        }
+        return total.setScale(2, java.math.RoundingMode.DOWN).doubleValue();
+    }
+
+    /** After the click lands (next tick), the button shows the new total. */
+    private void refreshSellGuiSoon(Player player, Inventory gui) {
+        PlatformScheduler.entityLater(this, player, () -> {
+            if (player.isOnline() && player.getOpenInventory().getTopInventory() == gui) this.drawSellGuiControls(gui);
+        }, null, 1L);
+    }
+
+    /** Closing the sell GUI sells what is in it and hands back the rest. */
+    private void sellGuiCloseJournaled(Player player, Inventory gui) {
+        this.sellGuiSell(player, gui, true);
+    }
+
+    /**
+     * Sells the GUI's legal, sellable items at worth in one balance deposit. Closing hands everything else back; the
+     * button leaves it in the GUI. If the deposit fails, the items come back.
+     */
+    private void sellGuiSell(Player player, Inventory gui, boolean closing) {
+        if (!this.economySellRouteEnabled()) {
+            if (!closing) { player.sendActionBar(Component.text("§cSelling is closed right now.")); return; }
+            List<ItemStack> back = new ArrayList<>();
+            for (int i = 0; i < Math.min(SELL_GUI_SLOTS, gui.getSize()); i++) {
+                ItemStack item = gui.getItem(i);
+                if (item != null && !item.getType().isAir()) { back.add(item); gui.setItem(i, null); }
+            }
+            this.returnToPlayer(player, back);
+            if (!back.isEmpty()) player.sendMessage("§7Selling is closed right now; your items were returned.");
+            return;
+        }
+        List<ItemStack> sold = new ArrayList<>();
+        List<ItemStack> unsold = new ArrayList<>();
+        java.math.BigDecimal total = java.math.BigDecimal.ZERO;
+        int count = 0;
+        for (int i = 0; i < Math.min(SELL_GUI_SLOTS, gui.getSize()); i++) {
+            ItemStack item = gui.getItem(i);
+            if (item == null || item.getType().isAir()) continue;
+            double worth = this.getItemWorth(item);
+            boolean legal = this.vanillaItemSanitizer == null || this.vanillaItemSanitizer.violationReason(item) == null;
+            if (!legal || !Double.isFinite(worth) || worth <= 0.0) {
+                if (closing) { gui.setItem(i, null); unsold.add(this.stripSellWorthMarker(item)); }
+                continue;
+            }
+            gui.setItem(i, null);
+            item = this.stripSellWorthMarker(item);
+            // Shulker worth is already the whole box; other items are per unit.
+            double stackWorth = item.getType().name().contains("SHULKER") ? worth : worth * item.getAmount();
+            total = total.add(java.math.BigDecimal.valueOf(stackWorth));
+            count += item.getAmount();
+            sold.add(item);
+        }
+        this.returnToPlayer(player, unsold);
+        if (!unsold.isEmpty()) player.sendMessage("§7Items with no sell price were returned.");
+        if (!closing) this.drawSellGuiControls(gui);
+        if (sold.isEmpty()) {
+            if (!closing) player.sendActionBar(Component.text("§7Put items with a sell price in the GUI first."));
+            return;
+        }
+        final double payout = total.setScale(2, java.math.RoundingMode.DOWN).doubleValue();
+        final int itemCount = count;
+        final String name = player.getName();
+        final UUID id = player.getUniqueId();
+        this.runAsyncTask(() -> {
+            net.milkbowl.vault.economy.EconomyResponse paid = this.economy.depositPlayer(name, payout);
+            boolean ok = paid != null && paid.transactionSuccess();
+            this.logTransactionAudit(id.toString(), name, ok ? "SELL" : "SELL_REJECTED", sold.size() == 1 ? sold.get(0).getType().name() : "MIXED",
+                itemCount, itemCount > 0 ? payout / itemCount : 0.0, ok ? payout : 0.0, "mode=gui" + (ok ? "" : ";reason=deposit_failed"));
+            if (ok) this.incrementMoneyStat(id, "sell_earned", payout);
+            this.runOnPlayerThread(player, () -> {
+                if (!ok) {
+                    this.returnToPlayer(player, sold);
+                    player.sendMessage("§cThe sale could not be completed; your items were returned.");
+                    return;
+                }
+                player.sendActionBar(Component.text("§aSold " + itemCount + " items for $" + this.fmtMoney(payout) + "."));
+                player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.7f, 1.1f);
+                this.refreshSidebarSoon(player);
+                if (player.getOpenInventory().getTopInventory() == gui) this.drawSellGuiControls(gui);
+            });
+        });
+    }
+
+    /** Back into the inventory; whatever does not fit drops at the player's feet. */
+    private void returnToPlayer(Player player, List<ItemStack> items) {
+        for (ItemStack item : items) {
+            for (ItemStack rest : player.getInventory().addItem(item).values()) {
+                player.getWorld().dropItemNaturally(player.getLocation(), rest);
+            }
+        }
+    }
+
     private boolean isSellGuiInsertSlot(int slot) {
-        return slot >= 0 && slot < 36;
+        return slot >= 0 && slot < SELL_GUI_SLOTS;
     }
 
     private int firstEmptySellGuiSlot(Inventory inv) {
-        for (int slot = 0; slot < 36; ++slot) {
+        for (int slot = 0; slot < SELL_GUI_SLOTS; ++slot) {
             ItemStack item;
             if (!this.isSellGuiInsertSlot(slot) || (item = inv.getItem(slot)) != null && item.getType() != Material.AIR) continue;
             return slot;
@@ -6031,10 +7999,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void processSellGuiOnClose(Player player, Inventory inv) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            this.sellGuiCloseJournaled(player, inv);
+            return;
+        }
         // Route the GUI's items through the same order-aware path as /sell (orders above base worth
         // first, then base worth, unsellable returned). getItemWorth inside handles shulker contents.
         java.util.List<ItemStack> items = new java.util.ArrayList<>();
-        for (int slot = 0; slot < 36; ++slot) {
+        for (int slot = 0; slot < SELL_GUI_SLOTS; ++slot) {
             ItemStack stack;
             if (!this.isSellGuiInsertSlot(slot) || (stack = inv.getItem(slot)) == null || stack.getType() == Material.AIR) continue;
             items.add(this.stripSellWorthMarker(stack));
@@ -6049,24 +8021,55 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // enchant_spec grammar: "*" = any, "" = unenchanted only, "sharpness:5,fire_aspect:2" = item must
     // hold at least those enchants at >= those levels. Enchant keys use the vanilla registry name.
 
+    /** economy.sell-multiplier: scales every sell price (and so worth, payouts and the shop price floor). */
+    private double sellMultiplier() {
+        double m = this.settings.getDouble("economy.sell-multiplier", 1.0);
+        return Double.isFinite(m) && m > 0.0 ? m : 1.0;
+    }
+
+    /**
+     * economy.shop-item-multipliers: extra price multipliers for items whose name contains a key (NETHERITE: 4
+     * covers netherite gear, ingots and blocks); the largest matching one applies, on top of the shop multiplier.
+     */
+    private double shopItemMultiplier(Material material) {
+        if (material == null) return 1.0;
+        ConfigurationSection section = this.settings.getConfigurationSection("economy.shop-item-multipliers");
+        if (section == null) return 1.0;
+        double best = 1.0;
+        String name = material.name();
+        for (String key : section.getKeys(false)) {
+            double m = section.getDouble(key, 1.0);
+            if (Double.isFinite(m) && m > best && name.contains(key.toUpperCase(Locale.ROOT))) best = m;
+        }
+        return best;
+    }
+
+    /** economy.shop-price-multiplier: scales every shop and PvP shop price before the price floor. */
+    private double shopPriceMultiplier() {
+        double m = this.settings.getDouble("economy.shop-price-multiplier", 1.0);
+        return Double.isFinite(m) && m > 0.0 ? m : 1.0;
+    }
+
     private double sellUnitPrice(Material material) {
         ConfigurationSection worth;
         double configured;
         ConfigurationSection prices;
-        if (material == null || material == Material.AIR) {
-            return -1.0;
-        }
-        if (this.sellConfig != null && (prices = this.sellConfig.getConfigurationSection("prices")) != null && (configured = prices.getDouble(material.name(), -1.0)) > 0.0) {
-            return configured;
+        if (material == null || material == Material.AIR) return 0.0;
+        if (this.sellConfig != null && (prices = this.sellConfig.getConfigurationSection("prices")) != null
+                && prices.contains(material.name())) {
+            configured = prices.getDouble(material.name(), 0.0);
+            return Double.isFinite(configured) && configured > 0.0 ? configured * this.sellMultiplier() : 0.0;
         }
         if (this.worthConfig != null && (worth = this.worthConfig.getConfigurationSection("worth")) != null) {
             for (String key : this.worthLookupKeys(material)) {
                 double fallback = this.readWorthValue(worth, key);
-                if (!(fallback > 0.0)) continue;
-                return fallback;
+                if (!Double.isFinite(fallback) || !(fallback > 0.0)) continue;
+                return fallback * this.sellMultiplier();
             }
         }
-        return -1.0;
+        // Make the effective worth catalog total: every item Material has an explicit numeric value.
+        // Unconfigured entries are $0 and remain unsellable; they never authorize an item grant or payout.
+        return 0.0;
     }
 
     private double getItemWorth(ItemStack stack) {
@@ -6079,15 +8082,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     double contentsWorth = 0.0;
                     for (ItemStack item : box.getInventory()) {
                         if (item != null && item.getType() != Material.AIR) {
-                            contentsWorth += this.sellUnitPrice(item.getType()) * (double)item.getAmount();
+                            contentsWorth += ShopPricePolicy.effectiveWorth(this.sellUnitPrice(item.getType())) * (double)item.getAmount();
                         }
                     }
-                    double shulkerWorth = this.sellUnitPrice(type);
+                    double shulkerWorth = ShopPricePolicy.effectiveWorth(this.sellUnitPrice(type));
                     return (contentsWorth > 0.0 ? contentsWorth : 0.0) + shulkerWorth;
                 }
             }
         }
-        return this.sellUnitPrice(type);
+        return ShopPricePolicy.effectiveWorth(this.sellUnitPrice(type));
     }
 
     private List<String> worthLookupKeys(Material material) {
@@ -6475,7 +8478,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inventory.setItem(11, this.namedWithLore(Material.ENDER_PEARL, "§cLeave duel and use /rtp", "duel_rtp_leave:" + dimension,
             List.of("§7This ends the duel and forfeits the wager.")));
         inventory.setItem(15, this.namedWithLore(Material.SHIELD, "§7Stay in duel", "duel_rtp_stay", List.of()));
-        player.openInventory(inventory);
+        this.openMenu(player, inventory);
     }
 
     private void handleLegacyDuelRtpClick(Player player, ItemStack item) {
@@ -7994,7 +9997,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inventory.setItem(22, this.namedWithLore(Material.LIME_WOOL, state.soloTest ? "§aStart Test" : "§aSend Challenge",
             "duel_setup_submit", state.soloTest ? List.of("§7Wagers are disabled for solo tests.") : List.of()));
         inventory.setItem(26, this.namedWithLore(Material.BARRIER, "§cCancel", "duel_setup_cancel", List.of()));
-        player.openInventory(inventory);
+        this.openMenu(player, inventory);
     }
 
     private void handleLegacyDuelSetupClick(Player player, ItemStack item) {
@@ -11162,8 +13165,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         // /pay resolves exact or UNIQUE-prefix only: money must never typo-match to the wrong
         // player (the fuzzy typo stage is deliberately NOT used here; unknown names fall through
-        // to the offline-pay path, which resolves by exact known name).
+        // to the offline-pay path, which resolves by exact known name). A network nickname names its account.
         Player target = Bukkit.getPlayerExact(split[1]);
+        if (target == null) {
+            String account = this.networkPrivacy.accountName(split[1]);
+            if (!account.equalsIgnoreCase(split[1])) {
+                split[1] = account;
+                target = Bukkit.getPlayerExact(account);
+            }
+        }
         if (target == null) {
             String payQ = split[1].toLowerCase(Locale.ROOT);
             int prefixCount = 0;
@@ -11172,6 +13182,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (online.getName().toLowerCase(Locale.ROOT).startsWith(payQ)) { prefixHit = online; prefixCount++; }
             }
             if (prefixCount == 1) target = prefixHit;
+        }
+        if (this.economy instanceof PizzaEconomy provider) {
+            this.handleCanonicalPayment(sender, target, split, provider);
+            return true;
         }
         if (target != null && target.isOnline() && !this.privacyAllows(target.getUniqueId(), "payments", sender.getUniqueId())) {
             sender.sendMessage("\u00a7c" + target.getName() + " is not accepting payments from you.");
@@ -11228,6 +13242,59 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         return true;
     }
 
+    /** Use one canonical DB transaction for both accounts and the payment audit row. */
+    private void handleCanonicalPayment(Player sender, Player knownTarget, String[] split, PizzaEconomy provider) {
+        if (split.length != 3) {
+            sender.sendMessage("§7Usage: /pay <player> <amount>");
+            return;
+        }
+        ParsedAmount parsed = this.parseCompactAmount(split[2]);
+        if (parsed == null || !Double.isFinite(parsed.value) || parsed.value <= 0.0) {
+            sender.sendMessage("§cInvalid amount.");
+            return;
+        }
+        UUID sourceId = sender.getUniqueId();
+        String sourceName = sender.getName();
+        UUID knownId = knownTarget == null ? null : knownTarget.getUniqueId();
+        String targetName = knownTarget == null ? split[1] : knownTarget.getName();
+        String server = this.detectServerName();
+        this.runAsyncTask(() -> {
+            UUID targetId = knownId == null ? this.lookupUuidByName(targetName) : knownId;
+            if (targetId == null || sourceId.equals(targetId)) {
+                this.runOnPlayerThread(sender, () -> sender.sendMessage(targetId == null
+                    ? "§cPlayer not found." : "§cYou cannot pay yourself."));
+                return;
+            }
+            if (!this.privacyAllows(targetId, "payments", sourceId)) {
+                this.runOnPlayerThread(sender, () -> sender.sendMessage("§cThis player is not accepting payments from you."));
+                return;
+            }
+            PizzaEconomy.TransferResult result = provider.transfer(sourceId, sourceName, targetId,
+                targetName, parsed.value, server);
+            this.runOnPlayerThread(sender, () -> {
+                if (!sender.isOnline()) return;
+                switch (result.outcome()) {
+                    case SUCCESS -> sender.sendActionBar(Component.text("§aPaid §f$" + this.fmtMoney(parsed.value) + " §ato §f" + targetName));
+                    case INSUFFICIENT -> sender.sendMessage("§cNot enough money.");
+                    case FAILED -> sender.sendMessage("§cPayment failed; no payment was confirmed.");
+                    case UNKNOWN -> sender.sendMessage("§ePayment outcome is uncertain. Do not repeat it; ask staff to check the transaction log.");
+                }
+                if (result.outcome() == PizzaEconomy.TransferOutcome.SUCCESS) this.refreshSidebarSoon(sender);
+            });
+            if (result.outcome() == PizzaEconomy.TransferOutcome.SUCCESS) {
+                PlatformScheduler.globalNow(this, () -> {
+                    Player recipient = Bukkit.getPlayer(targetId);
+                    if (recipient != null) this.runOnPlayerThread(recipient, () -> {
+                        if (recipient.isOnline()) {
+                            recipient.sendActionBar(Component.text("§aReceived §f$" + this.fmtMoney(parsed.value) + " §afrom §f" + sourceName));
+                            this.refreshSidebarSoon(recipient);
+                        }
+                    });
+                });
+            }
+        });
+    }
+
     private UUID lookupUuidByName(String name) {
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT uuid FROM players WHERE LOWER(username)=LOWER(?) ORDER BY last_seen DESC LIMIT 1")) {
@@ -11252,7 +13319,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     /** Exact money with thousands separators: 100999123000 -> "100,999,123,000.00". */
     private String formatExactMoney(double amount) {
-        return String.format("%,.0f", amount);
+        return String.format(Locale.US, "%,.2f", amount);
     }
 
     /**
@@ -11392,13 +13459,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void handleShardsCommand(Player player) {
+        if (!this.requireShardsEnabled(player)) return;
         if (player == null || !player.isOnline()) {
             return;
         }
         this.runAsyncTask(() -> {
+            if (!this.shardsEnabled()) {
+                this.runOnPlayerThread(player, () -> this.requireShardsEnabled(player));
+                return;
+            }
             long shards = this.getShardBalance(player.getUniqueId());
             this.runOnPlayerThread(player, () -> {
-                if (!player.isOnline()) {
+                if (!player.isOnline() || !this.requireShardsEnabled(player)) {
                     return;
                 }
                 player.sendMessage("\u00a7aYour shards are: \u00a7f" + this.formatCompactNumber(shards));
@@ -11594,7 +13666,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             EconomyResponse resp = this.economy.withdrawPlayer((OfflinePlayer)player, amount);
             if (resp != null && resp.transactionSuccess()) {
-                this.upsertMoneyBalance(player.getUniqueId(), Math.max(0.0, this.economy.getBalance((OfflinePlayer)player)));
+                if (!(this.economy instanceof PizzaEconomy)) {
+                    this.upsertMoneyBalance(player.getUniqueId(), Math.max(0.0, this.economy.getBalance((OfflinePlayer)player)));
+                }
                 this.refreshSidebarSoon(player);
                 return true;
             }
@@ -11612,7 +13686,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.economy != null) {
             try {
                 this.economy.depositPlayer((OfflinePlayer)player, amount);
-                this.upsertMoneyBalance(player.getUniqueId(), this.economy.getBalance((OfflinePlayer)player));
+                if (!(this.economy instanceof PizzaEconomy)) {
+                    this.upsertMoneyBalance(player.getUniqueId(), this.economy.getBalance((OfflinePlayer)player));
+                }
             }
             catch (Exception exception) {
                 // empty catch block
@@ -11674,6 +13750,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void refreshSidebarSoon(Player player) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && !this.economyHudFor(player)) return;
         if (player == null || !player.isOnline()) {
             return;
         }
@@ -13229,7 +15306,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 inv.setItem(13, infoItem);
                 inv.setItem(15, chatItem);
                 inv.setItem(22, this.namedWithLore(Material.ARROW, "§fTeam Members", "team_settings_members", List.of("§7View team members")));
-                p.openInventory(inv);
+                this.openMenu(p, inv);
             });
         } catch (Exception ex) {
             this.getLogger().warning("openTeamSettingsGui failed: " + ex.getMessage());
@@ -13689,7 +15766,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.dataSource = new com.zaxxer.hikari.HikariDataSource(hc);
             this.mariadbDriverLoaded = true;
             this.getLogger().info("DB pool ready (max=" + hc.getMaximumPoolSize() + ", min-idle=" + hc.getMinimumIdle() + ") -> " + this.jdbcUrl());
-            this.applyBundledSchema(this.dataSource);
+            if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY) this.applyBundledSchema(this.dataSource);
+            else this.getLogger().info("Economy profile uses pre-provisioned schema; suite-wide migrations are disabled.");
         } catch (Throwable t) {
             this.getLogger().warning("Failed to init DB pool; falling back to per-op connections: " + t.getMessage());
             this.dataSource = null;
@@ -13759,6 +15837,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // Package-private: PlayerSyncManager borrows from the same pool.
     Connection openSyncConnection() throws SQLException {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && this.shuttingDown) {
+            throw new SQLException("SMP-Core economy is shutting down");
+        }
         com.zaxxer.hikari.HikariDataSource ds = this.dataSource;
         if (ds == null) {
             ds = this.ensureDataSource();
@@ -14778,7 +16859,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     if (notification.message() != null && !notification.message().isBlank()) {
                         player.sendMessage(notification.message());
                     }
-                    if (!notification.targetServer().isBlank()) {
+                    if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY && !notification.targetServer().isBlank()) {
                         this.connectToServer(player, notification.targetServer(), localServer);
                     }
                 }
@@ -14936,6 +17017,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        List<String> economyCompletions = this.economyTabComplete(sender, command.getName().toLowerCase(Locale.ROOT), args);
+        if (economyCompletions != null) return economyCompletions;
         if ("bal".equalsIgnoreCase(command.getName()) || "balance".equalsIgnoreCase(command.getName()) || "money".equalsIgnoreCase(command.getName())) {
             if (args.length == 1) {
                 UUID uUID;
@@ -15181,6 +17264,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return List.of();
         }
         if ("shards".equalsIgnoreCase(command.getName())) {
+            if (!this.shardsEnabled()) return List.of();
             if (args.length == 1) {
                 String prefix = args[0].toLowerCase();
                 ArrayList<String> out = new ArrayList<String>();
@@ -15373,14 +17457,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.fillBlue(inv);
         inv.setItem(10, this.named(Material.BOOK, "\u00a79Getting Started", null));
         inv.setItem(12, this.named(Material.GOLD_INGOT, "\u00a79Economy", null));
-        inv.setItem(14, this.named(Material.AMETHYST_SHARD, "\u00a79Shards", null));
+        if (this.shardsEnabled()) inv.setItem(14, this.named(Material.AMETHYST_SHARD, "\u00a79Shards", null));
         inv.setItem(16, this.named(Material.PLAYER_HEAD, "\u00a79Teams", null));
         inv.setItem(28, this.named(Material.IRON_SWORD, "\u00a79Duels", null));
         inv.setItem(30, this.named(Material.COMMAND_BLOCK, "\u00a79Commands", null));
         inv.setItem(32, this.named(Material.WRITABLE_BOOK, "\u00a79Rules", null));
         inv.setItem(34, this.named(Material.EMERALD, "\u00a79Shop", "open_shop"));
         inv.setItem(49, this.named(Material.ARROW, "\u00a77Back", null));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openSettings(Player player) {
@@ -15428,6 +17512,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             new SettingsEntry("explosion_sounds", "Explosion Sounds", false))),
         new SettingsCategory("visuals", "🔭 Visuals", List.of(
             new SettingsEntry("worth_display", "Item Worth Lore", false),
+            new SettingsEntry("money_nametags", "Money Nametags", false),
             new SettingsEntry("rtp_animation", "RTP Animation", false),
             new SettingsEntry("tpa_confirm_menus", "Teleport Confirm Menus", false),
             new SettingsEntry("player_visibility", "Player Visibility", false),
@@ -15471,9 +17556,59 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
-    private void showSettingsDialog(Player player, Map<String, Boolean> values, String openCategory) {
+    /**
+     * Settings the economy profile acts on. Teleports, messages and chat belong to the network plugins, whose own
+     * settings menu is linked from this one.
+     */
+    private static final java.util.Set<String> ECONOMY_SETTING_KEYS = java.util.Set.of(
+        "pay_players", "auction_alerts", "order_notifications", "music_sound_notifications",
+        "fast_crystals", "fast_anchor", "totem_particles", "explosion_particles", "explosion_sounds",
+        "worth_display", "money_nametags",
+        "tpa_requests", "tpahere_requests", "payments", "private_messages",
+        "scoreboard_toggle", "show_money", "show_kills", "show_deaths", "show_playtime",
+        "quick_auction_buy", "quick_auction_sell", "auction_overflow", "search_spell_check",
+        "night_vision", "pearls_destroy_on_death");
+
+    private final NetworkPrivacy networkPrivacy = new NetworkPrivacy(this.getLogger(),
+        () -> this.settings == null ? "" : this.settings.getString("economy.network-plugin", ""));
+
+    /** Economy profile: the network plugin's value for teleport and message privacy, else SMP-Core's. */
+    private String networkPrivacyMode(UUID uuid, java.util.Map<String, Boolean> values, String key) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            String mode = this.networkPrivacy.mode(uuid, NetworkPrivacy.networkKey(key));
+            if (mode != null) return mode;
+        }
+        return values != null ? this.privacyModeFromValues(values, key) : this.getPrivacyMode(uuid, key);
+    }
+
+    /** Economy profile: night vision is /nv's state (the network plugin owns it), shown as the setting. */
+    private java.util.Map<String, Boolean> withLiveSettingState(Player player, java.util.Map<String, Boolean> values) {
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY || player == null) return values;
+        java.util.Map<String, Boolean> shown = new java.util.HashMap<>(values);
+        shown.put("night_vision", player.hasPotionEffect(PotionEffectType.NIGHT_VISION));
+        return shown;
+    }
+
+    private boolean settingShown(String key) {
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY) return true;
+        // Item worth: the held item's worth on the action bar, or lore in every inventory (worth-lore.mode everywhere).
+        if ("worth_display".equals(key)) return this.settings.getBoolean("worth-lore.enabled", true);
+        return ECONOMY_SETTING_KEYS.contains(key);
+    }
+
+    /** The network plugin's settings menu (teleports, messages, chat), when it is installed. */
+    private boolean openNetworkSettings(Player player) {
+        String name = this.settings.getString("economy.network-plugin", "");
+        org.bukkit.plugin.Plugin staff = name == null || name.isBlank() ? null : Bukkit.getPluginManager().getPlugin(name);
+        if (staff == null || !staff.isEnabled()) return false;
+        return player.performCommand(staff.getName().toLowerCase(Locale.ROOT) + ":settings");
+    }
+
+    private void showSettingsDialog(Player player, Map<String, Boolean> storedValues, String openCategory) {
+        Map<String, Boolean> values = this.withLiveSettingState(player, storedValues);
         List<ActionButton> buttons = new ArrayList<>();
         for (SettingsCategory cat : SETTINGS_DIALOG_CATEGORIES) {
+            if (cat.entries().stream().noneMatch(entry -> this.settingShown(entry.key()))) continue;
             boolean open = cat.id().equals(openCategory);
             buttons.add(this.dialogButton(
                 Component.text(cat.title(), open ? DIALOG_BRAND : NamedTextColor.WHITE),
@@ -15483,10 +17618,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 continue;
             }
             for (SettingsEntry entry : cat.entries()) {
+                if (!this.settingShown(entry.key())) continue;
+                if ("show_shards".equals(entry.key()) && !this.shardsEnabled()) continue;
                 String gate = SETTING_GATE_PERMS.get(entry.key());
                 if (gate != null && !player.hasPermission(gate)) continue;   // dev-only entries hidden from others
                 if (PRIVACY_TRISTATE.contains(entry.key())) {
-                    String mode = this.privacyModeFromValues(values, entry.key());
+                    String mode = this.networkPrivacyMode(player.getUniqueId(), values, entry.key());
                     NamedTextColor mc = "off".equals(mode) ? NamedTextColor.RED : "friends".equals(mode) ? NamedTextColor.YELLOW : NamedTextColor.GREEN;
                     Component label = Component.text(entry.label() + ": ", NamedTextColor.WHITE)
                         .append(Component.text(this.privacyModeLabel(mode), mc));
@@ -15511,18 +17648,23 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         DialogCompat.show(player, dialog);
     }
 
-    private void openSettingsInventory(Player player, Map<String, Boolean> values, int page) {
+    private void openSettingsInventory(Player player, Map<String, Boolean> storedValues, int page) {
+        Map<String, Boolean> values = this.withLiveSettingState(player, storedValues);
         // 9x5 keeps the compatibility settings screen on one page with the RTP visual toggle.
         Inventory inv = MenuLock.create(45, TITLE_SETTINGS);
         for (SettingDefinition def : SETTINGS_DEFINITIONS) {
+            if (!this.settingShown(def.key)) continue;
+            if ("show_shards".equals(def.key) && !this.shardsEnabled()) continue;
             if (def.slot < 0 || def.slot >= 45) continue;
             boolean enabled = values.getOrDefault(def.key, def.defaultValue);
             inv.setItem(def.slot, this.buildSettingsItem(player, def, enabled));
         }
-        inv.setItem(RTP_ANIMATION_SETTING.slot, this.buildSettingsItem(player, RTP_ANIMATION_SETTING,
-            values.getOrDefault(RTP_ANIMATION_SETTING.key, true)));
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY) {
+            inv.setItem(RTP_ANIMATION_SETTING.slot, this.buildSettingsItem(player, RTP_ANIMATION_SETTING,
+                values.getOrDefault(RTP_ANIMATION_SETTING.key, true)));
+        }
         this.settingsPageByPlayer.put(player.getUniqueId(), 1);
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private ItemStack buildSettingsItem(Player player, SettingDefinition def, boolean enabled) {
@@ -15536,7 +17678,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             lore.add("\u00a76" + this.brandTierPlus + " Only");
         }
         if (PRIVACY_TRISTATE.contains(def.key)) {
-            String mode = this.getPrivacyMode(player.getUniqueId(), def.key);
+            String mode = this.networkPrivacyMode(player.getUniqueId(), null, def.key);
             String color = "off".equals(mode) ? "\u00a7c" : "friends".equals(mode) ? "\u00a7e" : "\u00a7a";
             lore.add("\u00a77Currently: " + color + this.privacyModeLabel(mode));
             lore.add("\u00a78Click: Anyone / Friends / Off");
@@ -15626,12 +17768,20 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return this.isFollowing(conn, target, sender) || this.isFollowing(conn, sender, target);
         } catch (Exception ex) {
             this.getLogger().warning("privacyAllows failed: " + ex.getMessage());
-            return true; // fail open
+            return this.runtimeProfile != EconomyRuntimeProfile.ECONOMY; // Economy payments fail closed.
         }
     }
     /** Cycle a tri-state privacy setting: Anyone -> Friends & Followers -> Off -> Anyone. */
     private void cyclePrivacySetting(Player player, String key, Runnable reopen) {
         if (player == null || !player.isOnline() || key == null) return;
+        String networkKey = this.runtimeProfile == EconomyRuntimeProfile.ECONOMY ? NetworkPrivacy.networkKey(key) : null;
+        if (networkKey != null && this.networkPrivacy.mode(player.getUniqueId(), networkKey) != null) {
+            this.runOnPlayerThread(player, () -> {
+                this.networkPrivacy.cycle(player, networkKey);
+                if (reopen != null) reopen.run(); else this.openSettings(player);
+            });
+            return;
+        }
         UUID uuid = player.getUniqueId();
         this.runAsyncTask(() -> {
             java.util.Map<String, Boolean> values = this.loadPlayerSettings(uuid);
@@ -15661,6 +17811,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     /** Toggles a setting; {@code reopen} overrides the default legacy-inventory refresh (used by the dialog UI). */
     private void togglePlayerSetting(Player player, String key, Runnable reopen) {
         if (player == null || !player.isOnline() || key == null || key.isBlank()) {
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && "night_vision".equals(key)) {
+            this.runOnPlayerThread(player, () -> {
+                player.performCommand("nv");
+                player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 0.5f, 1.0f);
+                if (reopen != null) PlatformScheduler.entityLater(this, player, reopen, null, 2L);
+                else PlatformScheduler.entityLater(this, player, () -> this.openSettings(player), null, 2L);
+            });
             return;
         }
         UUID uuid = player.getUniqueId();
@@ -15789,6 +17948,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.applyScoreboardPreference(player);
                 break;
             }
+            case "worth_display": {
+                // The lore is packet-only: resend the inventory so it appears or disappears now.
+                player.updateInventory();
+                break;
+            }
+            case "money_nametags": {
+                if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) this.refreshSidebarSoon(player);
+                else this.refreshMoneyNametagsFor(player);
+                break;
+            }
             case "mob_spawns": {
                 this.applyMobSpawnPreference(player);
                 break;
@@ -15849,6 +18018,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         UUID uuid = player.getUniqueId();
+        // Economy profile: the HUD refresh decides (money nametags can stay with the sidebar off).
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && this.economyHudFor(player)) {
+            this.refreshSidebarSoon(player);
+            return;
+        }
         if (!this.isSidebarHudEnabled() || !this.isSettingEnabledCached(uuid, "scoreboard_toggle")) {
             this.cancelSidebarTask(uuid);
             player.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
@@ -15864,7 +18038,89 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
+    /** Each player's HUD board in the economy profile, kept and updated in place. */
+    private final Map<UUID, Scoreboard> economyHudBoards = new ConcurrentHashMap<>();
+    /**
+     * Objective names per player session. A seamless backend switch keeps the client's old scoreboard, so a reused
+     * name would merge the new rows into the stale objective (every row shown twice); a fresh name never collides.
+     */
+    private final Map<UUID, String> economyHudObjective = new ConcurrentHashMap<>();
+    private String hudObjectiveName(UUID id, String kind) {
+        String suffix = this.economyHudObjective.computeIfAbsent(id, key -> Long.toString(System.nanoTime() & 0xFFFFFFFFL, 36));
+        return kind + suffix;
+    }
+    private static final int ECONOMY_HUD_ROWS = 5;
+
+    /**
+     * The economy HUD keeps one board per player and updates fixed rows in place; the network plugin's own
+     * sidebar is turned off for the player at join. Swapping in a new board every second let stale rows pile up.
+     */
+    private void renderEconomyHud(Player player, HudSnapshot hud) {
+        UUID id = player.getUniqueId();
+        Scoreboard board = this.economyHudBoards.computeIfAbsent(id, key -> Bukkit.getScoreboardManager().getNewScoreboard());
+        String sideName = this.hudObjectiveName(id, "hud");
+        Objective side = board.getObjective(sideName);
+        if (hud.showSidebar) {
+            if (side == null) {
+                side = board.registerNewObjective(sideName, "dummy", "\u00a7f" + player.getName());
+                side.numberFormat(io.papermc.paper.scoreboard.numbers.NumberFormat.blank());
+            }
+            if (side.getDisplaySlot() != DisplaySlot.SIDEBAR) side.setDisplaySlot(DisplaySlot.SIDEBAR);
+            List<String> rows = new ArrayList<>();
+            if (this.isSettingEnabledCached(id, "show_money"))
+                rows.add("\u00a7a\u00a7l$ \u00a7f" + this.formatMoneyHud(hud.stats.money));
+            long kills = Math.max(hud.stats.kills, player.getStatistic(org.bukkit.Statistic.PLAYER_KILLS));
+            long deaths = Math.max(hud.stats.deaths, player.getStatistic(org.bukkit.Statistic.DEATHS));
+            long playtime = Math.max(hud.stats.playtimeSeconds, player.getStatistic(org.bukkit.Statistic.PLAY_ONE_MINUTE) / 20L);
+            if (this.isSettingEnabledCached(id, "show_kills"))
+                rows.add("\u00a7c" + this.hudGlyph("\ud83d\udde1", "[K]") + " \u00a7f" + this.formatCompactNumber(kills));
+            if (this.isSettingEnabledCached(id, "show_deaths"))
+                rows.add("\u00a76" + this.hudGlyph("\u2620", "[D]") + " \u00a7f" + this.formatCompactNumber(deaths));
+            if (this.isSettingEnabledCached(id, "show_playtime"))
+                rows.add("\u00a7e" + this.hudGlyph("\u231a", "[T]") + " \u00a7f" + this.formatPlaytimeHud(playtime));
+            for (int i = 0; i < ECONOMY_HUD_ROWS; i++) {
+                org.bukkit.scoreboard.Score row = side.getScore("pnchud" + i);
+                if (i < rows.size()) {
+                    row.setScore(ECONOMY_HUD_ROWS - i);
+                    row.customName(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(rows.get(i)));
+                } else if (row.isScoreSet()) {
+                    row.resetScore();
+                }
+            }
+        } else if (side != null) {
+            side.unregister();
+        }
+        String belowName = this.hudObjectiveName(id, "bal");
+        Objective below = board.getObjective(belowName);
+        if (!hud.nametagBalances.isEmpty()) {
+            if (below == null) {
+                below = board.registerNewObjective(belowName, "dummy", "");
+                below.setDisplaySlot(DisplaySlot.BELOW_NAME);
+            }
+            for (String entry : board.getEntries()) {
+                org.bukkit.scoreboard.Score shown = below.getScore(entry);
+                if (shown.isScoreSet() && !hud.nametagBalances.containsKey(entry)) shown.resetScore();
+            }
+            for (Map.Entry<String, Double> tag : hud.nametagBalances.entrySet()) {
+                double balance = tag.getValue() == null ? 0.0 : tag.getValue();
+                org.bukkit.scoreboard.Score line = below.getScore(tag.getKey());
+                line.setScore((int) Math.max(0, Math.min(Integer.MAX_VALUE, balance)));
+                line.numberFormat(io.papermc.paper.scoreboard.numbers.NumberFormat.fixed(
+                    Component.text("$" + this.formatExactMoney(balance), NamedTextColor.GREEN)));
+            }
+        } else if (below != null) {
+            below.unregister();
+        }
+        if (player.getScoreboard() != board) player.setScoreboard(board);
+    }
+
+    /** The economy-profile HUD shows for players who may use the economy, while the hud feature is on. */
+    private boolean economyHudFor(Player player) {
+        return EconomyRuntimeProfile.featureEnabled("hud") && this.economyRuntimeReady && this.economyPlayerAllowed(player);
+    }
+
     private void refreshSidebar(Player player) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && !this.economyHudFor(player)) return;
         if (player == null || !player.isOnline()) {
             return;
         }
@@ -15879,13 +18135,28 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             StatsSnapshot stats = this.loadStatsSnapshot(uuid);
             String team = this.loadTeamName(uuid);
             String server = this.serverHudLabel();
+            Map<String, Double> nametags = new java.util.HashMap<>();
+            if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && this.isSettingEnabledCached(uuid, "money_nametags")) {
+                for (Player other : Bukkit.getOnlinePlayers()) {
+                    if (other.getUniqueId().equals(uuid)) continue;
+                    String shown = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(other.displayName());
+                    double balance = this.onlineBalanceCache.getOrDefault(other.getUniqueId(), 0.0);
+                    nametags.put(other.getName(), balance);
+                    if (shown != null && !shown.isBlank()) nametags.put(shown, balance);
+                }
+            }
             this.runOnPlayerThread(player, () -> {
-                if (!player.isOnline() || !this.isSettingEnabledCached(uuid, "scoreboard_toggle")) {
+                boolean sidebar = this.isSettingEnabledCached(uuid, "scoreboard_toggle");
+                if (!player.isOnline()) { this.cancelSidebarTask(uuid); return; }
+                if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY && !sidebar && nametags.isEmpty()) {
                     player.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
                     this.cancelSidebarTask(uuid);
                     return;
                 }
-                this.renderSidebar(player, new HudSnapshot(this.mergeLiveHudStats(player, stats), team, server));
+                HudSnapshot snapshot = new HudSnapshot(this.mergeLiveHudStats(player, stats), team, server);
+                snapshot.nametagBalances = nametags;
+                snapshot.showSidebar = sidebar;
+                this.renderSidebar(player, snapshot);
                 this.sidebarTasks.put(uuid, this.runPlayerTaskLater(player, () -> this.refreshSidebar(player), 20L));
             });
         });
@@ -15895,10 +18166,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (player == null || hud == null) {
             return;
         }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            this.renderEconomyHud(player, hud);
+            return;
+        }
         Scoreboard board = Bukkit.getScoreboardManager().getNewScoreboard();
         // Title is the player's own name, white and NOT bold.
         Objective objective = board.registerNewObjective("pizzahud", "dummy", "\u00a7f" + player.getName());
-        objective.setDisplaySlot(DisplaySlot.SIDEBAR);
+        if (hud.showSidebar) objective.setDisplaySlot(DisplaySlot.SIDEBAR);
         // Hide the score numbers on the right side of every line
         objective.numberFormat(io.papermc.paper.scoreboard.numbers.NumberFormat.blank());
         int score = 15;
@@ -15909,7 +18184,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (this.isSettingEnabledCached(hudUuid, "show_money")) {
             objective.getScore("\u00a7a\u00a7l$ \u00a7f" + this.formatMoneyHud(hud.stats.money)).setScore(score--);
         }
-        if (this.isSettingEnabledCached(hudUuid, "show_shards")) {
+        if (this.shardsEnabled() && this.isSettingEnabledCached(hudUuid, "show_shards")) {
             objective.getScore("\u00a75" + this.hudGlyph("\u2605", "[S]") + " \u00a7f" + this.formatCompactNumber(hud.stats.shards)).setScore(score--);
         }
         if (this.isSettingEnabledCached(hudUuid, "show_kills")) {
@@ -15921,6 +18196,17 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         if (this.isSettingEnabledCached(hudUuid, "show_playtime")) {
             objective.getScore("\u00a7e" + this.hudGlyph("\u231a", "[T]") + " \u00a7f" + this.formatPlaytimeHud(hud.stats.playtimeSeconds)).setScore(score--);
+        }
+        if (!hud.nametagBalances.isEmpty()) {
+            Objective below = board.registerNewObjective("pzbal", "dummy", "");
+            below.setDisplaySlot(DisplaySlot.BELOW_NAME);
+            for (Map.Entry<String, Double> tag : hud.nametagBalances.entrySet()) {
+                double balance = tag.getValue() == null ? 0.0 : tag.getValue();
+                org.bukkit.scoreboard.Score line = below.getScore(tag.getKey());
+                line.setScore((int) Math.max(0, Math.min(Integer.MAX_VALUE, balance)));
+                line.numberFormat(io.papermc.paper.scoreboard.numbers.NumberFormat.fixed(
+                    Component.text("$" + this.formatExactMoney(balance), NamedTextColor.GREEN)));
+            }
         }
         player.setScoreboard(board);
     }
@@ -16006,11 +18292,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             inv.setItem(12, this.buildMainShopCategoryItem(Material.NETHERRACK,      "Nether", "shop_main_open:nether"));
             inv.setItem(13, this.buildMainShopCategoryItem(Material.TOTEM_OF_UNDYING,"Gear",   "shop_main_open:gear"));
             inv.setItem(14, this.buildMainShopCategoryItem(Material.COOKED_BEEF,     "Food",   "shop_main_open:food"));
-            inv.setItem(15, this.buildMainShopCategoryItem(Material.AMETHYST_SHARD,  "Shards", "shop_main_open:shards"));
-            // PvP Gear shop: sits directly BELOW the Gear/totem slot (13 -> 22), netherite sword icon.
-            inv.setItem(22, this.namedWithLore(Material.NETHERITE_SWORD, "§c§lPvP Gear", "pvp_shop_open",
-                List.of("§7Armor sets, kits & combat items")));
-            player.openInventory(inv);
+            ItemStack pvpShop = this.namedWithLore(Material.NETHERITE_SWORD, "§c§lPvP Gear", "pvp_shop_open",
+                List.of("§7Armor sets, kits & combat items"));
+            if (this.shardsEnabled()) {
+                inv.setItem(15, this.buildMainShopCategoryItem(Material.AMETHYST_SHARD, "Shards", "shop_main_open:shards"));
+                // Keep the existing PvP position on shard-enabled servers.
+                inv.setItem(22, pvpShop);
+            } else {
+                inv.setItem(15, pvpShop);
+            }
+            this.openMenu(player, inv);
         });
     }
 
@@ -16036,8 +18327,44 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         { Material.ENCHANTED_GOLDEN_APPLE, "gapple",     4,60000.0 },
     };
 
-    private double pvpPrice(String key, double def) {
-        return Math.max(0.0, this.settings.getDouble("pvpshop." + key, def));
+    private record ShopQuote(double price, double resaleWorth) { }
+    private record JournaledSellItem(int slot, ItemStack expected, BigDecimal unitWorth) { }
+    private record SaleInventoryCandidate(int slot, ItemStack expected, BigDecimal shopWorth) { }
+    private record BetterOrderOffer(int slot, ItemStack expected, long orderId, int available, BigDecimal unitPrice) { }
+
+    private double pvpConfiguredUnitPrice(String key, double def) {
+        double configured = this.settings.getDouble("pvpshop." + key, def);
+        return Double.isFinite(configured) && configured >= 0.0 ? configured : -1.0;
+    }
+
+    private ShopQuote pvpBundleQuote(String key, double defaultUnitPrice, Material material, int amount) {
+        int count = Math.max(1, amount);
+        double unitWorth = ShopPricePolicy.effectiveWorth(this.sellUnitPrice(material));
+        double resale = ShopPricePolicy.minimumBundlePrice(0.0, unitWorth, count);
+        double configured = this.pvpConfiguredUnitPrice(key, defaultUnitPrice);
+        if (configured >= 0.0) configured *= count * this.shopPriceMultiplier() * this.shopItemMultiplier(material);
+        return new ShopQuote(ShopPricePolicy.minimumPurchasePrice(configured, resale), resale);
+    }
+
+    private ShopQuote pvpSwordQuote() {
+        double resale = ShopPricePolicy.effectiveWorth(this.sellUnitPrice(Material.NETHERITE_SWORD));
+        double configured = this.settings.getDouble("pvpshop.sword", 300000.0) * this.shopPriceMultiplier() * this.shopItemMultiplier(Material.NETHERITE_SWORD);
+        return new ShopQuote(ShopPricePolicy.minimumPurchasePrice(configured, resale), resale);
+    }
+
+    private ShopQuote pvpArmorSetQuote() {
+        double resale = 0.0;
+        for (Material material : List.of(Material.NETHERITE_HELMET, Material.NETHERITE_CHESTPLATE,
+                Material.NETHERITE_LEGGINGS, Material.NETHERITE_BOOTS)) {
+            resale += ShopPricePolicy.minimumBundlePrice(0.0,
+                ShopPricePolicy.effectiveWorth(this.sellUnitPrice(material)), 1);
+        }
+        double configured = this.settings.getDouble("pvpshop.armor-set", 1000000.0) * this.shopPriceMultiplier() * this.shopItemMultiplier(Material.NETHERITE_CHESTPLATE);
+        return new ShopQuote(ShopPricePolicy.minimumPurchasePrice(configured, resale), resale);
+    }
+
+    private String shopPriceText(double price) {
+        return Double.isFinite(price) && price >= 0.0 ? "$" + this.fmtMoney(price) : "Unavailable";
     }
 
     private void openPvpShop(Player player) {
@@ -16045,8 +18372,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.runOnPlayerThread(player, () -> {
             if (!player.isOnline()) return;
             Inventory inv = MenuLock.create(54, TITLE_PVP_SHOP);
-            double setPrice = this.pvpPrice("armor-set", 1000000.0);
-            double swordPrice = this.pvpPrice("sword", 300000.0);
+            double setPrice = this.pvpArmorSetQuote().price();
+            double swordPrice = this.pvpSwordQuote().price();
             // Armor set trim variants (representative chestplate icon; buying gives the full 4-piece set).
             inv.setItem(10, this.pvpSetIcon("§bSentry Set §7(Redstone)", "pvp_set:sentry", setPrice, TrimMaterial.REDSTONE, TrimPattern.SENTRY));
             inv.setItem(11, this.pvpSetIcon("§bSpire Set §7(Diamond)",   "pvp_set:spire",  setPrice, TrimMaterial.DIAMOND,  TrimPattern.SPIRE));
@@ -16055,7 +18382,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             ItemStack swordIcon = this.pvpSword();
             ItemMeta sm = swordIcon.getItemMeta();
             sm.setDisplayName("§cPvP Sword");
-            sm.setLore(List.of("§a$" + this.fmtMoney(swordPrice), "", "§7Sharpness V · Fire Aspect II", "§7Unbreaking III · Mending"));
+            sm.setLore(List.of("§a" + this.shopPriceText(swordPrice), "", "§7Sharpness V · Fire Aspect II", "§7Unbreaking III · Mending"));
             if (this.uiActionKey != null) sm.getPersistentDataContainer().set(this.uiActionKey, PersistentDataType.STRING, "pvp_sword");
             swordIcon.setItemMeta(sm);
             inv.setItem(14, swordIcon);
@@ -16066,16 +18393,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 Material mat = (Material) row[0];
                 String key = (String) row[1];
                 int amount = (Integer) row[2];
-                double unit = this.pvpPrice(key, (Double) row[3]);
-                double total = unit * amount;
+                double total = this.pvpBundleQuote(key, (Double) row[3], mat, amount).price();
+                double unit = total < 0.0 ? -1.0 : total / amount;
                 inv.setItem(slots[i], this.namedWithLore(mat, "§f" + this.humanName(mat) + " §7x" + amount, "pvp_buy:" + key,
-                    List.of("§a$" + this.fmtMoney(total), "§8$" + this.fmtMoney(unit) + " each")));
+                    List.of("§a" + this.shopPriceText(total), "§8" + (unit < 0.0 ? "Unavailable" : "$" + this.fmtMoney(unit) + " each"))));
             }
             // Custom kits (editor is a future phase) + back.
             inv.setItem(49, this.namedWithLore(Material.CHEST, "§e§lCustom Kits", "pvp_kits",
                 List.of("§7Build a loadout you can rebuy", "§8Coming soon")));
             inv.setItem(45, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "§c§l« Back", "pvp_back", List.of()));
-            player.openInventory(inv);
+            this.openMenu(player, inv);
         });
     }
 
@@ -16086,10 +18413,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3, Enchantment.RESPIRATION, 3)), mat, pattern));
         out.add(this.applyTrim(this.createEnchanted(Material.NETHERITE_CHESTPLATE, true,
             Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3)), mat, pattern));
+        // Blast Protection below the waist, Protection above (crystal and anchor PvP).
         out.add(this.applyTrim(this.createEnchanted(Material.NETHERITE_LEGGINGS, true,
-            Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3)), mat, pattern));
+            Map.of(Enchantment.BLAST_PROTECTION, 4, Enchantment.UNBREAKING, 3)), mat, pattern));
         out.add(this.applyTrim(this.createEnchanted(Material.NETHERITE_BOOTS, true,
-            Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3, Enchantment.FEATHER_FALLING, 4, Enchantment.DEPTH_STRIDER, 3)), mat, pattern));
+            Map.of(Enchantment.BLAST_PROTECTION, 4, Enchantment.UNBREAKING, 3, Enchantment.FEATHER_FALLING, 4, Enchantment.DEPTH_STRIDER, 3)), mat, pattern));
         return out;
     }
 
@@ -16104,7 +18432,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             Map.of(Enchantment.PROTECTION, 4, Enchantment.UNBREAKING, 3)), mat, pattern);
         ItemMeta meta = icon.getItemMeta();
         meta.setDisplayName(name);
-        meta.setLore(List.of("§a$" + this.fmtMoney(price), "", "§7Full set: helmet, chestplate,", "§7leggings, boots", "§7Protection IV · Unbreaking III · Mending"));
+        meta.setLore(List.of("§a" + this.shopPriceText(price), "", "§7Full set: helmet, chestplate,", "§7leggings, boots", "§7Protection IV (helmet, chestplate)", "§7Blast Protection IV (leggings, boots)", "§7Unbreaking III · Mending"));
         if (this.uiActionKey != null) meta.getPersistentDataContainer().set(this.uiActionKey, PersistentDataType.STRING, actionId);
         icon.setItemMeta(meta);
         return icon;
@@ -16117,8 +18445,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if ("pvp_back".equals(id)) { this.openShopMain(p); return; }
         if ("pvp_kits".equals(id)) { p.sendActionBar(Component.text("§7Custom kits are coming soon.")); return; }
         if ("pvp_sword".equals(id)) {
-            double price = this.pvpPrice("sword", 300000.0);
-            this.pvpConfirmThenBuy(p, "PvP Sword", price, () -> this.giveItemStack(p, this.pvpSword()));
+            this.pvpConfirmThenBuy(p, "PvP Sword", "NETHERITE_SWORD", 1, this::pvpSwordQuote,
+                () -> List.of(this.pvpSword()));
             return;
         }
         if (id.startsWith("pvp_set:")) {
@@ -16129,9 +18457,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 case "gold"  -> { mat = TrimMaterial.GOLD;    pat = TrimPattern.SENTRY; label = "Sentry Set (Gold)"; }
                 default      -> { mat = TrimMaterial.REDSTONE;pat = TrimPattern.SENTRY; label = "Sentry Set (Redstone)"; }
             }
-            double price = this.pvpPrice("armor-set", 1000000.0);
             final TrimMaterial fmat = mat; final TrimPattern fpat = pat;
-            this.pvpConfirmThenBuy(p, label, price, () -> { for (ItemStack piece : this.pvpArmorSet(fmat, fpat)) this.giveItemStack(p, piece); });
+            this.pvpConfirmThenBuy(p, label, "NETHERITE_ARMOR_SET", 4, this::pvpArmorSetQuote,
+                () -> this.pvpArmorSet(fmat, fpat));
             return;
         }
         if (id.startsWith("pvp_buy:")) {
@@ -16140,29 +18468,113 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (!key.equals(row[1])) continue;
                 Material mat = (Material) row[0];
                 int amount = (Integer) row[2];
-                double total = this.pvpPrice(key, (Double) row[3]) * amount;
-                this.pvpBuy(p, this.humanName(mat) + " x" + amount, total, () -> this.giveItemStack(p, new ItemStack(mat, amount)));
+                java.util.function.Supplier<ShopQuote> quote = () -> this.pvpBundleQuote(key, (Double) row[3], mat, amount);
+                this.pvpBuy(p, this.humanName(mat) + " x" + amount, key, amount, quote,
+                    () -> List.of(new ItemStack(mat, amount)));
                 return;
             }
         }
     }
 
     // Expensive items (sets/sword) confirm first on dialog clients; legacy clients buy directly.
-    private void pvpConfirmThenBuy(Player p, String label, double price, Runnable grant) {
-        if (!this.useDialogUi(p)) { this.pvpBuy(p, label, price, grant); return; }
+    private void pvpConfirmThenBuy(Player p, String label, String itemKey, int amount,
+            java.util.function.Supplier<ShopQuote> quote, java.util.function.Supplier<List<ItemStack>> rewards) {
+        ShopQuote initial = quote.get();
+        if (!ShopPricePolicy.coversSellWorth(initial.price(), initial.resaleWorth())) {
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY_REJECTED", itemKey,
+                amount, 0.0, 0.0, "reason=invalid_price");
+            p.sendActionBar(Component.text("§cThis item is unavailable at a safe price."));
+            return;
+        }
+        if (!this.useDialogUi(p)) { this.pvpBuy(p, label, itemKey, amount, quote, rewards); return; }
         ActionButton yes = this.dialogButton(Component.text("Buy", NamedTextColor.GREEN), null, 140,
-            pl -> { DialogCloseCompat.close(pl); this.runOnPlayerThread(pl, () -> this.pvpBuy(pl, label, price, grant)); });
+            pl -> { DialogCloseCompat.close(pl); this.runOnPlayerThread(pl, () -> this.pvpBuy(pl, label, itemKey, amount, quote, rewards)); });
         ActionButton no = this.dialogButton(Component.text("Cancel", NamedTextColor.RED), null, 140, pl -> DialogCloseCompat.close(pl));
         Dialog dialog = this.buildDialog(Component.text("Buy " + label, DIALOG_BRAND),
-            List.of(DialogBody.plainMessage(this.legacyColorize("§7" + label + " §7for §a$" + this.fmtMoney(price) + "§7?"))),
+            List.of(DialogBody.plainMessage(this.legacyColorize("§7" + label + " §7for §a" + this.shopPriceText(initial.price()) + "§7?"))),
             List.of(), DialogType.confirmation(yes, no));
         DialogCompat.show(p, dialog);
     }
 
-    private void pvpBuy(Player p, String label, double price, Runnable grant) {
-        if (this.getMoneyBalance(p) < price) { p.sendActionBar(this.legacyColorize("§cYou can't afford " + label + " §7(§a$" + this.fmtMoney(price) + "§7)")); return; }
-        if (!this.withdrawMoney(p, price)) { p.sendActionBar(Component.text("§cNot enough money.")); return; }
-        grant.run();
+    private void pvpBuy(Player p, String label, String itemKey, int amount,
+            java.util.function.Supplier<ShopQuote> quote, java.util.function.Supplier<List<ItemStack>> rewards) {
+        ShopQuote current = quote.get();
+        double price = current.price();
+        double unitPrice = amount > 0 && price >= 0.0 ? price / amount : 0.0;
+        this.playBuyClick(p);
+        this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY_ATTEMPT", itemKey,
+            amount, unitPrice, Math.max(0.0, price), null);
+        if (!ShopPricePolicy.coversSellWorth(price, current.resaleWorth())) {
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY_REJECTED", itemKey,
+                amount, unitPrice, 0.0, "reason=price_floor");
+            p.sendActionBar(Component.text("§cThis item is unavailable at a safe price."));
+            return;
+        }
+        final List<ItemStack> rewardStacks;
+        try { rewardStacks = rewards.get().stream().filter(java.util.Objects::nonNull).map(ItemStack::clone).toList(); }
+        catch (RuntimeException invalid) {
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY_REJECTED", itemKey,
+                amount, unitPrice, 0.0, "reason=invalid_catalog_reward");
+            p.sendActionBar(Component.text("§cThis PvP item is temporarily unavailable."));
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY
+                && rewardStacks.stream().anyMatch(stack -> this.ecobotConfigExcluded().contains(stack.getType().name()))) {
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY_REJECTED", itemKey,
+                amount, unitPrice, 0.0, "reason=network_restricted");
+            p.sendActionBar(Component.text("§cThat item is not available on this network yet."));
+            return;
+        }
+        int rewardCount = rewardStacks.stream().mapToInt(ItemStack::getAmount).sum();
+        if (rewardStacks.isEmpty() || rewardCount != amount || rewardStacks.stream().anyMatch(stack -> stack.getType().isAir())) {
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY_REJECTED", itemKey,
+                amount, unitPrice, 0.0, "reason=invalid_catalog_reward");
+            p.sendActionBar(Component.text("§cThis PvP item is temporarily unavailable."));
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            UUID operationId = UUID.randomUUID();
+            String pvpKey = "PVP:" + itemKey;
+            this.beginJournaledItemPurchase(p, operationId, "PVP_PURCHASE", pvpKey, amount, price, rewardStacks,
+                () -> p.isOnline(), result -> {
+                    if (result == null) {
+                        p.sendActionBar(Component.text("§cItem trading is temporarily unavailable while inventory protection is being qualified."));
+                        return;
+                    }
+                    if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                        p.sendActionBar(this.legacyColorize("§aBought " + label + " §7for §a$" + this.fmtMoney(price)));
+                        this.playBuyDone(p);
+                    } else if (result.outcome() == MarketOperationCoordinator.Outcome.REJECTED) {
+                        String reason = switch (result.reason()) {
+                            case "insufficient_funds" -> "§cYou can't afford " + label + ".";
+                            case "inventory_full" -> "§cInventory full. Make room before buying.";
+                            default -> "§cPurchase could not be completed.";
+                        };
+                        p.sendActionBar(Component.text(reason));
+                        this.playBuyDenied(p);
+                    } else if (result.outcome() == MarketOperationCoordinator.Outcome.BUSY) {
+                        // A second click while the previous operation is still finishing; nothing is stuck.
+                        p.sendActionBar(Component.text("§7Finishing your last purchase..."));
+} else {
+                        p.closeInventory();
+                        p.sendMessage("§cThis purchase is still being reconciled. Your items remain protected; please contact staff if it does not resolve.");
+                    }
+                });
+            return;
+        }
+        if (this.getMoneyBalance(p) < price) {
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY_REJECTED", itemKey,
+                amount, unitPrice, 0.0, "reason=insufficient_funds");
+            p.sendActionBar(this.legacyColorize("§cYou can't afford " + label + " §7(§a$" + this.fmtMoney(price) + "§7)")); return;
+        }
+        if (!this.withdrawMoney(p, price)) {
+            this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY_REJECTED", itemKey,
+                amount, unitPrice, 0.0, "reason=debit_failed");
+            p.sendActionBar(Component.text("§cNot enough money.")); return;
+        }
+        for (ItemStack reward : rewardStacks) this.giveItemStack(p, reward.clone());
+        this.logTransactionAudit(p.getUniqueId().toString(), p.getName(), "PVP_BUY", itemKey,
+            amount, unitPrice, price, null);
         p.sendActionBar(this.legacyColorize("§aBought " + label + " §7for §a$" + this.fmtMoney(price)));
         p.playSound(p.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.7f, 1.2f);
     }
@@ -16181,9 +18593,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         String backAction = "gear2".equals(categoryKey) ? "shop_main_open:gear" : "shop_open_main";
         inv.setItem(18, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7l\u00ab Back", backAction, List.of()));
         if ("gear".equals(categoryKey)) {
-            inv.setItem(26, this.namedWithLore(Material.ARROW, "\u00a7a\u00a7lPage 2 \u00bb", "shop_main_open:gear2", List.of("\u00a77Tools, fireworks & amethyst")));
+            inv.setItem(26, this.namedWithLore(Material.ARROW, "\u00a7a\u00a7lPage 2 \u00bb", "shop_main_open:gear2", List.of("\u00a77Tools & fireworks")));
         }
-        this.runOnPlayerThread(player, () -> player.openInventory(inv));
+        this.runOnPlayerThread(player, () -> this.openMenu(player, inv));
     }
 
     private ItemStack buildCategorySelectItem(String categoryKey, ShopEntry entry) {
@@ -16209,10 +18621,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         ItemMeta meta = item.getItemMeta();
         meta.setDisplayName(displayName);
         ArrayList<String> lore = new ArrayList<>();
+        double bundlePrice = this.shopBundlePrice(entry);
         if (entry.unitAmount > 1) {
-            lore.add("\u00a7a$" + this.fmtMoney(entry.priceMoney) + " \u00a78\u00d7" + entry.unitAmount);
+            lore.add("\u00a7a" + this.shopPriceText(bundlePrice) + " \u00a78\u00d7" + entry.unitAmount);
         } else {
-            lore.add("\u00a7a$" + this.fmtMoney(entry.priceMoney));
+            lore.add("\u00a7a" + this.shopPriceText(bundlePrice));
         }
         if (entry.key.startsWith("amethyst_")) {
             lore.add("");
@@ -16664,6 +19077,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 break;
             case "diamond_pickaxe":
             case "netherite_pickaxe":
+                lore.add("§7• Silk Touch");
                 lore.add("§7• Efficiency V");
                 lore.add("§7• Unbreaking III");
                 lore.add("§7• Mending");
@@ -16690,9 +19104,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             state.categoryKey = categoryKey;
             state.itemKey = itemKey;
             state.quantity = 1;
+            state.operationId = UUID.randomUUID();
         }
         int maxQty = this.shopMaxQty(entry);
-        state.quantity = Math.max(1, Math.min(maxQty, state.quantity));
+        int clampedQuantity = Math.max(1, Math.min(maxQty, state.quantity));
+        if (clampedQuantity != state.quantity) state.operationId = UUID.randomUUID();
+        state.quantity = clampedQuantity;
 
         Inventory inv = MenuLock.create(27, TITLE_SHOP_CONFIRM);
         // qty buttons only for stackable items
@@ -16740,11 +19157,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(13, this.buildConfirmItemDisplay(entry, state.quantity));
         inv.setItem(21, this.namedWithLore(Material.RED_STAINED_GLASS_PANE,   "\u00a7cBack",  "shop_cancel:" + categoryKey,  List.of()));
         int totalItems = entry.unitAmount * state.quantity;
-        inv.setItem(23, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE,  "\u00a7aConfirm", "shop_confirm", List.of(
-            "\u00a7aTotal: \u00a7f$" + this.fmtMoney(entry.priceMoney * state.quantity),
+        double totalPrice = this.shopTotalPrice(entry, state.quantity);
+        inv.setItem(23, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE,  "\u00a7aConfirm", "shop_confirm:" + state.operationId, List.of(
+            "\u00a7aTotal: \u00a7f" + this.shopPriceText(totalPrice),
             "\u00a7aItems: \u00a7f" + totalItems
         )));
-        this.runOnPlayerThread(player, () -> player.openInventory(inv));
+        this.runOnPlayerThread(player, () -> this.openMenu(player, inv));
     }
 
     private int shopMaxQty(ShopEntry entry) {
@@ -16755,6 +19173,26 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         int maxStack = entry.material.getMaxStackSize();
         if (maxStack <= 1 || entry.unitAmount <= 0) return 1;
         return Math.max(1, maxStack / entry.unitAmount);
+    }
+
+    private double shopBundlePrice(ShopEntry entry) {
+        if (entry == null || entry.unitAmount <= 0 || entry.material == null) return -1.0;
+        double unitWorth = ShopPricePolicy.effectiveWorth(this.computeBaseWorth(entry.material));
+        return ShopPricePolicy.minimumBundlePrice(entry.priceMoney * this.shopPriceMultiplier() * this.shopItemMultiplier(entry.material), unitWorth, entry.unitAmount);
+    }
+
+    private double shopTotalPrice(ShopEntry entry, int quantity) {
+        if (quantity < 1) return -1.0;
+        double bundle = this.shopBundlePrice(entry);
+        if (!Double.isFinite(bundle) || bundle < 0.0) return -1.0;
+        double total = bundle * quantity;
+        return Double.isFinite(total) ? total : -1.0;
+    }
+
+    private double shopTotalResaleFloor(ShopEntry entry, int quantity) {
+        if (entry == null || quantity < 1 || entry.unitAmount < 1 || entry.material == null) return -1.0;
+        double unitWorth = ShopPricePolicy.effectiveWorth(this.sellUnitPrice(entry.material));
+        return ShopPricePolicy.minimumBundlePrice(0.0, unitWorth, entry.unitAmount * quantity);
     }
 
     private ItemStack buildConfirmItemDisplay(ShopEntry entry, int qty) {
@@ -16782,14 +19220,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         ItemMeta meta = item.getItemMeta();
         meta.setDisplayName(displayName);
         ArrayList<String> lore = new ArrayList<>();
+        double bundlePrice = this.shopBundlePrice(entry);
         if (entry.unitAmount > 1) {
-            lore.add("\u00a7aPrice: \u00a7f$" + this.fmtMoney(entry.priceMoney) + " \u00a78\u00d7" + entry.unitAmount);
+            lore.add("\u00a7aPrice: \u00a7f" + this.shopPriceText(bundlePrice) + " \u00a78\u00d7" + entry.unitAmount);
         } else {
-            lore.add("\u00a7aPrice: \u00a7f$" + this.fmtMoney(entry.priceMoney));
+            lore.add("\u00a7aPrice: \u00a7f" + this.shopPriceText(bundlePrice));
         }
         if (qty > 1) {
             lore.add("\u00a7aQty: \u00a7f" + qty);
-            lore.add("\u00a7aTotal: \u00a7f$" + this.fmtMoney(entry.priceMoney * qty));
+            lore.add("\u00a7aTotal: \u00a7f" + this.shopPriceText(this.shopTotalPrice(entry, qty)));
         }
         if (entry.key.startsWith("amethyst_")) {
             lore.add("");
@@ -16810,20 +19249,72 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         ShopEntry entry = this.findShopEntry(state.categoryKey, state.itemKey);
         if (entry == null) return;
         int maxQty = this.shopMaxQty(entry);
-        state.quantity = Math.max(1, Math.min(maxQty, state.quantity + delta));
+        int nextQuantity = Math.max(1, Math.min(maxQty, state.quantity + delta));
+        if (nextQuantity != state.quantity) state.operationId = UUID.randomUUID();
+        state.quantity = nextQuantity;
         this.openShopConfirmMenu(player, state.categoryKey, state.itemKey);
     }
 
-    private void confirmShopPurchase(Player player) {
+    /** Buy feedback: a thud on the click, a ding once the purchase settles, the villager "no" when it is refused. */
+    // economy.sounds.<click|done|denied>: sound key, volume and pitch (/eco sound tunes them live).
+    private static final Map<String, Object[]> BUY_SOUND_DEFAULTS = Map.of(
+        "click", new Object[] {"minecraft:block.note_block.basedrum", 0.8f, 0.7f},
+        "done", new Object[] {"minecraft:entity.experience_orb.pickup", 0.6f, 1.0f},
+        "denied", new Object[] {"minecraft:entity.villager.no", 0.85f, 0.9f});
+
+    private void playBuySound(Player player, String name) {
+        Object[] fallback = BUY_SOUND_DEFAULTS.get(name);
+        String base = "economy.sounds." + name + ".";
+        String sound = this.settings.getString(base + "sound", (String) fallback[0]);
+        float volume = (float) this.settings.getDouble(base + "volume", (Float) fallback[1]);
+        float pitch = (float) this.settings.getDouble(base + "pitch", (Float) fallback[2]);
+        player.playSound(player.getLocation(), sound, org.bukkit.SoundCategory.MASTER, volume, pitch);
+    }
+
+    private void playBuyClick(Player player) {
+        this.playBuySound(player, "click");
+    }
+
+    private void playBuyDone(Player player) {
+        this.runPlayerTaskLater(player, () -> { if (player.isOnline()) this.playBuySound(player, "done"); }, 2L);
+    }
+
+    private void playBuyDenied(Player player) {
+        this.playBuySound(player, "denied");
+    }
+
+    private void confirmShopPurchase(Player player, String operationToken) {
         ShopSelectionState state = this.shopSelectionState.get(player.getUniqueId());
         if (state == null || state.itemKey == null || state.quantity <= 0) return;
+        this.playBuyClick(player);
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY
+                && (operationToken == null || !state.operationId.toString().equals(operationToken))) {
+            player.sendActionBar(Component.text("§cThat shop confirmation expired. Open it again."));
+            return;
+        }
         ShopEntry entry = this.findShopEntry(state.categoryKey, state.itemKey);
         if (entry == null) return;
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && !state.itemKey.startsWith("amethyst_")
+                && this.ecobotConfigExcluded().contains(entry.material.name())) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                state.itemKey, 1, 0.0, 0.0, "reason=network_restricted");
+            player.sendActionBar(Component.text("§cThat item is not available on this network yet."));
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && state.itemKey.startsWith("amethyst_")
+                && !EconomyRuntimeProfile.featureEnabled("amethyst")) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                state.itemKey, 1, 0.0, 0.0, "reason=non_vanilla_catalog_item");
+            player.sendActionBar(Component.text("§cThat item is not available in the vanilla economy."));
+            return;
+        }
         // Special handling: amethyst tools dispatch /tools give command
         if (state.itemKey.startsWith("amethyst_")) {
-            double cost = entry.priceMoney;
-            if (!this.hasMoney(player, cost)) {
+            double cost = entry.priceMoney * this.shopPriceMultiplier() * this.shopItemMultiplier(entry.material);
+            boolean freeTool = this.freeBuy(player);
+            if (!freeTool && !this.hasMoney(player, cost)) {
                 player.sendActionBar(this.legacyColorize("§cNot enough money."));
+                this.playBuyDenied(player);
                 return;
             }
             String toolName = switch (state.itemKey) {
@@ -16839,7 +19330,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 player.sendActionBar(this.legacyColorize("§cYour inventory is full. Make room before buying."));
                 return;
             }
-            if (!this.withdrawMoney(player, cost)) return;
+            if (!freeTool && !this.withdrawMoney(player, cost)) return;
             final String ft = toolName;
             final String entryLabel = entry.label;
             final double fCost = cost;
@@ -16877,15 +19368,46 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             });
             return;
         }
-        double totalCost = entry.priceMoney * (double)state.quantity;
+        double totalCost = this.shopTotalPrice(entry, state.quantity);
         int giveAmount = entry.unitAmount * state.quantity;
-        if (totalCost <= 0.0 || giveAmount <= 0) return;
-        if (!this.hasMoney(player, totalCost)) {
-            player.sendActionBar(this.legacyColorize("\u00a7cNot enough money."));
+        double resaleFloor = this.shopTotalResaleFloor(entry, state.quantity);
+        double unitPrice = giveAmount > 0 && totalCost >= 0.0 ? totalCost / giveAmount : 0.0;
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_ATTEMPT",
+            entry.material.name(), Math.max(0, giveAmount), unitPrice, Math.max(0.0, totalCost), "item=" + entry.key);
+        if (giveAmount <= 0 || !ShopPricePolicy.coversSellWorth(totalCost, resaleFloor)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                entry.material.name(), Math.max(0, giveAmount), unitPrice, 0.0, "reason=price_floor");
+            player.sendActionBar(Component.text("§cThis item is unavailable at a safe price."));
             return;
         }
-        if (!this.withdrawMoney(player, totalCost)) return;
-        this.runAsyncTask(() -> this.incrementMoneyStat(player.getUniqueId(), "shop_spent", totalCost));
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            if (!this.economyShopRouteEnabled()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                    entry.material.name(), giveAmount, unitPrice, 0.0, "reason=inventory_custody_unavailable");
+                player.sendActionBar(Component.text("§cItem trading is temporarily unavailable while inventory protection is being completed."));
+                return;
+            }
+            if (!this.instantPurchases()) {
+                this.beginJournaledShopPurchase(player, state, entry, operationToken, totalCost, giveAmount);
+                return;
+            }
+        }
+        boolean free = this.freeBuy(player);
+        if (!free && !this.hasMoney(player, totalCost)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                entry.material.name(), giveAmount, unitPrice, 0.0, "reason=insufficient_funds;item=" + entry.key);
+            player.sendActionBar(this.legacyColorize("\u00a7cNot enough money."));
+            this.playBuyDenied(player);
+            return;
+        }
+        if (!free && !this.withdrawMoney(player, totalCost)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                entry.material.name(), giveAmount, unitPrice, 0.0, "reason=debit_failed;item=" + entry.key);
+            return;
+        }
+        UUID shopBuyer = player.getUniqueId();
+        double requestedShopCost = totalCost;
+        if (!free) this.runAsyncTask(() -> this.incrementMoneyStat(shopBuyer, "shop_spent", requestedShopCost));
         int remaining = giveAmount;
         int given = 0;
         boolean inventoryFull = false;
@@ -16901,7 +19423,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             if (!leftovers.isEmpty()) { inventoryFull = true; break; }
         }
         if (given <= 0) {
-            this.depositMoney(player, totalCost);
+            if (!free) this.depositMoney(player, totalCost);
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                entry.material.name(), giveAmount, unitPrice, 0.0, "reason=inventory_full;item=" + entry.key);
             player.sendActionBar(this.legacyColorize("\u00a7cInventory full."));
             player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 0.85f, 0.9f);
             this.openShopConfirmMenu(player, state.categoryKey, state.itemKey);
@@ -16912,13 +19436,434 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 0.85f, 0.9f);
         }
         if (given < giveAmount) {
-            double charged = entry.priceMoney * (double)given / (double)Math.max(1, entry.unitAmount);
-            this.depositMoney(player, totalCost - charged);
+            double perItemCharge = java.math.BigDecimal.valueOf(totalCost)
+                .divide(java.math.BigDecimal.valueOf(giveAmount), 2, java.math.RoundingMode.CEILING).doubleValue();
+            double charged = Math.min(totalCost, perItemCharge * given);
+            if (!free) this.depositMoney(player, totalCost - charged);
+            totalCost = charged;
         }
-        player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.55f, 1.2f);
-        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY", entry.material.name(), given, entry.priceMoney, totalCost, "item=" + entry.key);
+        this.playBuyDone(player);
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY", entry.material.name(), given,
+            given > 0 ? totalCost / given : 0.0, free ? 0.0 : totalCost, "item=" + entry.key + (free ? ";free=1" : ""));
         // Stay on confirm menu so player can buy more
         this.openShopConfirmMenu(player, state.categoryKey, state.itemKey);
+    }
+
+    private void beginJournaledShopPurchase(Player player, ShopSelectionState state, ShopEntry entry,
+                                           String operationToken, double totalCost, int totalItems) {
+        if (this.marketOperationCoordinator == null || this.marketOperationJournal == null
+                || this.vanillaItemSanitizer == null || !this.economyShopRouteEnabled()
+                || operationToken == null || !state.operationId.toString().equals(operationToken)) {
+            player.sendActionBar(Component.text("§cItem trading is temporarily unavailable."));
+            return;
+        }
+        List<ItemStack> rewardStacks = new ArrayList<>();
+        int remaining = totalItems;
+        while (remaining > 0) {
+            int amount = Math.min(entry.material.getMaxStackSize(), remaining);
+            ItemStack stack = this.createSingleShopStack(entry, amount);
+            String invalid = this.vanillaItemSanitizer.violationReason(stack);
+            if (invalid != null) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                    entry.material.name(), totalItems, totalCost / totalItems, 0.0, "reason=invalid_shop_item;rule=" + invalid);
+                player.sendActionBar(Component.text("§cThis catalog item is not vanilla-valid."));
+                return;
+            }
+            rewardStacks.add(stack);
+            remaining -= amount;
+        }
+        if (!this.inventoryCanFit(player.getInventory(), rewardStacks)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "SHOP_BUY_REJECTED",
+                entry.material.name(), totalItems, totalCost / totalItems, 0.0, "reason=inventory_full");
+            player.sendActionBar(Component.text("§cInventory full. Make room before buying."));
+            return;
+        }
+
+        final byte[] itemPayload;
+        try { itemPayload = this.encodeShopItemPayload(rewardStacks); }
+        catch (java.io.IOException | RuntimeException failure) {
+            this.getLogger().warning("Could not encode shop operation payload (" + failure.getClass().getSimpleName() + ")");
+            player.sendActionBar(Component.text("§cThis purchase is temporarily unavailable."));
+            return;
+        }
+        final UUID operationId = state.operationId;
+        final UUID playerId = player.getUniqueId();
+        final String playerName = player.getName();
+        final String backend = this.detectServerName();
+        final String itemKey = entry.key;
+        final double price = totalCost;
+        final ShopSelectionState selectedState = state;
+        MarketOperationJournal.Request request;
+        try {
+            request = new MarketOperationJournal.Request(operationId, playerId, playerName, "SHOP_PURCHASE", itemKey,
+                totalItems, java.math.BigDecimal.valueOf(price).setScale(2, java.math.RoundingMode.UNNECESSARY), backend,
+                itemPayload);
+        } catch (IllegalArgumentException invalid) {
+            this.logTransactionAudit(playerId.toString(), playerName, "SHOP_BUY_REJECTED", itemKey,
+                totalItems, totalCost / totalItems, 0.0, "reason=invalid_request");
+            player.sendActionBar(Component.text("§cThis purchase is temporarily unavailable."));
+            return;
+        }
+
+        InventoryCustody custody = this.currentInventoryCustody();
+        if (custody == null || !custody.qualified()) {
+            this.logTransactionAudit(playerId.toString(), playerName, "SHOP_BUY_REJECTED", itemKey,
+                totalItems, totalCost / totalItems, 0.0, "reason=custody_unqualified");
+            player.sendActionBar(Component.text("§cItem trading is temporarily unavailable while inventory protection is being qualified."));
+            return;
+        }
+        MarketOperationCoordinator.CustodyFlow flow = new MarketOperationCoordinator.CustodyFlow() {
+            @Override public boolean qualified() { return custody.qualified(); }
+
+            @Override public java.util.concurrent.CompletionStage<InventoryCustody.Lease> begin(MarketOperationJournal.Request op) {
+                return onPlayerStage(player, () -> custody.begin(player, op.operationId()));
+            }
+
+            @Override public java.util.concurrent.CompletionStage<MarketOperationCoordinator.Mutation> applyItems(
+                    MarketOperationJournal.Request op, InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> {
+                    if (!player.isOnline() || !lease.playerId().equals(player.getUniqueId())
+                            || !selectedState.operationId.equals(op.operationId())) {
+                        return java.util.concurrent.CompletableFuture.completedFuture(
+                            new MarketOperationCoordinator.Mutation(false, false, "player_or_menu_changed"));
+                    }
+                    if (!inventoryCanFit(player.getInventory(), rewardStacks)) {
+                        return java.util.concurrent.CompletableFuture.completedFuture(
+                            new MarketOperationCoordinator.Mutation(false, false, "inventory_full"));
+                    }
+                    ItemStack[] offered = rewardStacks.stream().map(ItemStack::clone).toArray(ItemStack[]::new);
+                    java.util.Map<Integer, ItemStack> leftovers = player.getInventory().addItem(offered);
+                    if (leftovers.isEmpty()) return java.util.concurrent.CompletableFuture.completedFuture(
+                        new MarketOperationCoordinator.Mutation(true, true, null));
+                    return java.util.concurrent.CompletableFuture.completedFuture(
+                        new MarketOperationCoordinator.Mutation(true, false, "partial_item_delivery"));
+                });
+            }
+
+            @Override public java.util.concurrent.CompletionStage<InventoryCustody.CheckpointReceipt> checkpoint(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.checkpoint(player, lease));
+            }
+
+            @Override public java.util.concurrent.CompletionStage<Void> finish(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.finish(player, lease));
+            }
+
+            @Override public java.util.concurrent.CompletionStage<Void> abortUntouched(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.abortUntouched(player, lease));
+            }
+
+            @Override public java.util.concurrent.CompletionStage<Void> forgetTerminal(UUID opId, boolean committed) {
+                return onPlayerStage(player, () -> custody.forgetTerminal(player, opId, committed));
+            }
+        };
+
+        this.marketOperationCoordinator.purchaseShop(request, flow).whenComplete((result, failure) ->
+            this.runOnPlayerThread(player, () -> {
+                if (failure != null) {
+                    player.sendActionBar(Component.text("§cPurchase status is being reconciled; your inventory remains protected."));
+                    return;
+                }
+                if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                    selectedState.operationId = UUID.randomUUID();
+                    player.playSound(player.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 0.55f, 1.2f);
+                    player.sendActionBar(Component.text("§aBought " + totalItems + " " + this.humanName(entry.material)
+                        + " for $" + this.fmtMoney(price)));
+                    this.openShopConfirmMenu(player, selectedState.categoryKey, selectedState.itemKey);
+                } else if (result.outcome() == MarketOperationCoordinator.Outcome.REJECTED) {
+                    selectedState.operationId = UUID.randomUUID();
+                    String message = switch (result.reason()) {
+                        case "insufficient_funds" -> "§cNot enough money.";
+                        case "inventory_full" -> "§cInventory full. Make room before buying.";
+                        default -> "§cPurchase could not be completed.";
+                    };
+                    player.sendActionBar(Component.text(message));
+                    this.openShopConfirmMenu(player, selectedState.categoryKey, selectedState.itemKey);
+                } else if (result.outcome() == MarketOperationCoordinator.Outcome.BUSY) {
+                    // A second click while the previous operation is still finishing; nothing is stuck.
+                    player.sendActionBar(Component.text("§7Finishing your last purchase..."));
+} else {
+                    player.closeInventory();
+                    player.sendMessage("§cThis purchase is still being reconciled. Your items remain protected; please contact staff if it does not resolve.");
+                }
+            }));
+    }
+
+    /** Reusable single-player item grant boundary for catalog families such as the PvP shop. */
+    private void beginJournaledItemPurchase(Player player, UUID operationId, String operationKind, String itemKey,
+            int itemCount, double totalCost, List<ItemStack> rewardStacks, java.util.function.BooleanSupplier stillCurrent,
+            java.util.function.Consumer<MarketOperationCoordinator.Result> onResult) {
+        this.beginJournaledItemPurchase(player, operationId, operationKind, itemKey, itemCount, totalCost,
+            rewardStacks, null, stillCurrent, onResult);
+    }
+
+    private void beginJournaledItemPurchase(Player player, UUID operationId, String operationKind, String itemKey,
+            int itemCount, double totalCost, List<ItemStack> rewardStacks, byte[] requestPayloadOverride,
+            java.util.function.BooleanSupplier stillCurrent, java.util.function.Consumer<MarketOperationCoordinator.Result> onResult) {
+        if (player == null) return;
+        if (operationId == null || !MarketOperationJournal.isPurchaseKind(operationKind)
+                || !this.economyPurchaseRouteEnabled(operationKind) || this.marketOperationCoordinator == null
+                || this.marketOperationJournal == null || this.vanillaItemSanitizer == null) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(),
+                marketPurchaseAuditEvent(operationKind, "REJECTED"),
+                itemKey == null ? "UNKNOWN" : itemKey, Math.max(0, itemCount), 0.0, 0.0,
+                "reason=inventory_custody_unavailable");
+            if (onResult != null) onResult.accept(null);
+            return;
+        }
+        if (itemCount <= 0 || !Double.isFinite(totalCost) || totalCost < 0.0 || rewardStacks == null || rewardStacks.isEmpty()) {
+            if (onResult != null) onResult.accept(null);
+            return;
+        }
+        List<ItemStack> prepared = rewardStacks.stream().filter(java.util.Objects::nonNull).map(ItemStack::clone).toList();
+        int preparedCount = prepared.stream().mapToInt(ItemStack::getAmount).sum();
+        if (preparedCount != itemCount) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(),
+                marketPurchaseAuditEvent(operationKind, "REJECTED"),
+                itemKey, itemCount, 0.0, 0.0, "reason=invalid_catalog_reward");
+            if (onResult != null) onResult.accept(null);
+            return;
+        }
+        for (ItemStack stack : prepared) {
+            String invalid = this.vanillaItemSanitizer.violationReason(stack);
+            if (invalid != null) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(),
+                    marketPurchaseAuditEvent(operationKind, "REJECTED"),
+                    itemKey, itemCount, totalCost / itemCount, 0.0, "reason=invalid_shop_item;rule=" + invalid);
+                if (onResult != null) onResult.accept(null);
+                return;
+            }
+        }
+        if (!this.inventoryCanFit(player.getInventory(), prepared)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(),
+                marketPurchaseAuditEvent(operationKind, "REJECTED"),
+                itemKey, itemCount, totalCost / itemCount, 0.0, "reason=inventory_full");
+            if (onResult != null) onResult.accept(new MarketOperationCoordinator.Result(
+                MarketOperationCoordinator.Outcome.REJECTED, "inventory_full"));
+            return;
+        }
+        if (this.instantPurchases() && !"AUCTION_BUY".equals(operationKind)) {
+            // Direct settlement (economy.market.instant-purchases): money first, then the items, on this thread.
+            if (stillCurrent != null && !stillCurrent.getAsBoolean()) { if (onResult != null) onResult.accept(null); return; }
+            boolean free = this.freeBuy(player);
+            if (!free && !this.withdrawMoney(player, totalCost)) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(),
+                    marketPurchaseAuditEvent(operationKind, "REJECTED"), itemKey, itemCount, totalCost / itemCount, 0.0,
+                    "reason=insufficient_funds");
+                if (onResult != null) onResult.accept(new MarketOperationCoordinator.Result(
+                    MarketOperationCoordinator.Outcome.REJECTED, "insufficient_funds"));
+                return;
+            }
+            for (ItemStack stack : prepared) {
+                for (ItemStack left : player.getInventory().addItem(stack).values()) this.dropForPlayer(player, left);
+            }
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(),
+                marketPurchaseAuditEvent(operationKind, "COMPLETED"), itemKey, itemCount, totalCost / itemCount, free ? 0.0 : totalCost,
+                "settlement=instant" + (free ? ";free=1" : ""));
+            if (onResult != null) onResult.accept(new MarketOperationCoordinator.Result(
+                MarketOperationCoordinator.Outcome.COMPLETED, "instant"));
+            return;
+        }
+        final byte[] payload;
+        try {
+            if (requestPayloadOverride == null) payload = this.encodeShopItemPayload(prepared);
+            else if (requestPayloadOverride.length == 0 || requestPayloadOverride.length > MarketOperationJournal.MAX_ITEM_PAYLOAD_BYTES)
+                throw new java.io.IOException("market payload size is invalid");
+            else payload = requestPayloadOverride.clone();
+        }
+        catch (java.io.IOException | RuntimeException invalid) {
+            if (onResult != null) onResult.accept(null);
+            return;
+        }
+        final UUID playerId = player.getUniqueId();
+        final String playerName = player.getName();
+        final String backend = this.detectServerName();
+        final MarketOperationJournal.Request request;
+        try {
+            request = new MarketOperationJournal.Request(operationId, playerId, playerName, operationKind, itemKey,
+                itemCount, java.math.BigDecimal.valueOf(totalCost).setScale(2, java.math.RoundingMode.UNNECESSARY), backend, payload);
+        } catch (IllegalArgumentException invalid) {
+            this.logTransactionAudit(playerId.toString(), playerName,
+                marketPurchaseAuditEvent(operationKind, "REJECTED"),
+                itemKey, itemCount, totalCost / itemCount, 0.0, "reason=invalid_request");
+            if (onResult != null) onResult.accept(null);
+            return;
+        }
+        InventoryCustody custody = this.currentInventoryCustody();
+        if (custody == null || !custody.qualified()) {
+            this.logTransactionAudit(playerId.toString(), playerName,
+                marketPurchaseAuditEvent(operationKind, "REJECTED"),
+                itemKey, itemCount, totalCost / itemCount, 0.0, "reason=custody_unqualified");
+            if (onResult != null) onResult.accept(new MarketOperationCoordinator.Result(
+                MarketOperationCoordinator.Outcome.REJECTED, "custody_unqualified"));
+            return;
+        }
+        MarketOperationCoordinator.CustodyFlow flow = new MarketOperationCoordinator.CustodyFlow() {
+            @Override public boolean qualified() { return custody.qualified(); }
+            @Override public CompletionStage<InventoryCustody.Lease> begin(MarketOperationJournal.Request op) {
+                return onPlayerStage(player, () -> custody.begin(player, op.operationId()));
+            }
+            @Override public CompletionStage<MarketOperationCoordinator.Mutation> applyItems(
+                    MarketOperationJournal.Request op, InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> {
+                    if (!player.isOnline() || !lease.playerId().equals(player.getUniqueId()) || !stillCurrent.getAsBoolean())
+                        return CompletableFuture.completedFuture(new MarketOperationCoordinator.Mutation(false, false, "player_or_menu_changed"));
+                    if (!marketCursorEmpty(player))
+                        return CompletableFuture.completedFuture(new MarketOperationCoordinator.Mutation(false, false, "cursor_item_present"));
+                    if (!inventoryCanFit(player.getInventory(), prepared))
+                        return CompletableFuture.completedFuture(new MarketOperationCoordinator.Mutation(false, false, "inventory_full"));
+                    boolean added = SafeInventoryDelivery.addExactly(player.getInventory(), prepared);
+                    return CompletableFuture.completedFuture(added
+                        ? new MarketOperationCoordinator.Mutation(true, true, null)
+                        : new MarketOperationCoordinator.Mutation(false, false, "inventory_full"));
+                });
+            }
+            @Override public CompletionStage<InventoryCustody.CheckpointReceipt> checkpoint(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.checkpoint(player, lease));
+            }
+            @Override public CompletionStage<Void> finish(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.finish(player, lease));
+            }
+            @Override public CompletionStage<Void> abortUntouched(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.abortUntouched(player, lease));
+            }
+            @Override public CompletionStage<Void> forgetTerminal(UUID opId, boolean committed) {
+                return onPlayerStage(player, () -> custody.forgetTerminal(player, opId, committed));
+            }
+        };
+        this.marketOperationCoordinator.purchaseShop(request, flow).whenComplete((result, failure) ->
+            this.runOnPlayerThread(player, () -> {
+                if (onResult == null) return;
+                if (failure != null) onResult.accept(null);
+                else onResult.accept(result);
+            }));
+    }
+
+    private static String marketPurchaseAuditEvent(String operationKind, String outcome) {
+        String prefix = "AUCTION_BUY".equals(operationKind) ? "AH_BUY"
+            : "PVP_PURCHASE".equals(operationKind) ? "PVP_BUY" : "SHOP_BUY";
+        return prefix + "_" + outcome;
+    }
+
+    private MarketOperationCoordinator.CustodyFlow journaledCustodyFlow(Player player, InventoryCustody custody,
+            java.util.function.BiFunction<MarketOperationJournal.Request, InventoryCustody.Lease,
+                java.util.concurrent.CompletionStage<MarketOperationCoordinator.Mutation>> applyItems) {
+        return new MarketOperationCoordinator.CustodyFlow() {
+            @Override public boolean qualified() { return custody.qualified(); }
+            @Override public java.util.concurrent.CompletionStage<InventoryCustody.Lease> begin(MarketOperationJournal.Request request) {
+                return onPlayerStage(player, () -> custody.begin(player, request.operationId()));
+            }
+            @Override public java.util.concurrent.CompletionStage<MarketOperationCoordinator.Mutation> applyItems(
+                    MarketOperationJournal.Request request, InventoryCustody.Lease lease) {
+                return applyItems.apply(request, lease);
+            }
+            @Override public java.util.concurrent.CompletionStage<InventoryCustody.CheckpointReceipt> checkpoint(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.checkpoint(player, lease));
+            }
+            @Override public java.util.concurrent.CompletionStage<Void> finish(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.finish(player, lease));
+            }
+            @Override public java.util.concurrent.CompletionStage<Void> abortUntouched(InventoryCustody.Lease lease) {
+                return onPlayerStage(player, () -> custody.abortUntouched(player, lease));
+            }
+            @Override public java.util.concurrent.CompletionStage<Void> forgetTerminal(UUID operationId, boolean committed) {
+                return onPlayerStage(player, () -> custody.forgetTerminal(player, operationId, committed));
+            }
+        };
+    }
+
+    private <T> java.util.concurrent.CompletionStage<T> onPlayerStage(Player player,
+            java.util.function.Supplier<java.util.concurrent.CompletionStage<T>> action) {
+        java.util.concurrent.CompletableFuture<T> result = new java.util.concurrent.CompletableFuture<>();
+        dev.pizzasmp.common.scheduler.PlatformScheduler.TaskHandle scheduled =
+            dev.pizzasmp.common.scheduler.PlatformScheduler.entityNow(this, player, () -> {
+                if (!player.isOnline()) {
+                    result.completeExceptionally(new IllegalStateException("player is offline"));
+                    return;
+                }
+                try {
+                    action.get().whenComplete((value, failure) -> {
+                        if (failure != null) result.completeExceptionally(failure);
+                        else result.complete(value);
+                    });
+                } catch (RuntimeException failure) { result.completeExceptionally(failure); }
+            }, () -> result.completeExceptionally(new IllegalStateException("player scheduler retired")));
+        if (!scheduled.wasAccepted()) result.completeExceptionally(new IllegalStateException("player scheduler refused task"));
+        return result;
+    }
+
+    private boolean inventoryCanFit(org.bukkit.inventory.Inventory inventory, List<ItemStack> offers) {
+        ItemStack[] simulated = inventory.getStorageContents();
+        for (int i = 0; i < simulated.length; i++) simulated[i] = simulated[i] == null ? null : simulated[i].clone();
+        int inventoryLimit = inventory.getMaxStackSize();
+        for (ItemStack offer : offers) {
+            int remaining = offer.getAmount();
+            for (int slot = 0; slot < simulated.length && remaining > 0; slot++) {
+                ItemStack existing = simulated[slot];
+                if (existing == null || !existing.isSimilar(offer)) continue;
+                int max = Math.min(inventoryLimit, existing.getMaxStackSize());
+                int moved = Math.min(remaining, Math.max(0, max - existing.getAmount()));
+                existing.setAmount(existing.getAmount() + moved);
+                remaining -= moved;
+            }
+            for (int slot = 0; slot < simulated.length && remaining > 0; slot++) {
+                if (simulated[slot] != null) continue;
+                int moved = Math.min(remaining, Math.min(inventoryLimit, offer.getMaxStackSize()));
+                ItemStack placed = offer.clone();
+                placed.setAmount(moved);
+                simulated[slot] = placed;
+                remaining -= moved;
+            }
+            if (remaining > 0) return false;
+        }
+        return true;
+    }
+
+    private byte[] encodeShopItemPayload(List<ItemStack> items) throws java.io.IOException {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.io.DataOutputStream out = new java.io.DataOutputStream(bytes)) {
+            out.writeInt(items.size());
+            for (ItemStack item : items) {
+                byte[] encoded = item.serializeAsBytes();
+                if (encoded.length > 256 * 1024) throw new java.io.IOException("shop item payload too large");
+                out.writeInt(encoded.length);
+                out.write(encoded);
+                if (bytes.size() > MarketOperationJournal.MAX_ITEM_PAYLOAD_BYTES) throw new java.io.IOException("shop payload too large");
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    private byte[] encodeJournaledSellItems(List<JournaledSellItem> items) throws java.io.IOException {
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.io.DataOutputStream out = new java.io.DataOutputStream(bytes)) {
+            out.writeInt(0x53534c31); // "SSL1": journaled sell payload v1.
+            out.writeInt(items.size());
+            for (JournaledSellItem item : items) {
+                byte[] encoded = item.expected().serializeAsBytes();
+                if (encoded.length > 256 * 1024) throw new java.io.IOException("sell item payload too large");
+                out.writeInt(item.slot());
+                out.writeUTF(item.expected().getType().name());
+                out.writeInt(item.expected().getAmount());
+                out.writeUTF(item.unitWorth().toPlainString());
+                out.writeInt(encoded.length);
+                out.write(encoded);
+                if (bytes.size() > MarketOperationJournal.MAX_ITEM_PAYLOAD_BYTES)
+                    throw new java.io.IOException("sell payload too large");
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    private byte[] encodeOrderCreatePayload(BigDecimal unitPrice, int maxOpenOrders) throws java.io.IOException {
+        if (unitPrice == null || unitPrice.signum() <= 0 || maxOpenOrders < 1 || maxOpenOrders > 1000)
+            throw new java.io.IOException("invalid order create terms");
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.io.DataOutputStream out = new java.io.DataOutputStream(bytes)) {
+            out.writeInt(0x4f524431); // "ORD1": escrow-backed order create payload v1.
+            out.writeUTF(unitPrice.toPlainString());
+            out.writeInt(maxOpenOrders);
+        }
+        return bytes.toByteArray();
     }
 
     private ItemStack createSingleShopStack(ShopEntry entry, int amount) {
@@ -16943,6 +19888,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             stack.addUnsafeEnchantment(Enchantment.EFFICIENCY, 5);
             stack.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
             stack.addUnsafeEnchantment(Enchantment.MENDING, 1);
+            stack.addUnsafeEnchantment(Enchantment.SILK_TOUCH, 1);
         } else if (entry.key.endsWith("_axe")) {
             stack.addUnsafeEnchantment(Enchantment.EFFICIENCY, 5);
             stack.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
@@ -17002,11 +19948,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (player == null || !player.isOnline()) {
             return;
         }
+        if (this.rejectDisabledShardUi(player)) return;
         this.runAsyncTask(() -> {
+            if (!this.shardsEnabled()) return;
             long shards = this.getShardBalance(player.getUniqueId());
             long dailyRem = this.getDailyClaimRemainingMs(player.getUniqueId());
             this.runOnPlayerThread(player, () -> {
-                if (!player.isOnline()) {
+                if (!player.isOnline() || this.rejectDisabledShardUi(player)) {
                     return;
                 }
                 Inventory inv = MenuLock.create(54, TITLE_SHARD_SHOP);
@@ -17035,7 +19983,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.putShardItem(inv, 40, Material.TRIDENT, "Trident", "trident");
                 this.putShardItem(inv, 41, Material.NAME_TAG, "Name Tag", "name_tag");
                 inv.setItem(49, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7cBack", "shop_open_main", List.of()));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -17070,12 +20018,20 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void purchaseShardItem(Player player, String key) {
+        if (player == null || !player.isOnline() || this.rejectDisabledShardUi(player)) return;
         Integer cost = SHARD_ITEM_PRICES.get(key);
         if (cost == null) return;
         UUID uuid = player.getUniqueId();
         this.runAsyncTask(() -> {
+            if (!this.shardsEnabled()) return;
             if (!this.withdrawShards(uuid, cost.intValue())) {
-                this.runOnPlayerThread(player, () -> player.sendActionBar(Component.text("\u00a7cNot enough shards (need " + cost + ").")));
+                this.runOnPlayerThread(player, () -> {
+                    if (!this.shardsEnabled()) {
+                        this.rejectDisabledShardUi(player);
+                        return;
+                    }
+                    player.sendActionBar(Component.text("\u00a7cNot enough shards (need " + cost + ")."));
+                });
                 return;
             }
             ItemStack item = this.buildShardItem(key);
@@ -17091,6 +20047,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // ----- Daily crate -----
     private long getDailyClaimRemainingMs(UUID uuid) {
+        if (!this.shardsEnabled()) return Long.MAX_VALUE;
         String sql = "SELECT TIMESTAMPDIFF(SECOND, last_claim, NOW()) FROM shard_daily_claims WHERE uuid=?";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -17108,6 +20065,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void recordDailyClaim(UUID uuid) {
+        if (!this.shardsEnabled()) return;
         String sql = "INSERT INTO shard_daily_claims (uuid, last_claim) VALUES (?, NOW()) ON DUPLICATE KEY UPDATE last_claim=NOW()";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -17142,8 +20100,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void claimDailyCrate(Player player) {
+        if (player == null || !player.isOnline() || this.rejectDisabledShardUi(player)) return;
         UUID uuid = player.getUniqueId();
         this.runAsyncTask(() -> {
+            if (!this.shardsEnabled()) return;
             long rem = this.getDailyClaimRemainingMs(uuid);
             if (rem > 0L) {
                 long hrs = rem / 3600000L;
@@ -17151,12 +20111,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.runOnPlayerThread(player, () -> player.sendActionBar(Component.text("\u00a7cDaily crate ready in " + hrs + "h " + mins + "m.")));
                 return;
             }
+            if (!this.shardsEnabled()) return;
             this.recordDailyClaim(uuid);
             java.util.List<ItemStack> rewards = this.buildDailyCrateRewards();
             long bonus = 50L + this.ecoRandom.nextInt(101);
             this.depositShards(uuid, bonus);
             this.runOnPlayerThread(player, () -> {
-                if (!player.isOnline()) return;
+                if (!player.isOnline() || this.rejectDisabledShardUi(player)) return;
                 for (ItemStack r : rewards) this.giveItemStack(player, r);
                 player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 0.7f, 1.0f);
                 player.sendMessage("\u00a77Daily crate claimed: \u00a7b+" + bonus + " shards \u00a77and items.");
@@ -17166,6 +20127,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openShardCrateDetails(Player player, String crateKey) {
+        if (player == null || !player.isOnline() || this.rejectDisabledShardUi(player)) return;
         Integer price = SHARD_CRATE_PRICES.get(crateKey);
         String title = this.crateTitle(crateKey);
         if (title == null || price == null) {
@@ -17184,7 +20146,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         inv.setItem(48, this.namedWithLore(Material.LIME_STAINED_GLASS_PANE, "\u00a7aBuy for " + price + " shards", "shard_buy_crate:" + crateKey, List.of("\u00a77Click to review and confirm")));
         inv.setItem(50, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7cBack", "shard_back", List.of()));
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private ItemStack shardItemIcon(String key, int price) {
@@ -17197,6 +20159,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openShardConfirm(Player player, String type, String key) {
+        if (player == null || !player.isOnline() || this.rejectDisabledShardUi(player)) return;
         boolean crate = "crate".equals(type);
         Integer price = crate ? SHARD_CRATE_PRICES.get(key) : SHARD_ITEM_PRICES.get(key);
         if (price == null) { this.openShardShopMenu(player); return; }
@@ -17211,7 +20174,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             crate ? ("shard_do_crate:" + key) : ("shard_do_item:" + key), List.of("\u00a77Spend \u00a7b" + price + " shards")));
         inv.setItem(15, this.namedWithLore(Material.RED_WOOL, "\u00a7cCancel",
             crate ? ("shard_cancel_crate:" + key) : "shard_cancel_item", List.of("\u00a77Keep your shards")));
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private String crateTitle(String crateKey) {
@@ -17225,12 +20188,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void purchaseCrate(Player player, String crateKey) {
+        if (player == null || !player.isOnline() || this.rejectDisabledShardUi(player)) return;
         Integer cost = SHARD_CRATE_PRICES.get(crateKey);
         if (cost == null) {
             return;
         }
         UUID uuid = player.getUniqueId();
         this.runAsyncTask(() -> {
+            if (!this.shardsEnabled()) return;
             if (!this.withdrawShards(uuid, cost.intValue())) {
                 return;
             }
@@ -17327,6 +20292,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void logCrateReward(UUID uuid, String username, String crateKey, int shardsCost, int rewardCount) {
+        if (!this.shardsEnabled()) return;
         String sql = "INSERT INTO crate_reward_log (uuid, username, crate_key, shards_cost, reward_count, server_name) VALUES (?, ?, ?, ?, ?, ?)";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql);){
@@ -17368,6 +20334,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * Enabled aggressive exception aggregation
      */
     private long getShardBalance(UUID uuid) {
+        if (!this.shardsEnabled()) return 0L;
         String sql = "SELECT shards FROM balances WHERE uuid=?";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql);){
@@ -17388,6 +20355,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * Enabled aggressive exception aggregation
      */
     private boolean withdrawShards(UUID uuid, long amount) {
+        if (!this.shardsEnabled()) return false;
         String sql = "UPDATE balances SET shards=shards-? WHERE uuid=? AND shards>=?";
         try (Connection conn = this.openSyncConnection();){
             boolean bl;
@@ -17422,7 +20390,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void depositShards(UUID uuid, long amount) {
-        if (uuid == null || amount <= 0L) {
+        if (!this.shardsEnabled() || uuid == null || amount <= 0L) {
             return;
         }
         String sql = "INSERT INTO balances (uuid, shards) VALUES (?, ?) ON DUPLICATE KEY UPDATE shards = shards + VALUES(shards)";
@@ -17462,15 +20430,25 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     UUID uuid = player.getUniqueId();
                     Long flushAt = this.lastPlaytimeFlush.put(uuid, now);
                     long elapsed = flushAt == null ? 0L : (now - flushAt) / 1000L;
-                    long passiveShards = this.isPizzaPlusPlus(player) ? 2L : 1L;
-                    int minutes = this.shardBonusMinutes.merge(uuid, 1, Integer::sum);
-                    boolean bonus = minutes >= 10;
-                    if (bonus) this.shardBonusMinutes.put(uuid, 0);
+                    boolean rewardShards = this.shardsEnabled();
+                    long shardReward = 0L;
+                    boolean bonus = false;
+                    if (rewardShards) {
+                        long passiveShards = this.isPizzaPlusPlus(player) ? 2L : 1L;
+                        int minutes = this.shardBonusMinutes.merge(uuid, 1, Integer::sum);
+                        bonus = minutes >= 10;
+                        if (bonus) this.shardBonusMinutes.put(uuid, 0);
+                        shardReward = passiveShards + (bonus ? PLAYTIME_SHARD_BONUS : 0L);
+                    } else {
+                        this.shardBonusMinutes.remove(uuid);
+                    }
+                    final long rewardAmount = shardReward;
+                    final boolean bonusNotice = bonus;
                     this.runAsyncTask(() -> {
                         if (elapsed > 0L) this.updatePlaytimeSeconds(uuid, elapsed);
-                        this.depositShards(uuid, passiveShards + (bonus ? PLAYTIME_SHARD_BONUS : 0L));
+                        if (rewardShards && this.shardsEnabled()) this.depositShards(uuid, rewardAmount);
                     });
-                    if (bonus) player.sendMessage(this.legacyColorize(
+                    if (bonusNotice && rewardShards && this.shardsEnabled()) player.sendMessage(this.legacyColorize(
                         "&7You earned &d&l" + PLAYTIME_SHARD_BONUS + " shards&r&7 for playing the server"));
                 }, null);
             }
@@ -17508,7 +20486,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         String dailyClaimSql = "CREATE TABLE IF NOT EXISTS shard_daily_claims (uuid CHAR(36) PRIMARY KEY, last_claim TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)";
         String teleportRequestsSql = "CREATE TABLE IF NOT EXISTS network_teleport_requests (id BIGINT AUTO_INCREMENT PRIMARY KEY,requester_uuid CHAR(36) NOT NULL,requester_name VARCHAR(16) NOT NULL,target_uuid CHAR(36) NOT NULL,target_name VARCHAR(16) NOT NULL,request_type VARCHAR(16) NOT NULL,requester_server VARCHAR(32) NOT NULL,target_server VARCHAR(32) NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'PENDING',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,expires_at TIMESTAMP NOT NULL,responded_at TIMESTAMP NULL DEFAULT NULL,INDEX idx_tp_target_pending (target_uuid, status, expires_at),INDEX idx_tp_requester_pending (requester_uuid, status, expires_at))";
         String notificationSql = "CREATE TABLE IF NOT EXISTS network_player_notifications (id BIGINT AUTO_INCREMENT PRIMARY KEY,recipient_uuid CHAR(36) NOT NULL,message TEXT NOT NULL,action VARCHAR(96) NOT NULL DEFAULT '',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,expires_at TIMESTAMP NOT NULL,INDEX idx_notify_recipient (recipient_uuid, expires_at))";
-        String auctionListingsSql = "CREATE TABLE IF NOT EXISTS auction_listings (id BIGINT AUTO_INCREMENT PRIMARY KEY,seller_uuid CHAR(36) NOT NULL,buyer_uuid CHAR(36) NULL,item_blob LONGBLOB NOT NULL,item_key VARCHAR(96) NOT NULL,price DOUBLE NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',expires_at TIMESTAMP NULL DEFAULT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,INDEX idx_auction_status_created (status, created_at),INDEX idx_auction_seller_status (seller_uuid, status))";
+        String auctionListingsSql = "CREATE TABLE IF NOT EXISTS auction_listings (id BIGINT AUTO_INCREMENT PRIMARY KEY,seller_uuid CHAR(36) NOT NULL,buyer_uuid CHAR(36) NULL,lock_operation_id CHAR(36) NULL,item_blob LONGBLOB NOT NULL,item_key VARCHAR(96) NOT NULL,price DOUBLE NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',expires_at TIMESTAMP NULL DEFAULT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,INDEX idx_auction_status_created (status, created_at),INDEX idx_auction_seller_status (seller_uuid, status))";
         String auctionPayoutsSql = "CREATE TABLE IF NOT EXISTS auction_payouts (id BIGINT AUTO_INCREMENT PRIMARY KEY,recipient_uuid CHAR(36) NOT NULL,listing_id BIGINT NOT NULL,amount DOUBLE NOT NULL,claimed TINYINT(1) NOT NULL DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,INDEX idx_auction_payout_recipient (recipient_uuid, claimed))";
         String orderListingsSql = "CREATE TABLE IF NOT EXISTS order_listings (id BIGINT AUTO_INCREMENT PRIMARY KEY,creator_uuid CHAR(36) NOT NULL,item_key VARCHAR(96) NOT NULL,amount_total INT NOT NULL,amount_filled INT NOT NULL DEFAULT 0,unit_price DOUBLE NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,expires_at TIMESTAMP NULL DEFAULT NULL,INDEX idx_order_status_created (status, created_at),INDEX idx_order_creator_status (creator_uuid, status))";
         // Cross-server RTP requests. The destination backend resolves these; see
@@ -17516,6 +20494,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // proxy. Keyed by player so a second /rtp simply replaces the first.
         String rtpRequestsSql = "CREATE TABLE IF NOT EXISTS rtp_requests (uuid CHAR(36) PRIMARY KEY,dimension VARCHAR(16) NOT NULL DEFAULT 'overworld',origin_server VARCHAR(32) NOT NULL,target_server VARCHAR(32) NOT NULL,status VARCHAR(16) NOT NULL DEFAULT 'PENDING',world_name VARCHAR(64) NULL,x DOUBLE NULL,y DOUBLE NULL,z DOUBLE NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,expires_at TIMESTAMP NOT NULL,INDEX idx_rtp_target_status (target_server, status, expires_at))";
         String orderDeliveriesSql = "CREATE TABLE IF NOT EXISTS order_deliveries (id BIGINT AUTO_INCREMENT PRIMARY KEY,order_id BIGINT NOT NULL,fulfiller_uuid CHAR(36) NOT NULL,amount INT NOT NULL,payout DOUBLE NOT NULL,item_blob LONGBLOB NULL,claimed TINYINT(1) NOT NULL DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,claimed_at TIMESTAMP NULL DEFAULT NULL,INDEX idx_order_delivery_order (order_id),INDEX idx_order_delivery_claimed (claimed))";
+        String marketOperationsSql = "CREATE TABLE IF NOT EXISTS economy_market_operations (operation_id CHAR(36) PRIMARY KEY,player_uuid CHAR(36) NOT NULL,player_name VARCHAR(16) NOT NULL,operation_kind VARCHAR(32) NOT NULL,item_key VARCHAR(96) NOT NULL,item_count INT NOT NULL,total_price DECIMAL(18,2) NOT NULL,backend_name VARCHAR(32) NOT NULL,item_payload LONGBLOB NOT NULL,request_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,phase VARCHAR(24) NOT NULL,backend_connection_id CHAR(36) NULL,pre_revision BIGINT NULL,pre_digest CHAR(64) NULL,post_revision BIGINT NULL,post_digest CHAR(64) NULL,review_from_phase VARCHAR(24) NULL,result_detail VARCHAR(64) NULL,gateway_terminal_ack TINYINT(1) NOT NULL DEFAULT 0,gateway_terminal_forgotten TINYINT(1) NOT NULL DEFAULT 0,market_limit INT NOT NULL DEFAULT 0,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,INDEX idx_market_player_phase (player_uuid,phase,updated_at),INDEX idx_market_phase_updated (phase,updated_at))";
         try (Connection conn = this.openSyncConnection();
              Statement st = conn.createStatement();){
             this.addColumnIfMissing(conn, st, "player_settings", "settings_blob", "LONGTEXT NULL");
@@ -17532,9 +20511,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.execSchema(st, rtpRequestsSql);
             this.execSchema(st, notificationSql);
             this.execSchema(st, auctionListingsSql);
+            this.addColumnIfMissing(conn, st, "auction_listings", "lock_operation_id", "CHAR(36) NULL");
             this.execSchema(st, auctionPayoutsSql);
             this.execSchema(st, orderListingsSql);
             this.execSchema(st, orderDeliveriesSql);
+            this.execSchema(st, marketOperationsSql);
+            this.addColumnIfMissing(conn, st, "economy_market_operations", "review_from_phase", "VARCHAR(24) NULL");
+            this.addColumnIfMissing(conn, st, "economy_market_operations", "gateway_terminal_ack", "TINYINT(1) NOT NULL DEFAULT 0");
+            this.addColumnIfMissing(conn, st, "economy_market_operations", "gateway_terminal_forgotten", "TINYINT(1) NOT NULL DEFAULT 0");
+            this.addColumnIfMissing(conn, st, "economy_market_operations", "market_limit", "INT NOT NULL DEFAULT 0");
             // Limbo maintenance: per-player snapshot the limbo reads to render them "frozen in place".
             this.execSchema(st, "CREATE TABLE IF NOT EXISTS limbo_snapshots (uuid CHAR(36) PRIMARY KEY,world VARCHAR(64) NOT NULL,x DOUBLE NOT NULL,y DOUBLE NOT NULL,z DOUBLE NOT NULL,yaw FLOAT NOT NULL,pitch FLOAT NOT NULL,inv_blob LONGBLOB NULL,ender_blob LONGBLOB NULL,blocks_blob LONGBLOB NULL,captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)");
             // Single-row control channel: /limbomaint stop sets return_all_at; the limbo polls it to force-return stuck players.
@@ -17924,13 +20909,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(14, this.named(Material.CHEST, "\u00a79Auction House", "nav_ah"));
         inv.setItem(16, this.named(Material.BARREL, "\u00a79Orders", "nav_orders"));
         inv.setItem(28, this.named(Material.EMERALD, "\u00a79Shop", "nav_shop"));
-        inv.setItem(30, this.named(Material.AMETHYST_SHARD, "\u00a79Shard Shop", "nav_shard_shop"));
+        if (this.shardsEnabled()) inv.setItem(30, this.named(Material.AMETHYST_SHARD, "\u00a79Shard Shop", "nav_shard_shop"));
         inv.setItem(32, this.named(Material.PLAYER_HEAD, "\u00a79Teams", "nav_teams"));
         inv.setItem(34, this.named(Material.REPEATER, "\u00a79Settings", "nav_settings"));
         inv.setItem(39, this.named(Material.PAPER, "\u00a79Stats", "nav_stats"));
         inv.setItem(41, this.named(Material.BOOK, "\u00a79Guide", "nav_guide"));
         inv.setItem(49, this.named(Material.ARROW, "\u00a77Close", "nav_close"));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openAuctionHouseMenu(Player player) {
@@ -17962,7 +20947,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (entries.size() > state.page * 45) {
             inv.setItem(53, this.namedWithLore(Material.ARROW, "\u00a7aNext", "ah_next", List.of()));
         }
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void renderAhListingEntries(Inventory inv, List<AhListingEntry> entries, int page) {
@@ -18074,7 +21059,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (state.page < maxPage) {
             inv.setItem(53, this.namedWithLore(Material.ARROW, "\u00a7aNext", "orders_next", List.of("\u00a77Page " + (state.page + 1))));
         }
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void openOrdersItemMenu(Player player, String materialName) {
@@ -18122,7 +21107,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (orders.size() > state.itemPage * 45) {
             inv.setItem(53, this.namedWithLore(Material.ARROW, "\u00a7aNext", "orders_item_next", List.of("\u00a77Page " + (state.itemPage + 1))));
         }
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void openOrdersMyMenu(Player player) {
@@ -18146,7 +21131,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // not from this overview grid \u2014 so no claim chest is rendered here.
         inv.setItem(49, this.namedWithLore(Material.HOPPER, "\u00a7aFilter: \u00a7f" + state.filter, "orders_my_filter", List.of("\u00a77Click to change")));
         inv.setItem(50, this.namedWithLore(Material.ARROW, "\u00a7aBack to Orders", "orders_main", List.of()));
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     /** Fills slots [activeCount,45): GRAY click-to-use up to the rank cap, then RED locked beyond it. */
@@ -18192,7 +21177,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(14, this.namedWithLore(Material.EMERALD, "\u00a7aPrice", "orders_new_price", List.of("\u00a7fClick to enter", "\u00a77Supports: 1k, 1m, 1b", "\u00a77Current: \u00a7f$" + priceText)));
         double total = state.amount > 0L && state.unitPrice > 0.0 ? (double)state.amount * state.unitPrice : 0.0;
         inv.setItem(15, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE, "\u00a7a\u00a7lConfirm", "orders_new_confirm", List.of("\u00a7fTotal cost: \u00a7f$" + this.fmtMoney(total))));
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void openOrderItemPicker(Player player) {
@@ -18213,7 +21198,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (materials.size() > state.page * 45) {
             inv.setItem(53, this.namedWithLore(Material.ARROW, "\u00a7aNext", "orders_pick_next", List.of()));
         }
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     // ---- Guided order-creation dialog flow (1.21.6+): Choose Item -> How many -> Price -> Review ----
@@ -18636,7 +21621,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(16, this.namedWithLore(Material.CHEST, "\u00a7aClaim items", "orders_detail_claims", List.of("\u00a77Pending deliveries: \u00a7f" + pendingDeliveries, pendingDeliveries > 0 ? "\u00a7fClick to open claimed items" : "\u00a77No items waiting")));
         inv.setItem(22, this.namedWithLore(Material.ARROW, "\u00a7aBack to Your Orders", "orders_detail_back", List.of()));
         inv.setItem(4, this.namedWithLore(Material.PAPER, "\u00a7aOrder overview", "orders_detail_refresh", List.of()));
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void openOrderCancelConfirm(Player player, long orderId) {
@@ -18671,7 +21656,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 inv.setItem(13, preview);
                 inv.setItem(11, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7lKeep Order", "orders_cancel_back", List.of("\u00a77Go back, change nothing")));
                 inv.setItem(15, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE, "\u00a7a\u00a7lConfirm Cancel", "orders_cancel_confirm", List.of("\u00a77Cancel the order and refund")));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -18711,7 +21696,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(11, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7lCancel", "orders_sell_back", List.of()));
         inv.setItem(15, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE, "\u00a7a\u00a7lConfirm", "orders_sell_confirm", List.of()));
         inv.setItem(13, this.namedWithLore(Material.EMERALD, "\u00a7aSell current page", "orders_sell_preview", List.of()));
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void handleOrderSellConfirmClick(Player player, int slot, ItemStack item) {
@@ -18749,7 +21734,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         state.pendingAmount = 0;
         state.pendingItems.clear();
         Inventory inv = MenuLock.create((int)27, (String)TITLE_ORDER_DELIVER, slot -> slot < 27);
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void handleOrderDeliveryInsertClick(Player player, InventoryClickEvent e) {
@@ -18878,7 +21863,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 inv.setItem(11, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7lCancel", "orders_deliver_confirm_cancel", List.of()));
                 inv.setItem(13, preview);
                 inv.setItem(15, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE, "\u00a7a\u00a7lConfirm", "orders_deliver_confirm_accept", List.of()));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -19031,16 +22016,22 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.openOrdersMyMenu(player);
             return;
         }
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_DELIVERY_SELL_ATTEMPT",
+            "DELIVERY", 0, 0.0, 0.0, "order=" + state.selectedOrderId + ";page=" + state.deliveriesPage);
         this.runAsyncTask(() -> {
             List<OrderDeliveryEntry> deliveries = this.queryPendingOrderDeliveries(player.getUniqueId(), state.selectedOrderId);
             List<Long> ids = this.visibleOrderDeliveryIds(deliveries, state.deliveriesPage);
             if (ids.isEmpty()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_DELIVERY_SELL_REJECTED",
+                    "DELIVERY", 0, 0.0, 0.0, "reason=no_pending_deliveries;order=" + state.selectedOrderId);
                 this.runOnPlayerThread(player, () -> player.sendMessage("\u00a7cThere are no claimable deliveries on this page."));
                 return;
             }
             List<OrderDeliveryEntry> claimed = this.claimOrderDeliveries(player.getUniqueId(), state.selectedOrderId, ids);
             this.runOnPlayerThread(player, () -> {
                 if (claimed.isEmpty()) {
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_DELIVERY_SELL_REJECTED",
+                        "DELIVERY", ids.size(), 0.0, 0.0, "reason=claim_failed;order=" + state.selectedOrderId);
                     player.sendMessage("\u00a7cThose deliveries are no longer available.");
                     this.openOrderDeliveriesMenu(player);
                     return;
@@ -19054,10 +22045,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     double worth = this.getItemWorth(delivery.item());
                     if (worth <= 0.0) {
                         unsellable.addAll(this.splitOrderDeliveryStacks(delivery));
+                        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_DELIVERY_SELL_RETURN",
+                            delivery.item().getType().name(), delivery.amount(), 0.0, 0.0,
+                            "delivery=" + delivery.id() + ";reason=unsellable");
                         continue;
                     }
                     soldAmount += delivery.amount();
                     total += worth;
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_DELIVERY_SELL_ITEM",
+                        delivery.item().getType().name(), delivery.amount(), worth / Math.max(1, delivery.amount()), worth,
+                        "delivery=" + delivery.id());
                 }
                 for (ItemStack stack : unsellable) {
                     this.giveItemStack(player, stack);
@@ -19077,6 +22074,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (!unsellable.isEmpty()) {
                     player.sendMessage("\u00a77Returned " + unsellable.size() + " unsellable stack" + (unsellable.size() == 1 ? "" : "s") + " to you.");
                 }
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(),
+                    totalCredited > 0.0 ? "ORDER_DELIVERY_SELL" : "ORDER_DELIVERY_SELL_REJECTED",
+                    "DELIVERY", soldAmount, soldAmount > 0 ? totalCredited / soldAmount : 0.0, totalCredited,
+                    "order=" + state.selectedOrderId + ";payout=" + payoutTotal + ";returned=" + unsellable.size());
                 this.openOrderDeliveriesMenu(player);
             });
         });
@@ -19095,6 +22096,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (ids.isEmpty()) {
             return claimed;
         }
+        String actorName = this.playerName(creator);
+        this.logTransactionAudit(creator.toString(), actorName, "ORDER_DELIVERY_CLAIM_ATTEMPT",
+            "DELIVERY", ids.size(), 0.0, 0.0, "order=" + orderId);
         StringBuilder placeholders = new StringBuilder();
         for (int i = 0; i < ids.size(); ++i) {
             if (i > 0) {
@@ -19102,8 +22106,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             placeholders.append("?");
         }
-        String selectSql = "SELECT d.id,d.item_blob,d.amount,d.payout,d.fulfiller_uuid,d.created_at,p.username FROM order_deliveries d JOIN order_listings o ON o.id=d.order_id LEFT JOIN players p ON p.uuid=d.fulfiller_uuid WHERE o.creator_uuid=? AND d.claimed=0" + (orderId > 0L ? " AND d.order_id=?" : "") + " AND d.id IN (" + placeholders + ") FOR UPDATE";
-        String updateSql = "UPDATE order_deliveries SET claimed=1, claimed_at=CURRENT_TIMESTAMP WHERE claimed=0 AND id IN (" + placeholders + ")";
+        String selectSql = "SELECT d.id,d.item_blob,d.amount,d.payout,d.fulfiller_uuid,d.created_at,p.username FROM order_deliveries d JOIN order_listings o ON o.id=d.order_id LEFT JOIN players p ON p.uuid=d.fulfiller_uuid WHERE o.creator_uuid=? AND d.claimed=0 AND d.lock_operation_id IS NULL" + (orderId > 0L ? " AND d.order_id=?" : "") + " AND d.id IN (" + placeholders + ") FOR UPDATE";
+        String updateSql = "UPDATE order_deliveries d JOIN order_listings o ON o.id=d.order_id "
+            + "SET d.claimed=1, d.claimed_at=CURRENT_TIMESTAMP WHERE o.creator_uuid=? AND d.claimed=0 AND d.lock_operation_id IS NULL "
+            + (orderId > 0L ? "AND d.order_id=? " : "") + "AND d.id IN (" + placeholders + ")";
         try (Connection conn = this.openSyncConnection();){
             conn.setAutoCommit(false);
             try (PreparedStatement sel = conn.prepareStatement(selectSql);
@@ -19127,14 +22133,31 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
                 if (claimed.isEmpty()) {
                     conn.rollback();
+                    this.logTransactionAudit(creator.toString(), actorName, "ORDER_DELIVERY_CLAIM_REJECTED",
+                        "DELIVERY", ids.size(), 0.0, 0.0, "reason=not_available;order=" + orderId);
                     return claimed;
                 }
                 param = 1;
+                upd.setString(param++, creator.toString());
+                if (orderId > 0L) upd.setLong(param++, orderId);
                 for (Long id : ids) {
                     upd.setLong(param++, id.longValue());
                 }
-                upd.executeUpdate();
+                int updated = upd.executeUpdate();
+                if (updated != claimed.size()) {
+                    conn.rollback();
+                    claimed.clear();
+                    this.logTransactionAudit(creator.toString(), actorName, "ORDER_DELIVERY_CLAIM_REJECTED",
+                        "DELIVERY", ids.size(), 0.0, 0.0, "reason=ownership_or_race;order=" + orderId);
+                    return claimed;
+                }
                 conn.commit();
+                for (OrderDeliveryEntry entry : claimed) {
+                    Material material = entry.item() == null ? Material.AIR : entry.item().getType();
+                    this.logTransactionAudit(creator.toString(), actorName, "ORDER_DELIVERY_CLAIMED",
+                        material.name(), entry.amount(), entry.amount() > 0 ? entry.payout() / entry.amount() : 0.0,
+                        entry.payout(), "delivery=" + entry.id() + ";order=" + orderId);
+                }
             }
             catch (Exception ex) {
                 conn.rollback();
@@ -19147,6 +22170,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         catch (Exception ex) {
             this.getLogger().warning("Failed claiming order deliveries: " + ex.getMessage());
             claimed.clear();
+            this.logTransactionAudit(creator.toString(), actorName, "ORDER_DELIVERY_CLAIM_REJECTED",
+                "DELIVERY", ids.size(), 0.0, 0.0, "reason=database_error;order=" + orderId);
         }
         return claimed;
     }
@@ -19607,6 +22632,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     return;
                 }
                 state.price = parsed.value;
+                if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY && state.held) {
+                    this.ahSellState.remove(player.getUniqueId());
+                    ItemStack now = player.getInventory().getItemInMainHand();
+                    if (state.item == null || now == null || !now.isSimilar(state.item) || now.getAmount() != state.item.getAmount()) {
+                        player.sendMessage("§cThe item in your hand changed; hold it again and click Sell.");
+                        return;
+                    }
+                    this.handleAhSellInHandCommand(player, String.valueOf(parsed.value));
+                    return;
+                }
                 // Quick Auction Sell ON -> list immediately (no confirm); OFF -> show the confirm screen with the price.
                 if (this.isSettingEnabledCached(player.getUniqueId(), "quick_auction_sell")) {
                     this.finalizeAhListing(player);
@@ -19625,16 +22660,39 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private void createOrderFromBuilder(Player player) {
         OrderBuilderState state = this.orderBuilderState.computeIfAbsent(player.getUniqueId(), k -> new OrderBuilderState());
+        String requestedItem = state.material == null ? "UNSET" : state.material.name();
+        int requestedAmount = (int)Math.max(0L, Math.min(Integer.MAX_VALUE, state.amount));
+        double requestedUnitPrice = Double.isFinite(state.unitPrice) && state.unitPrice > 0.0 ? state.unitPrice : 0.0;
+        double requestedTotalRaw = state.amount > 0L ? state.amount * requestedUnitPrice : 0.0;
+        double requestedTotal = Double.isFinite(requestedTotalRaw) ? requestedTotalRaw : 0.0;
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CREATE_ATTEMPT",
+            requestedItem, requestedAmount, requestedUnitPrice, requestedTotal, null);
         if (state.material == null || !state.material.isItem()) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                requestedItem, requestedAmount, 0.0, 0.0, "reason=invalid_item");
             player.sendMessage("\u00a7cChoose an item first.");
             return;
         }
         if (state.amount < 1L || state.unitPrice < 1.0) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                requestedItem, requestedAmount, Math.max(0.0, state.unitPrice), 0.0, "reason=invalid_amount_or_price");
             player.sendMessage("\u00a7cSet amount and price first.");
+            return;
+        }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            if (!this.economyOrderRouteEnabled()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                    requestedItem, requestedAmount, requestedUnitPrice, 0.0, "reason=order_custody_unqualified");
+                player.sendMessage("§cOrders are temporarily unavailable while inventory protection is being completed.");
+                return;
+            }
+            this.beginJournaledOrderCreate(player, state);
             return;
         }
         double total = (double)state.amount * state.unitPrice;
         if (!this.withdrawMoney(player, total)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                requestedItem, requestedAmount, state.unitPrice, 0.0, "reason=insufficient_escrow");
             player.sendMessage("\u00a7cNot enough money for escrow.");
             return;
         }
@@ -19657,6 +22715,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             if (activeOrders >= orderCap) {
                 this.depositMoney(player, total);
+                this.logTransactionAudit(uuid.toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                    material.name(), (int)Math.min(Integer.MAX_VALUE, amount), unitPrice, 0.0, "reason=active_order_cap;refunded=true");
                 this.runOnPlayerThread(player, () ->
                     player.sendMessage("§cYou have reached your open order limit (§f" + orderCap + "§c). Escrow refunded."));
                 return;
@@ -19673,6 +22733,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             catch (Exception ex) {
                 this.depositMoney(player, total);
+                this.logTransactionAudit(uuid.toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                    material.name(), (int)Math.min(Integer.MAX_VALUE, amount), unitPrice, 0.0, "reason=database_error;refunded=true");
                 this.runOnPlayerThread(player, () -> player.sendMessage("\u00a7cOrder creation failed."));
                 return;
             }
@@ -19684,7 +22746,100 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
+    private void beginJournaledOrderCreate(Player player, OrderBuilderState state) {
+        if (player == null || state == null || state.material == null || this.marketOperationJournal == null
+                || !this.economyOrderRouteEnabled()) return;
+        if (state.amount < 1L || state.amount > Integer.MAX_VALUE || !Double.isFinite(state.unitPrice) || state.unitPrice < 1.0) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                state.material.name(), (int)Math.max(0L, Math.min(Integer.MAX_VALUE, state.amount)),
+                Double.isFinite(state.unitPrice) ? Math.max(0.0, state.unitPrice) : 0.0, 0.0, "reason=invalid_amount_or_price");
+            player.sendMessage("§cThat order amount or price is invalid.");
+            return;
+        }
+        final int amount = (int)state.amount;
+        final java.math.BigDecimal unitPrice;
+        final java.math.BigDecimal escrow;
+        try {
+            unitPrice = java.math.BigDecimal.valueOf(state.unitPrice).setScale(2, java.math.RoundingMode.CEILING);
+            escrow = unitPrice.multiply(java.math.BigDecimal.valueOf(amount)).setScale(2, java.math.RoundingMode.UNNECESSARY);
+        } catch (ArithmeticException invalidPrice) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                state.material.name(), amount, 0.0, 0.0, "reason=invalid_price");
+            player.sendMessage("§cThat order price is invalid.");
+            return;
+        }
+        double worthFloor = this.worthFloorFor(new ItemStack(state.material));
+        if (!ShopPricePolicy.coversSellWorth(unitPrice.doubleValue(), worthFloor)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CREATE_REJECTED",
+                state.material.name(), amount, unitPrice.doubleValue(), 0.0, "reason=worth_floor;floor=" + worthFloor);
+            player.sendMessage("§cOrder price is below the item worth floor.");
+            return;
+        }
+        state.unitPrice = unitPrice.doubleValue();
+        final byte[] payload;
+        try { payload = encodeOrderCreatePayload(unitPrice, this.marketSlotCap(player)); }
+        catch (java.io.IOException invalidPayload) {
+            player.sendMessage("§cThat order could not be prepared safely.");
+            return;
+        }
+        UUID operationId = UUID.randomUUID();
+        MarketOperationJournal.Request request;
+        try {
+            request = new MarketOperationJournal.Request(operationId, player.getUniqueId(), player.getName(),
+                "ORDER_CREATE", state.material.name(), amount, escrow, this.detectServerName(), payload);
+        } catch (IllegalArgumentException invalidRequest) {
+            player.sendMessage("§cThat order could not be prepared safely.");
+            return;
+        }
+        this.runAsyncTask(() -> {
+            MarketOperationJournal.Status prepared = this.marketOperationJournal.prepare(request);
+            if (prepared != MarketOperationJournal.Status.APPLIED && prepared != MarketOperationJournal.Status.DUPLICATE) {
+                this.runOnPlayerThread(player, () -> player.sendMessage("§cOrder creation is pending database recovery."));
+                return;
+            }
+            MarketOperationJournal.Status created = this.marketOperationJournal.createOrder(operationId);
+            if (created == MarketOperationJournal.Status.UNKNOWN) {
+                MarketOperationJournal.Operation current = null;
+                try { current = this.marketOperationJournal.find(operationId); } catch (RuntimeException ignored) { }
+                if (current != null && current.phase() == MarketOperationJournal.Phase.RELEASED) {
+                    created = MarketOperationJournal.Status.DUPLICATE;
+                } else if (current != null && current.phase() == MarketOperationJournal.Phase.PREPARED) {
+                    created = this.marketOperationJournal.createOrder(operationId);
+                }
+            }
+            if (created == MarketOperationJournal.Status.INSUFFICIENT_FUNDS
+                    || created == MarketOperationJournal.Status.LIMIT_REACHED
+                    || created == MarketOperationJournal.Status.INVALID) {
+                String reason = created == MarketOperationJournal.Status.INSUFFICIENT_FUNDS ? "insufficient_escrow"
+                    : created == MarketOperationJournal.Status.LIMIT_REACHED ? "order_cap_reached" : "invalid_order";
+                MarketOperationJournal.Status aborted = this.marketOperationJournal.abortUntouched(operationId, true, reason);
+                if (aborted == MarketOperationJournal.Status.APPLIED || aborted == MarketOperationJournal.Status.DUPLICATE)
+                    this.marketOperationJournal.completeAbort(operationId);
+            }
+            MarketOperationJournal.Status finalCreated = created;
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                if (finalCreated == MarketOperationJournal.Status.APPLIED || finalCreated == MarketOperationJournal.Status.DUPLICATE) {
+                    this.orderBuilderState.remove(player.getUniqueId());
+                    player.sendMessage("§aOrder listed; escrow is reserved.");
+                    this.openOrdersMyMenu(player);
+                } else if (finalCreated == MarketOperationJournal.Status.INSUFFICIENT_FUNDS) {
+                    player.sendMessage("§cNot enough money for escrow.");
+                } else if (finalCreated == MarketOperationJournal.Status.LIMIT_REACHED) {
+                    player.sendMessage("§cYou have reached your open order limit.");
+                } else {
+                    player.closeInventory();
+                    player.sendMessage("§cOrder creation is still being reconciled; do not submit it again yet.");
+                }
+            });
+        });
+    }
+
     private void fulfillOrder(Player player, long orderId) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            player.sendMessage("§7Fill order offers through /sell hand or /sell all; items are removed only after inventory protection starts.");
+            return;
+        }
         this.runAsyncTask(() -> {
             OrderEntry order = this.loadOrderById(orderId);
             this.runOnPlayerThread(player, () -> {
@@ -19700,6 +22855,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void cancelOwnOrder(Player player, long orderId) {
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CANCEL_ATTEMPT",
+            "ORDER", 0, 0.0, 0.0, "order=" + orderId);
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            if (!this.economyOrderRouteEnabled()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CANCEL_REJECTED",
+                    "ORDER", 0, 0.0, 0.0, "reason=order_custody_unqualified;order=" + orderId);
+                player.sendMessage("§cOrders are temporarily unavailable.");
+                return;
+            }
+            this.beginJournaledOrderCancel(player, orderId);
+            return;
+        }
         this.runAsyncTask(() -> {
             try (Connection conn = this.openSyncConnection();){
                 conn.setAutoCommit(false);
@@ -19713,6 +22880,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     try (ResultSet rs = sel.executeQuery();){
                         if (!rs.next()) {
                             conn.rollback();
+                            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CANCEL_REJECTED",
+                                "ORDER", 0, 0.0, 0.0, "reason=not_active_or_not_owner;order=" + orderId);
                             this.runOnPlayerThread(player, () -> player.sendMessage("\u00a7cOrder is no longer active."));
                             return;
                         }
@@ -19723,6 +22892,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     upd.setString(2, player.getUniqueId().toString());
                     if (upd.executeUpdate() <= 0) {
                         conn.rollback();
+                        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CANCEL_REJECTED",
+                            "ORDER", remaining, unitPrice, 0.0, "reason=update_race;order=" + orderId);
                         this.runOnPlayerThread(player, () -> player.sendMessage("\u00a7cCancel failed."));
                         return;
                     }
@@ -19733,6 +22904,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         refund.executeUpdate();
                     }
                     conn.commit();
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CANCEL",
+                        "ORDER", remaining, unitPrice, refundAmount, "order=" + orderId);
                     this.runOnPlayerThread(player, () -> {
                         if (refundAmount > 0.0) {
                             this.applyPendingCreditNow(player);
@@ -19755,10 +22928,63 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
             }
             catch (Exception ex) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "ORDER_CANCEL_REJECTED",
+                    "ORDER", 0, 0.0, 0.0, "reason=database_error;order=" + orderId);
                 this.runOnPlayerThread(player, () -> player.sendMessage("\u00a7cCancel failed."));
             }
         });
     }
+
+    private void beginJournaledOrderCancel(Player player, long orderId) {
+        if (player == null || orderId <= 0 || this.marketOperationJournal == null) return;
+        UUID operationId = UUID.randomUUID();
+        MarketOperationJournal.Request request;
+        try {
+            request = new MarketOperationJournal.Request(operationId, player.getUniqueId(), player.getName(),
+                "ORDER_CANCEL", "ORDER_CANCEL:" + orderId, 1, java.math.BigDecimal.ZERO,
+                this.detectServerName(), new byte[]{1});
+        } catch (IllegalArgumentException invalidRequest) {
+            player.sendMessage("§cOrder cancellation could not be prepared.");
+            return;
+        }
+        this.runAsyncTask(() -> {
+            MarketOperationJournal.Status prepared = this.marketOperationJournal.prepare(request);
+            MarketOperationJournal.Status cancelled = prepared == MarketOperationJournal.Status.APPLIED
+                    || prepared == MarketOperationJournal.Status.DUPLICATE
+                ? this.marketOperationJournal.cancelOrder(operationId) : prepared;
+            if (cancelled == MarketOperationJournal.Status.UNKNOWN) {
+                MarketOperationJournal.Operation current = null;
+                try { current = this.marketOperationJournal.find(operationId); } catch (RuntimeException ignored) { }
+                if (current != null && current.phase() == MarketOperationJournal.Phase.RELEASED)
+                    cancelled = MarketOperationJournal.Status.DUPLICATE;
+                else if (current != null && current.phase() == MarketOperationJournal.Phase.PREPARED)
+                    cancelled = this.marketOperationJournal.cancelOrder(operationId);
+            }
+            if (cancelled == MarketOperationJournal.Status.NOT_FOUND || cancelled == MarketOperationJournal.Status.INVALID
+                    || cancelled == MarketOperationJournal.Status.CONFLICT) {
+                MarketOperationJournal.Status aborted = this.marketOperationJournal.abortUntouched(operationId, true, "order_not_active");
+                if (aborted == MarketOperationJournal.Status.APPLIED || aborted == MarketOperationJournal.Status.DUPLICATE)
+                    this.marketOperationJournal.completeAbort(operationId);
+            }
+            MarketOperationJournal.Status finalStatus = cancelled;
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                if (finalStatus == MarketOperationJournal.Status.APPLIED || finalStatus == MarketOperationJournal.Status.DUPLICATE) {
+                    this.applyPendingCreditNow(player);
+                    player.sendMessage("§aOrder cancelled; unfilled and unreserved escrow was refunded.");
+                    this.openOrdersMyMenu(player);
+                    this.refreshOrdersForViewers(player.getUniqueId());
+                } else if (finalStatus == MarketOperationJournal.Status.NOT_FOUND || finalStatus == MarketOperationJournal.Status.CONFLICT) {
+                    player.sendMessage("§cThat order is no longer active or owned by you.");
+                    this.openOrdersMyMenu(player);
+                } else {
+                    player.closeInventory();
+                    player.sendMessage("§cOrder cancellation is being reconciled; do not retry yet.");
+                }
+            });
+        });
+    }
+
     private void openOrderDeliveriesMenu(Player player) {
         OrdersViewState state = this.ordersViewState.computeIfAbsent(player.getUniqueId(), id -> new OrdersViewState());
         boolean allDeliveries = state.selectedOrderId <= 0L;
@@ -19818,7 +23044,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 inv.setItem(48, this.namedWithLore(Material.HOPPER, "\u00a7a\u00a7lClaim Everything", "orders_claims_claim_all", List.of("\u00a77Collect \u00a7fall \u00a77pending deliveries", "\u00a77across every page at once")));
                 inv.setItem(49, this.namedWithLore(Material.EMERALD, "\u00a7aSell all on page", "orders_claims_sell_page", List.of()));
                 inv.setItem(52, this.namedWithLore(Material.DROPPER, "\u00a7aDrop this page", "orders_claims_drop_page", List.of()));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -19837,7 +23063,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.fillMarketSlots(inv, n, cap, "ah_new_slot", "\u00a77Empty Listing Slot", "\u00a7fClick to sell an item");
                 inv.setItem(49, this.namedWithLore(Material.WRITABLE_BOOK, "\u00a7aPast transactions", "ah_my_tx", List.of()));
                 inv.setItem(50, this.namedWithLore(Material.ARROW, "\u00a7aBack to Auction House", "ah_my_back_main", List.of()));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -19867,7 +23093,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     inv.setItem(53, this.namedWithLore(Material.ARROW, "\u00a7aNext", "ah_tx_next", List.of()));
                 }
                 inv.setItem(50, this.namedWithLore(Material.ARROW, "\u00a7aBack to Your Items", "ah_tx_back", List.of()));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -19882,7 +23108,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (state != null && state.item != null && state.item.getType() != Material.AIR) {
             inv.setItem(4, state.item.clone());
         }
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private void openAhSellConfirm(Player player) {
@@ -19907,7 +23133,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(13, preview);
         inv.setItem(12, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "\u00a7c\u00a7lCancel", "ah_sell_confirm_cancel", List.of()));
         inv.setItem(14, this.namedWithLore(Material.GREEN_STAINED_GLASS_PANE, "\u00a7a\u00a7lConfirm", "ah_sell_confirm_accept", List.of()));
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     /** "Review Listing" dialog (1.21.6+): item icon + price + worth floor, Change Price / Create Listing. */
@@ -19942,8 +23168,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.openAhSellInsert(player);
             return;
         }
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_ATTEMPT",
+            state.item.getType().name(), state.item.getAmount(), state.price, state.price,
+            "source=" + (openAuctionAfter ? "gui" : "command"));
         double floor = this.worthFloorFor(state.item);
         if (state.price < floor) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_REJECTED",
+                state.item.getType().name(), state.item.getAmount(), state.price, 0.0, "reason=worth_floor;floor=" + floor);
             player.sendMessage("\u00a7cListing price is below worth floor.");
             return;
         }
@@ -19964,6 +23195,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.getLogger().warning("Failed counting AH listings: " + ex.getMessage());
             }
             if (activeCount >= listingCap) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_REJECTED",
+                    listingItem.getType().name(), listingItem.getAmount(), ahPrice, 0.0, "reason=listing_cap;item_returned=true");
                 this.runOnPlayerThread(player, () -> {
                     java.util.HashMap<Integer, ItemStack> overflow = player.getInventory().addItem(listingItem);
                     for (ItemStack left : overflow.values()) {
@@ -19983,6 +23216,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 ps.executeUpdate();
             }
             catch (Exception ex) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_REJECTED",
+                    listingItem.getType().name(), listingItem.getAmount(), ahPrice, 0.0, "reason=database_error;item_returned=true");
                 this.runOnPlayerThread(player, () -> {
                     player.getInventory().addItem(new ItemStack[]{listingItem});
                     player.sendMessage("\u00a7cListing creation failed.");
@@ -20045,6 +23280,19 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             player.sendMessage("\u00a7cPrice is below worth floor.");
             return;
         }
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            if (!this.economyAuctionListRouteEnabled()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_REJECTED",
+                    inHand.getType().name(), inHand.getAmount(), parsed.value, 0.0, "reason=custody_unqualified");
+                player.sendMessage("§cAuction listings are temporarily unavailable.");
+                return;
+            }
+            double ask = java.math.BigDecimal.valueOf(parsed.value).setScale(2, java.math.RoundingMode.CEILING).doubleValue();
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_ATTEMPT",
+                inHand.getType().name(), inHand.getAmount(), ask, ask, "source=command");
+            this.beginJournaledAuctionListing(player, player.getInventory().getHeldItemSlot(), inHand.clone(), ask);
+            return;
+        }
         ItemStack listing = inHand.clone();
         player.getInventory().setItemInMainHand(null);
         AhSellState state = this.ahSellState.computeIfAbsent(player.getUniqueId(), k -> new AhSellState());
@@ -20053,11 +23301,138 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         this.finalizeAhListing(player, false);
     }
 
+    /** Listing creation keeps the item in its inventory slot until Canopy has persisted the pre-state. */
+    private void beginJournaledAuctionListing(Player player, int sourceSlot, ItemStack listingItem, double ask) {
+        if (player == null || listingItem == null || listingItem.getType().isAir() || sourceSlot < 0 || sourceSlot > 8
+                || !Double.isFinite(ask) || ask < 1.0 || !this.economyAuctionListRouteEnabled()) return;
+        if (this.vanillaItemSanitizer == null) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_REJECTED",
+                listingItem.getType().name(), listingItem.getAmount(), ask, 0.0, "reason=sanitizer_unavailable");
+            player.sendMessage("§cAuction listings are temporarily unavailable.");
+            return;
+        }
+        String invalid = this.vanillaItemSanitizer.violationReason(listingItem);
+        double floor = this.worthFloorFor(listingItem);
+        if (invalid != null || !ShopPricePolicy.coversSellWorth(ask, floor)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_REJECTED",
+                listingItem.getType().name(), listingItem.getAmount(), ask, 0.0,
+                invalid == null ? "reason=worth_floor;floor=" + floor : "reason=invalid_item;rule=" + invalid);
+            player.sendMessage(invalid == null ? "§cListing price is below the item worth floor." : "§cThat item is not vanilla-valid.");
+            return;
+        }
+        final byte[] itemPayload;
+        try { itemPayload = this.serializeItem(listingItem); }
+        catch (RuntimeException serializationFailure) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_LIST_REJECTED",
+                listingItem.getType().name(), listingItem.getAmount(), ask, 0.0, "reason=item_encode_failed");
+            player.sendMessage("§cThat listing is temporarily unavailable.");
+            return;
+        }
+        UUID playerId = player.getUniqueId();
+        String playerName = player.getName();
+        String backend = this.detectServerName();
+        int listingCap = this.marketSlotCap(player);
+        this.runAsyncTask(() -> {
+            int active = -1;
+            try (Connection connection = this.openSyncConnection(); PreparedStatement query = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM auction_listings WHERE seller_uuid=? AND ((status='ACTIVE' "
+                        + "AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)) OR status IN ('BUYING','PREPARING','CANCELLING'))")) {
+                query.setString(1, playerId.toString());
+                try (ResultSet rows = query.executeQuery()) { if (rows.next()) active = rows.getInt(1); }
+            } catch (SQLException failure) {
+                this.getLogger().warning("Auction listing limit lookup failed (" + failure.getClass().getSimpleName() + ")");
+            }
+            final int currentCount = active;
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                if (currentCount < 0 || currentCount >= listingCap) {
+                    this.logTransactionAudit(playerId.toString(), playerName, "AH_LIST_REJECTED", listingItem.getType().name(),
+                        listingItem.getAmount(), ask, 0.0, currentCount < 0 ? "reason=database_error" : "reason=listing_cap");
+                    player.sendMessage(currentCount < 0 ? "§cListing creation failed." :
+                        "§cYou have reached your auction listing limit (§f" + listingCap + "§c).");
+                    return;
+                }
+                UUID operationId = UUID.randomUUID();
+                MarketOperationJournal.Request request;
+                try {
+                    request = new MarketOperationJournal.Request(operationId, playerId, playerName, "AUCTION_LIST",
+                        listingItem.getType().name(), listingItem.getAmount(),
+                        java.math.BigDecimal.valueOf(ask).setScale(2, java.math.RoundingMode.UNNECESSARY), backend, itemPayload, listingCap);
+                } catch (IllegalArgumentException invalidRequest) {
+                    this.logTransactionAudit(playerId.toString(), playerName, "AH_LIST_REJECTED", listingItem.getType().name(),
+                        listingItem.getAmount(), ask, 0.0, "reason=invalid_request");
+                    player.sendMessage("§cListing creation failed.");
+                    return;
+                }
+                InventoryCustody custody = this.currentInventoryCustody();
+                if (custody == null || !custody.qualified()) {
+                    this.logTransactionAudit(playerId.toString(), playerName, "AH_LIST_REJECTED", listingItem.getType().name(),
+                        listingItem.getAmount(), ask, 0.0, "reason=custody_unqualified");
+                    player.sendMessage("§cAuction listings are temporarily unavailable.");
+                    return;
+                }
+                MarketOperationCoordinator.CustodyFlow flow = new MarketOperationCoordinator.CustodyFlow() {
+                    @Override public boolean qualified() { return custody.qualified(); }
+                    @Override public java.util.concurrent.CompletionStage<InventoryCustody.Lease> begin(MarketOperationJournal.Request operation) {
+                        return onPlayerStage(player, () -> custody.begin(player, operation.operationId()));
+                    }
+                    @Override public java.util.concurrent.CompletionStage<MarketOperationCoordinator.Mutation> applyItems(
+                            MarketOperationJournal.Request operation, InventoryCustody.Lease lease) {
+                        return onPlayerStage(player, () -> {
+                            ItemStack current = player.getInventory().getItem(sourceSlot);
+                            if (!player.isOnline() || !lease.playerId().equals(playerId) || current == null
+                                    || !current.isSimilar(listingItem) || current.getAmount() != listingItem.getAmount())
+                                return java.util.concurrent.CompletableFuture.completedFuture(
+                                    new MarketOperationCoordinator.Mutation(false, false, "item_changed"));
+                            if (!marketCursorEmpty(player))
+                                return java.util.concurrent.CompletableFuture.completedFuture(
+                                    new MarketOperationCoordinator.Mutation(false, false, "cursor_item_present"));
+                            player.getInventory().setItem(sourceSlot, null);
+                            return java.util.concurrent.CompletableFuture.completedFuture(
+                                new MarketOperationCoordinator.Mutation(true, true, null));
+                        });
+                    }
+                    @Override public java.util.concurrent.CompletionStage<InventoryCustody.CheckpointReceipt> checkpoint(InventoryCustody.Lease lease) {
+                        return onPlayerStage(player, () -> custody.checkpoint(player, lease));
+                    }
+                    @Override public java.util.concurrent.CompletionStage<Void> finish(InventoryCustody.Lease lease) {
+                        return onPlayerStage(player, () -> custody.finish(player, lease));
+                    }
+                    @Override public java.util.concurrent.CompletionStage<Void> abortUntouched(InventoryCustody.Lease lease) {
+                        return onPlayerStage(player, () -> custody.abortUntouched(player, lease));
+                    }
+                    @Override public java.util.concurrent.CompletionStage<Void> forgetTerminal(UUID id, boolean committed) {
+                        return onPlayerStage(player, () -> custody.forgetTerminal(player, id, committed));
+                    }
+                };
+                this.marketOperationCoordinator.purchaseShop(request, flow).whenComplete((result, failure) ->
+                    this.runOnPlayerThread(player, () -> {
+                        if (failure != null || result == null) {
+                            player.sendMessage("§cListing status is being reconciled; your item remains protected.");
+                        } else if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                            player.sendMessage("§aListing created.");
+                            this.openAuctionHouseMenu(player);
+                        } else if (result.outcome() == MarketOperationCoordinator.Outcome.REJECTED) {
+                            player.sendMessage("listing_limit_reached".equals(result.reason())
+                                ? "§cYou have reached your auction listing limit (§f" + listingCap + "§c)."
+                                : "§cListing could not be completed.");
+                        } else if (result.outcome() == MarketOperationCoordinator.Outcome.BUSY) {
+                            // A second click while the previous operation is still finishing; nothing is stuck.
+                            player.sendActionBar(Component.text("§7Finishing your last purchase..."));
+} else {
+                            player.closeInventory();
+                            player.sendMessage("§cListing is still being reconciled; your item remains protected.");
+                        }
+                    }));
+            });
+        });
+    }
+
     private double worthFloorFor(ItemStack stack) {
         if (stack == null || stack.getType() == Material.AIR) {
             return 1.0;
         }
-        double value = this.sellUnitPrice(stack.getType());
+        double value = this.getItemWorth(stack);
         if (value > 0.0) {
             return value;
         }
@@ -20069,7 +23444,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private List<OrderEntry> queryOrders(OrdersViewState state) {
         ArrayList<OrderEntry> out = new ArrayList<OrderEntry>();
-        StringBuilder sql = new StringBuilder("SELECT o.id,o.item_key,o.amount_total,o.amount_filled,o.unit_price,o.creator_uuid,o.created_at,p.username,o.expires_at FROM order_listings o LEFT JOIN players p ON p.uuid=o.creator_uuid WHERE o.status='ACTIVE' AND (o.expires_at IS NULL OR o.expires_at > CURRENT_TIMESTAMP) ");
+        StringBuilder sql = new StringBuilder("SELECT o.id,o.item_key,o.amount_total,o.amount_filled,o.amount_reserved,o.unit_price,o.creator_uuid,o.created_at,p.username,o.expires_at FROM order_listings o LEFT JOIN players p ON p.uuid=o.creator_uuid WHERE o.status='ACTIVE' AND o.amount_filled+o.amount_reserved<o.amount_total AND (o.expires_at IS NULL OR o.expires_at > CURRENT_TIMESTAMP) ");
         if (state.creatorFilter != null && !state.creatorFilter.isBlank()) {
             sql.append("AND o.creator_uuid=? ");
         }
@@ -20100,7 +23475,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         mat = Material.STONE;
                     }
                     if (!this.matchesUiCategory(mat, state.filter)) continue;
-                    out.add(new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getDouble(5), rs.getString(6), this.safeName(rs.getString(8), rs.getString(6)), rs.getTimestamp(7) == null ? System.currentTimeMillis() : rs.getTimestamp(7).getTime(), rs.getTimestamp(9) == null ? 0L : rs.getTimestamp(9).getTime()));
+                    out.add(new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getDouble(6), rs.getString(7), this.safeName(rs.getString(9), rs.getString(7)), rs.getTimestamp(8) == null ? System.currentTimeMillis() : rs.getTimestamp(8).getTime(), rs.getTimestamp(10) == null ? 0L : rs.getTimestamp(10).getTime()));
                 }
             }
         }
@@ -20112,9 +23487,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private List<OrderEntry> queryOrdersForItem(String materialName, OrdersViewState state) {
         ArrayList<OrderEntry> out = new ArrayList<OrderEntry>();
-        String sql = "SELECT o.id,o.item_key,o.amount_total,o.amount_filled,o.unit_price,o.creator_uuid,o.created_at,p.username,o.expires_at " +
+        String sql = "SELECT o.id,o.item_key,o.amount_total,o.amount_filled,o.amount_reserved,o.unit_price,o.creator_uuid,o.created_at,p.username,o.expires_at " +
             "FROM order_listings o LEFT JOIN players p ON p.uuid=o.creator_uuid " +
-            "WHERE o.status='ACTIVE' AND o.amount_filled < o.amount_total AND UPPER(o.item_key)=? " +
+            "WHERE o.status='ACTIVE' AND o.amount_filled+o.amount_reserved < o.amount_total AND UPPER(o.item_key)=? " +
             "AND (o.expires_at IS NULL OR o.expires_at > CURRENT_TIMESTAMP) " +
             (state.viewerUuid != null ? "AND o.creator_uuid <> ? " : "") +
             "ORDER BY o.unit_price DESC, o.created_at DESC LIMIT 450";
@@ -20126,7 +23501,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 while (rs.next()) {
                     Material mat = Material.matchMaterial(rs.getString(2));
                     if (mat == null) mat = Material.STONE;
-                    out.add(new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getDouble(5), rs.getString(6), this.safeName(rs.getString(8), rs.getString(6)), rs.getTimestamp(7) == null ? System.currentTimeMillis() : rs.getTimestamp(7).getTime(), rs.getTimestamp(9) == null ? 0L : rs.getTimestamp(9).getTime()));
+                    out.add(new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getDouble(6), rs.getString(7), this.safeName(rs.getString(9), rs.getString(7)), rs.getTimestamp(8) == null ? System.currentTimeMillis() : rs.getTimestamp(8).getTime(), rs.getTimestamp(10) == null ? 0L : rs.getTimestamp(10).getTime()));
                 }
             }
         } catch (Exception ex) {
@@ -20138,10 +23513,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private List<OrderEntry> queryOrdersForCreator(UUID creator, OrdersViewState state) {
         ArrayList<OrderEntry> out = new ArrayList<OrderEntry>();
         // Show only ACTIVE orders; completed orders with unclaimed deliveries are accessible via the claim button
-        String sql = "SELECT ol.id,ol.item_key,ol.amount_total,ol.amount_filled,ol.unit_price,ol.creator_uuid,ol.created_at,ol.expires_at " +
+        String sql = "SELECT ol.id,ol.item_key,ol.amount_total,ol.amount_filled,ol.amount_reserved,ol.unit_price,ol.creator_uuid,ol.created_at,ol.expires_at " +
             "FROM order_listings ol " +
             "WHERE ol.creator_uuid=? AND ol.status='ACTIVE' " +
-            "AND (ol.expires_at IS NULL OR ol.expires_at > CURRENT_TIMESTAMP) " +
             "ORDER BY ol.created_at DESC LIMIT 450";
         String myName = this.playerName(creator);
         try (Connection conn = this.openSyncConnection();
@@ -20151,7 +23525,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 while (rs.next()) {
                     Material mat = Material.matchMaterial((String)rs.getString(2));
                     if (mat == null) mat = Material.STONE;
-                    out.add(new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getDouble(5), creator.toString(), myName, rs.getTimestamp(7).getTime(), rs.getTimestamp(8) == null ? 0L : rs.getTimestamp(8).getTime()));
+                    out.add(new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getDouble(6), creator.toString(), myName, rs.getTimestamp(8).getTime(), rs.getTimestamp(9) == null ? 0L : rs.getTimestamp(9).getTime()));
                 }
             }
         }
@@ -20167,7 +23541,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     private List<OrderDeliveryEntry> queryPendingOrderDeliveries(UUID creator, long orderId) {
         ArrayList<OrderDeliveryEntry> out = new ArrayList<OrderDeliveryEntry>();
-        String sql = "SELECT d.id,d.item_blob,d.amount,d.payout,d.fulfiller_uuid,d.created_at,p.username FROM order_deliveries d JOIN order_listings o ON o.id=d.order_id LEFT JOIN players p ON p.uuid=d.fulfiller_uuid WHERE o.creator_uuid=? AND d.claimed=0" + (orderId > 0L ? " AND d.order_id=?" : "") + " ORDER BY d.created_at DESC LIMIT 450";
+        String sql = "SELECT d.id,d.item_blob,d.amount,d.payout,d.fulfiller_uuid,d.created_at,p.username FROM order_deliveries d JOIN order_listings o ON o.id=d.order_id LEFT JOIN players p ON p.uuid=d.fulfiller_uuid WHERE o.creator_uuid=? AND d.claimed=0 AND d.lock_operation_id IS NULL" + (orderId > 0L ? " AND d.order_id=?" : "") + " ORDER BY d.created_at DESC LIMIT 450";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql);){
             ps.setString(1, creator.toString());
@@ -20196,7 +23570,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
      * Enabled aggressive exception aggregation
      */
     private OrderEntry loadOrderById(long id) {
-        String sql = "SELECT o.id,o.item_key,o.amount_total,o.amount_filled,o.unit_price,o.creator_uuid,o.created_at,p.username,o.expires_at FROM order_listings o LEFT JOIN players p ON p.uuid=o.creator_uuid WHERE o.id=? AND o.status='ACTIVE' AND (o.expires_at IS NULL OR o.expires_at > CURRENT_TIMESTAMP) LIMIT 1";
+        String sql = "SELECT o.id,o.item_key,o.amount_total,o.amount_filled,o.amount_reserved,o.unit_price,o.creator_uuid,o.created_at,p.username,o.expires_at FROM order_listings o LEFT JOIN players p ON p.uuid=o.creator_uuid WHERE o.id=? AND o.status='ACTIVE' AND (o.expires_at IS NULL OR o.expires_at > CURRENT_TIMESTAMP) LIMIT 1";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql);){
             ps.setLong(1, id);
@@ -20206,7 +23580,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (mat == null) {
                     mat = Material.STONE;
                 }
-                OrderEntry orderEntry = new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getDouble(5), rs.getString(6), this.safeName(rs.getString(8), rs.getString(6)), rs.getTimestamp(7).getTime(), rs.getTimestamp(9) == null ? 0L : rs.getTimestamp(9).getTime());
+                OrderEntry orderEntry = new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getDouble(6), rs.getString(7), this.safeName(rs.getString(9), rs.getString(7)), rs.getTimestamp(8).getTime(), rs.getTimestamp(10) == null ? 0L : rs.getTimestamp(10).getTime());
                 return orderEntry;
             }
         }
@@ -20217,7 +23591,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private OrderEntry loadOrderByIdForCreator(long id, UUID creator) {
-        String sql = "SELECT o.id,o.item_key,o.amount_total,o.amount_filled,o.unit_price,o.creator_uuid,o.created_at,p.username,o.expires_at FROM order_listings o LEFT JOIN players p ON p.uuid=o.creator_uuid WHERE o.id=? AND o.creator_uuid=? AND o.status='ACTIVE' AND (o.expires_at IS NULL OR o.expires_at > CURRENT_TIMESTAMP) LIMIT 1";
+        String sql = "SELECT o.id,o.item_key,o.amount_total,o.amount_filled,o.amount_reserved,o.unit_price,o.creator_uuid,o.created_at,p.username,o.expires_at FROM order_listings o LEFT JOIN players p ON p.uuid=o.creator_uuid WHERE o.id=? AND o.creator_uuid=? AND o.status='ACTIVE' LIMIT 1";
         try (Connection conn = this.openSyncConnection();
              PreparedStatement ps = conn.prepareStatement(sql);){
             ps.setLong(1, id);
@@ -20228,7 +23602,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (mat == null) {
                     mat = Material.STONE;
                 }
-                return new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getDouble(5), rs.getString(6), this.safeName(rs.getString(8), rs.getString(6)), rs.getTimestamp(7).getTime(), rs.getTimestamp(9) == null ? 0L : rs.getTimestamp(9).getTime());
+                return new OrderEntry(rs.getLong(1), mat, rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getDouble(6), rs.getString(7), this.safeName(rs.getString(9), rs.getString(7)), rs.getTimestamp(8).getTime(), rs.getTimestamp(10) == null ? 0L : rs.getTimestamp(10).getTime());
             }
         }
         catch (Exception ex) {
@@ -20245,6 +23619,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private OrderDeliveryApplyResult applyOrderDelivery(long orderId, UUID fulfiller, Material material, int requestedAmount, ItemStack previewItem) {
+        String fulfillerName = this.playerName(fulfiller);
+        this.logTransactionAudit(fulfiller.toString(), fulfillerName, "ORDER_FILL_ATTEMPT", material.name(),
+            Math.max(0, requestedAmount), 0.0, 0.0, "order=" + orderId);
         try (Connection conn = this.openSyncConnection();){
             conn.setAutoCommit(false);
             try (PreparedStatement sel = conn.prepareStatement("SELECT amount_total,amount_filled,unit_price,creator_uuid FROM order_listings WHERE id=? AND status='ACTIVE' AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) FOR UPDATE");
@@ -20259,6 +23636,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 try (ResultSet rs = sel.executeQuery();){
                     if (!rs.next()) {
                         conn.rollback();
+                        this.logTransactionAudit(fulfiller.toString(), fulfillerName, "ORDER_FILL_REJECTED",
+                            material.name(), Math.max(0, requestedAmount), 0.0, 0.0, "reason=not_active;order=" + orderId);
                         return null;
                     }
                     deliverable = Math.min(requestedAmount, Math.max(0, rs.getInt(1) - rs.getInt(2)));
@@ -20267,6 +23646,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
                 if (deliverable <= 0 || creatorUuid.equals(fulfiller.toString())) {
                     conn.rollback();
+                    this.logTransactionAudit(fulfiller.toString(), fulfillerName, "ORDER_FILL_REJECTED",
+                        material.name(), Math.max(0, requestedAmount), unitPrice, 0.0,
+                        deliverable <= 0 ? "reason=full_or_empty;order=" + orderId : "reason=self_fill;order=" + orderId);
                     return null;
                 }
                 double payout = (double)deliverable * unitPrice;
@@ -20277,6 +23659,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 upd.setLong(3, orderId);
                 if (upd.executeUpdate() <= 0) {
                     conn.rollback();
+                    this.logTransactionAudit(fulfiller.toString(), fulfillerName, "ORDER_FILL_REJECTED",
+                        material.name(), deliverable, unitPrice, 0.0, "reason=update_race;order=" + orderId);
                     return null;
                 }
                 checkDelivery.setLong(1, orderId);
@@ -20306,6 +23690,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 conn.commit();
                 UUID creatorId = null;
                 try { creatorId = UUID.fromString(creatorUuid); } catch (Exception ignored) {}
+                this.logTransactionAudit(fulfiller.toString(), fulfillerName, "ORDER_FILL", material.name(),
+                    deliverable, unitPrice, payout, "order=" + orderId + ";creator=" + creatorUuid);
                 return new OrderDeliveryApplyResult(deliverable, payout, creatorId);
             }
             catch (Exception ex) {
@@ -20318,6 +23704,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         catch (Exception ex) {
             this.getLogger().warning("Failed order delivery apply: " + ex.getMessage());
+            this.logTransactionAudit(fulfiller.toString(), fulfillerName, "ORDER_FILL_REJECTED",
+                material.name(), Math.max(0, requestedAmount), 0.0, 0.0, "reason=database_error;order=" + orderId);
             return null;
         }
     }
@@ -20354,37 +23742,69 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (matLike != null) {
             sql.append("AND LOWER(a.item_key) LIKE ? ");
         }
-        sql.append("ORDER BY ").append(this.ahSortSql(state.sort)).append(" LIMIT 450");
-        try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement(sql.toString());){
-            int param = 1;
-            if (state.sellerFilter != null && !state.sellerFilter.isBlank()) {
-                ps.setString(param++, state.sellerFilter);
-            }
-            if (state.viewerUuid != null) {
-                ps.setString(param++, state.viewerUuid);
-            }
-            if (matLike != null) {
-                ps.setString(param++, "%" + matLike + "%");
-            }
-            try (ResultSet rs = ps.executeQuery();){
-                while (rs.next()) {
-                    ItemStack item = this.deserializeItem(rs.getBytes(2));
-                    if (item == null) {
-                        Material m = Material.matchMaterial((String)rs.getString(3));
-                        item = new ItemStack(m == null ? Material.STONE : m);
+        // Two passes: rank and category-filter every match by its item key (cheap), then load the items for the
+        // first page-set only. Filtering after a fixed LIMIT hid whole categories once the ecobot listed thousands.
+        sql.append("ORDER BY ").append(this.ahSortSql(state.sort).replace("price", "a.price").replace("created_at", "a.created_at")
+            .replace("updated_at", "a.updated_at")).append(" LIMIT 50000");
+        String keyedSql = sql.toString().replace("SELECT a.id,a.item_blob,a.item_key,a.price,a.seller_uuid,a.created_at,p.username",
+            "SELECT a.id,a.item_key");
+        int wanted = enchantTerms.isEmpty() ? 450 : 2000;
+        List<Long> ids = new ArrayList<>();
+        try (Connection conn = this.openSyncConnection()) {
+            try (PreparedStatement ps = conn.prepareStatement(keyedSql)) {
+                int param = 1;
+                if (state.sellerFilter != null && !state.sellerFilter.isBlank()) ps.setString(param++, state.sellerFilter);
+                if (state.viewerUuid != null) ps.setString(param++, state.viewerUuid);
+                if (matLike != null) ps.setString(param++, "%" + matLike + "%");
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next() && ids.size() < wanted) {
+                        Material keyed = this.materialForListingKey(rs.getString(2));
+                        if (keyed != null && !this.matchesUiCategory(keyed, state.filter)) continue;
+                        ids.add(rs.getLong(1));
                     }
-                    if (!this.matchesUiCategory(item.getType(), state.filter)) continue;
-                    // Enchant filter: item must carry every named enchant keyword.
-                    if (!enchantTerms.isEmpty() && !this.itemHasEnchantKeywords(item, enchantTerms)) continue;
-                    out.add(new AhListingEntry(rs.getLong(1), item, rs.getDouble(4), rs.getString(5), this.safeName(rs.getString(7), rs.getString(5)), rs.getTimestamp(6).getTime()));
                 }
+            }
+            if (ids.isEmpty()) return out;
+            java.util.Map<Long, AhListingEntry> loaded = new java.util.HashMap<>();
+            String in = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+            try (PreparedStatement ps = conn.prepareStatement("SELECT a.id,a.item_blob,a.item_key,a.price,a.seller_uuid,a.created_at,p.username "
+                    + "FROM auction_listings a LEFT JOIN players p ON p.uuid=a.seller_uuid WHERE a.status='ACTIVE' AND a.id IN (" + in + ")")) {
+                for (int i = 0; i < ids.size(); i++) ps.setLong(i + 1, ids.get(i));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        ItemStack item = this.deserializeItem(rs.getBytes(2));
+                        if (item == null) {
+                            Material m = Material.matchMaterial((String)rs.getString(3));
+                            item = new ItemStack(m == null ? Material.STONE : m);
+                        }
+                        if (!this.matchesUiCategory(item.getType(), state.filter)) continue;
+                        // Enchant filter: item must carry every named enchant keyword.
+                        if (!enchantTerms.isEmpty() && !this.itemHasEnchantKeywords(item, enchantTerms)) continue;
+                        loaded.put(rs.getLong(1), new AhListingEntry(rs.getLong(1), item, rs.getDouble(4), rs.getString(5),
+                            this.safeName(rs.getString(7), rs.getString(5)), rs.getTimestamp(6).getTime()));
+                    }
+                }
+            }
+            for (Long id : ids) {
+                AhListingEntry entry = loaded.get(id);
+                if (entry != null) out.add(entry);
+                if (out.size() >= 450) break;
             }
         }
         catch (Exception ex) {
             this.getLogger().warning("Failed querying AH listings: " + ex.getMessage());
         }
         return out;
+    }
+
+    /** The material a listing's item key names (ecobot keys such as NETHERITE_SWORD_ENCH_1 included); null if none. */
+    private Material materialForListingKey(String key) {
+        if (key == null || key.isBlank()) return null;
+        Material direct = Material.matchMaterial(key);
+        if (direct != null) return direct;
+        int ench = key.indexOf("_ENCH_");
+        if (ench > 0) return Material.matchMaterial(key.substring(0, ench));
+        return null;
     }
 
     private boolean itemHasEnchantKeywords(ItemStack item, java.util.List<String> keywords) {
@@ -20494,7 +23914,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         inv.setItem(11, cancelBtn);
                         inv.setItem(15, confirmBtn);
                         this.pendingAhBuyListingId.put(player.getUniqueId(), fId);
-                        player.openInventory(inv);
+                        this.openMenu(player, inv);
                     });
                 }
             } catch (Exception ex) {
@@ -20537,24 +23957,200 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         } catch (Throwable ignored) {}
     }
 
+    /** Look up an existing listing, then settle its purchase behind the buyer's Canopy inventory lease. */
+    private void beginJournaledAuctionBuy(Player player, long listingId) {
+        this.runAsyncTask(() -> {
+            String sellerUuid = null;
+            byte[] payload = null;
+            double price = -1.0;
+            try (Connection conn = this.openSyncConnection(); PreparedStatement query = conn.prepareStatement(
+                    "SELECT seller_uuid,item_blob,price FROM auction_listings WHERE id=? AND status='ACTIVE' "
+                        + "AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)")) {
+                query.setLong(1, listingId);
+                try (ResultSet rows = query.executeQuery()) {
+                    if (rows.next()) { sellerUuid = rows.getString(1); payload = rows.getBytes(2); price = rows.getDouble(3); }
+                }
+            } catch (SQLException failure) {
+                this.getLogger().warning("Auction lookup failed (" + failure.getClass().getSimpleName() + ")");
+            }
+            final String seller = sellerUuid;
+            final byte[] itemPayload = payload == null ? null : payload.clone();
+            final double ask = Double.isFinite(price)
+                ? java.math.BigDecimal.valueOf(price).setScale(2, java.math.RoundingMode.HALF_UP).doubleValue() : price;
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) { this.ahBuyInFlight.remove(listingId); return; }
+                if (seller == null || itemPayload == null || !Double.isFinite(ask) || ask < 0.0) {
+                    this.ahBuyInFlight.remove(listingId);
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                        "LISTING", 0, 0.0, 0.0, "reason=not_active;listing=" + listingId);
+                    player.sendActionBar(Component.text("§cThat listing is no longer available."));
+                    return;
+                }
+                if (player.getUniqueId().toString().equalsIgnoreCase(seller)) {
+                    this.ahBuyInFlight.remove(listingId);
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                        "LISTING", 0, ask, 0.0, "reason=self_purchase;listing=" + listingId);
+                    player.sendActionBar(Component.text("§cYou cannot buy your own listing."));
+                    return;
+                }
+                ItemStack item = this.deserializeItem(itemPayload);
+                if (item == null || item.getType().isAir() || item.getAmount() < 1) {
+                    this.ahBuyInFlight.remove(listingId);
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                        "LISTING", 0, ask, 0.0, "reason=invalid_item_blob;listing=" + listingId);
+                    player.sendActionBar(Component.text("§cThat listing contains an invalid item."));
+                    return;
+                }
+                double floor = this.worthFloorFor(item);
+                if (!ShopPricePolicy.coversSellWorth(ask, floor)) {
+                    this.ahBuyInFlight.remove(listingId);
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                        item.getType().name(), item.getAmount(), ask, 0.0, "reason=worth_floor;floor=" + floor + ";listing=" + listingId);
+                    player.sendActionBar(Component.text("§cThat listing is below the item worth floor."));
+                    return;
+                }
+                String invalid = this.vanillaItemSanitizer == null ? "sanitizer_unavailable"
+                    : this.vanillaItemSanitizer.violationReason(item);
+                if (invalid != null) {
+                    this.ahBuyInFlight.remove(listingId);
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                        item.getType().name(), item.getAmount(), ask, 0.0, "reason=invalid_item;rule=" + invalid);
+                    player.sendActionBar(Component.text("§cThat listing contains a non-vanilla item."));
+                    return;
+                }
+                if (!this.inventoryCanFit(player.getInventory(), List.of(item))) {
+                    this.ahBuyInFlight.remove(listingId);
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                        item.getType().name(), item.getAmount(), ask, 0.0, "reason=inventory_full;listing=" + listingId);
+                    player.sendActionBar(Component.text("§cInventory full. Make room before buying."));
+                    return;
+                }
+                final UUID sellerId;
+                try { sellerId = UUID.fromString(seller); }
+                catch (IllegalArgumentException invalidSeller) {
+                    this.ahBuyInFlight.remove(listingId);
+                    player.sendActionBar(Component.text("§cThat listing is temporarily unavailable."));
+                    return;
+                }
+                UUID operationId = UUID.randomUUID();
+                this.beginJournaledItemPurchase(player, operationId, "AUCTION_BUY",
+                    "AUCTION_LISTING:" + listingId + ":" + item.getType().name(), item.getAmount(), ask, List.of(item),
+                    itemPayload, () -> player.isOnline() && this.ahBuyInFlight.contains(listingId), result -> {
+                        this.ahBuyInFlight.remove(listingId);
+                        if (result == null) {
+                            player.sendActionBar(Component.text("§cAuction purchase is temporarily unavailable."));
+                            return;
+                        }
+                        if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                            String label = item.getAmount() + "x " + this.humanName(item.getType());
+                            this.notifyFollowers(player.getUniqueId(), player.getName(),
+                                "bought §f" + label + " §7for §f$" + this.fmtMoney(ask) + "§7.", true);
+                            if (!SERVER_UUID.equals(seller)) {
+                                String sellerName = this.playerNameForUuid(seller);
+                                if (sellerName != null) this.notifyFollowers(sellerId, sellerName,
+                                    "sold §f" + label + " §7for §f$" + this.fmtMoney(ask) + "§7.", true);
+                                Player onlineSeller = Bukkit.getPlayer(sellerId);
+                                if (onlineSeller != null && onlineSeller.isOnline()) {
+                                    this.applyPendingCreditNow(onlineSeller);
+                                    if (this.isSettingEnabledCached(sellerId, "auction_alerts"))
+                                        onlineSeller.sendActionBar(Component.text("§aYour auction listing sold for §f$" + this.fmtMoney(ask) + "§a."));
+                                } else this.queuePlayerNotification(sellerId,
+                                    "§aYour auction listing sold for §f$" + this.fmtMoney(ask) + "§a.", "", 180);
+                            }
+                            AhViewState view = this.ahViewState.get(player.getUniqueId());
+                            if (view != null && view.cachedListings != null) {
+                                view.cachedListings.removeIf(row -> row.id() == listingId);
+                                if (TITLE_AH.equals(player.getOpenInventory().getTitle())) this.renderAhMain(player, view.cachedListings, view);
+                            }
+                            this.broadcastAhListingSold(listingId, player.getUniqueId());
+                        } else if (result.outcome() == MarketOperationCoordinator.Outcome.REJECTED) {
+                            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                                item.getType().name(), item.getAmount(), ask, 0.0,
+                                "reason=" + result.reason() + ";listing=" + listingId);
+                            player.sendActionBar(Component.text("insufficient_funds".equals(result.reason())
+                                ? "§cNot enough money." : "§cPurchase could not be completed."));
+                        } else if (result.outcome() == MarketOperationCoordinator.Outcome.BUSY) {
+                            // A second click while the previous operation is still finishing; nothing is stuck.
+                            player.sendActionBar(Component.text("§7Finishing your last purchase..."));
+} else {
+                            player.closeInventory();
+                            player.sendMessage("§cThis auction purchase is still being reconciled. Your items remain protected; please contact staff if it does not resolve.");
+                        }
+                    });
+            });
+        });
+    }
+
     private void buyAhListing(Player player, long listingId) {
         this.buyAhListing(player, listingId, -1);
     }
 
     private void buyAhListing(Player player, long listingId, int slot) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            if (!this.economyAuctionBuyRouteEnabled()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                    "LISTING", 0, 0.0, 0.0, "reason=custody_unqualified;listing=" + listingId);
+                player.sendActionBar(Component.text("§cAuction purchases are temporarily unavailable."));
+                return;
+            }
+            if (!this.ahBuyInFlight.add(listingId)) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                    "LISTING", 0, 0.0, 0.0, "reason=in_flight;listing=" + listingId);
+                return;
+            }
+            if (!this.instantPurchases()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_ATTEMPT",
+                    "LISTING", 0, 0.0, 0.0, "listing=" + listingId);
+                this.beginJournaledAuctionBuy(player, listingId);
+                return;
+            }
+            this.ahBuyInFlight.remove(listingId);
+        }
         // Per-listing dedupe: if a buy for this listing is already running, ignore the click silently.
         if (!this.ahBuyInFlight.add(listingId)) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                "LISTING", 0, 0.0, 0.0, "reason=in_flight;listing=" + listingId);
             return;
         }
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_ATTEMPT",
+            "LISTING", 0, 0.0, 0.0, "listing=" + listingId);
         // Auction overflow OFF (default): block the buy if there's no room. ON: buy anyway and
         // drop the item in front of the player.
         boolean overflow = this.isSettingEnabledCached(player.getUniqueId(), "auction_overflow");
         if (!overflow && player.getInventory().firstEmpty() == -1) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                "LISTING", 0, 0.0, 0.0, "reason=inventory_full;listing=" + listingId);
             player.sendMessage("§cYour inventory is full. Please make space before buying (or enable Auction Overflow in /settings).");
             player.sendActionBar((Component)Component.text("§cInventory full"));
             this.ahBuyInFlight.remove(listingId);
+            this.playBuyDenied(player);
             return;
         }
+        this.playBuyClick(player);
+        final boolean freeMode = this.freeBuy(player);
+        // The listing leaves this player's view at once, so the next click lands on the next item; a refused buy
+        // puts it back.
+        final AhViewState optimisticView = TITLE_AH.equals(player.getOpenInventory().getTitle()) ? this.ahViewState.get(player.getUniqueId()) : null;
+        AhListingEntry pulled = null;
+        int pulledAt = -1;
+        if (optimisticView != null && optimisticView.cachedListings != null) {
+            for (int i = 0; i < optimisticView.cachedListings.size(); i++) {
+                if (optimisticView.cachedListings.get(i).id() == listingId) { pulled = optimisticView.cachedListings.get(i); pulledAt = i; break; }
+            }
+            if (pulled != null) {
+                optimisticView.cachedListings.remove(pulledAt);
+                this.renderAhMain(player, optimisticView.cachedListings, optimisticView);
+            }
+        }
+        final AhListingEntry optimisticEntry = pulled;
+        final int optimisticIndex = pulledAt;
+        final Runnable putBack = () -> this.runOnPlayerThread(player, () -> {
+            if (optimisticEntry == null || !player.isOnline() || this.ahViewState.get(player.getUniqueId()) != optimisticView
+                    || optimisticView.cachedListings == null || !TITLE_AH.equals(player.getOpenInventory().getTitle())) return;
+            if (optimisticView.cachedListings.stream().noneMatch(e -> e.id() == listingId))
+                optimisticView.cachedListings.add(Math.min(optimisticIndex, optimisticView.cachedListings.size()), optimisticEntry);
+            this.renderAhMain(player, optimisticView.cachedListings, optimisticView);
+        });
         this.runAsyncTask(() -> {
             try (Connection conn = this.openSyncConnection();){
                 conn.setAutoCommit(false);
@@ -20567,6 +24163,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         if (!rs.next()) {
                             conn.rollback();
                             this.ahBuyInFlight.remove(listingId);
+                            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                                "LISTING", 0, 0.0, 0.0, "reason=not_active;listing=" + listingId);
                             return; // silent: benign race when rapid-buying a just-sold listing
                         }
                         String sellerUuid = rs.getString(1);
@@ -20574,21 +24172,34 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         if (player.getUniqueId().toString().equalsIgnoreCase(sellerUuid)) {
                             conn.rollback();
                             this.ahBuyInFlight.remove(listingId);
+                            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                                "LISTING", 0, price, 0.0, "reason=self_purchase;listing=" + listingId);
                             this.runOnPlayerThread(player, () -> player.sendActionBar(Component.text("\u00a7cYou cannot buy your own listing.")));
+                            putBack.run();
                             return;
                         }
-                        if (!this.withdrawMoney(player, price)) {
+                        // Free buy covers Server listings only: a player's listing would pay its seller money from nothing.
+                        boolean freeAh = freeMode && SERVER_UUID.equals(sellerUuid);
+                        if (!freeAh && !this.withdrawMoney(player, price)) {
                             conn.rollback();
                             this.ahBuyInFlight.remove(listingId);
-                            this.runOnPlayerThread(player, () -> player.sendActionBar(Component.text("\u00a7cNot enough money.")));
+                            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                                "LISTING", 0, price, 0.0, "reason=insufficient_funds;listing=" + listingId);
+                            this.runOnPlayerThread(player, () -> {
+                                player.sendActionBar(Component.text("\u00a7cNot enough money."));
+                                this.playBuyDenied(player);
+                            });
+                            putBack.run();
                             return;
                         }
                         upd.setString(1, player.getUniqueId().toString());
                         upd.setLong(2, listingId);
                         if (upd.executeUpdate() <= 0) {
-                            this.depositMoney(player, price);
+                            if (!freeAh) this.depositMoney(player, price);
                             conn.rollback();
                             this.ahBuyInFlight.remove(listingId);
+                            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                                "LISTING", 0, price, 0.0, "reason=update_race;listing=" + listingId);
                             return; // silent: lost the race to another buyer
                         }
                         if (!SERVER_UUID.equals(sellerUuid)) {
@@ -20612,6 +24223,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                                 }
                             }
                             // Silent buy: no "Listing purchased" message; the item just lands in the inventory.
+                            this.playBuyDone(player);
                             String boughtKey = bought != null ? bought.getType().name() : "UNKNOWN";
                             int boughtAmt = bought != null ? bought.getAmount() : 1;
                             // Follow broadcasts: buyer's followers see the buy; the seller's followers see the sale.
@@ -20623,7 +24235,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                                     this.notifyFollowers(sellerId, sellerName, "sold §f" + itemLbl + " §7for §f$" + this.fmtMoney(price) + "§7.", true);
                                 }
                             }
-                            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY", boughtKey, boughtAmt, price, price, "seller=" + sellerUuid);
+                            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY", boughtKey, boughtAmt, price, freeAh ? 0.0 : price, "seller=" + sellerUuid + (freeAh ? ";free=1" : ""));
                             if (seller != null && seller.isOnline()) {
                                 this.applyPendingCreditNow(seller);
                                 if (this.isSettingEnabledCached(sellerId, "auction_alerts")) {
@@ -20660,7 +24272,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             }
             catch (Exception ex) {
                 this.ahBuyInFlight.remove(listingId);
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_BUY_REJECTED",
+                    "LISTING", 0, 0.0, 0.0, "reason=database_error;listing=" + listingId);
                 this.runOnPlayerThread(player, () -> player.sendActionBar(Component.text("\u00a7cPurchase failed.")));
+                putBack.run();
             }
         });
     }
@@ -20685,7 +24300,21 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void cancelAhListing(Player player, long listingId) {
+        this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_CANCEL_ATTEMPT",
+            "LISTING", 0, 0.0, 0.0, "listing=" + listingId);
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            if (!this.economyAuctionCancelRouteEnabled()) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_CANCEL_REJECTED",
+                    "LISTING", 0, 0.0, 0.0, "reason=custody_unqualified;listing=" + listingId);
+                player.sendActionBar(Component.text("§cAuction cancellations are temporarily unavailable."));
+                return;
+            }
+            this.beginJournaledAuctionCancel(player, listingId);
+            return;
+        }
         if (player.getInventory().firstEmpty() == -1) {
+            this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_CANCEL_REJECTED",
+                "LISTING", 0, 0.0, 0.0, "reason=inventory_full;listing=" + listingId);
             player.sendActionBar(Component.text("§cYour inventory is full. Please make space to take down a listing."));
             return;
         }
@@ -20706,6 +24335,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 upd.setString(2, player.getUniqueId().toString());
                 if (upd.executeUpdate() > 0) {
                     ItemStack back = this.deserializeItem(blob);
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_CANCEL",
+                        back == null ? "UNKNOWN" : back.getType().name(), back == null ? 0 : back.getAmount(),
+                        0.0, 0.0, "listing=" + listingId + ";item_returned=true");
                     this.runOnPlayerThread(player, () -> {
                         if (back != null) {
                             player.getInventory().addItem(new ItemStack[]{back});
@@ -20716,8 +24348,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         this.broadcastAhListingSold(listingId, player.getUniqueId());
                     });
                 }
+                else {
+                    this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_CANCEL_REJECTED",
+                        "LISTING", 0, 0.0, 0.0, "reason=not_active_or_not_owner;listing=" + listingId);
+                }
             }
             catch (Exception ex) {
+                this.logTransactionAudit(player.getUniqueId().toString(), player.getName(), "AH_CANCEL_REJECTED",
+                    "LISTING", 0, 0.0, 0.0, "reason=database_error;listing=" + listingId);
                 this.runOnPlayerThread(player, () -> player.sendMessage("\u00a7cCancel failed."));
             }
         });
@@ -20760,7 +24398,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     inv.setItem(slot++, item);
                 }
                 inv.setItem(49, this.namedWithLore(Material.PAPER, "§f" + targetName + " §7(" + listings.size() + " active)", null, List.of()));
-                admin.openInventory(inv);
+                this.openMenu(admin, inv);
             });
         });
     }
@@ -20771,12 +24409,14 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (id == null || target == null || !id.startsWith("ah_admin_remove:") || !admin.hasPermission(PERM_ADMIN_AUCTION)) return;
         long listingId;
         try { listingId = Long.parseLong(id.substring("ah_admin_remove:".length())); } catch (NumberFormatException ex) { return; }
+        this.logTransactionAudit(admin.getUniqueId().toString(), admin.getName(), "AH_ADMIN_REMOVE_ATTEMPT",
+            "LISTING", 0, 0.0, 0.0, "listing=" + listingId + ";seller=" + target);
         this.runAsyncTask(() -> {
             byte[] blob = null;
             boolean removed = false;
             try (Connection conn = this.openSyncConnection();
-                 PreparedStatement sel = conn.prepareStatement("SELECT item_blob FROM auction_listings WHERE id=? AND seller_uuid=? AND status='ACTIVE'");
-                 PreparedStatement upd = conn.prepareStatement("UPDATE auction_listings SET status='REMOVED', updated_at=CURRENT_TIMESTAMP WHERE id=? AND seller_uuid=? AND status='ACTIVE'")) {
+                 PreparedStatement sel = conn.prepareStatement("SELECT item_blob FROM auction_listings WHERE id=? AND seller_uuid=? AND status='ACTIVE' AND lock_operation_id IS NULL");
+                 PreparedStatement upd = conn.prepareStatement("UPDATE auction_listings SET status='REMOVED', updated_at=CURRENT_TIMESTAMP WHERE id=? AND seller_uuid=? AND status='ACTIVE' AND lock_operation_id IS NULL")) {
                 sel.setLong(1, listingId); sel.setString(2, target.toString());
                 try (ResultSet rs = sel.executeQuery()) { if (rs.next()) blob = rs.getBytes(1); }
                 upd.setLong(1, listingId); upd.setString(2, target.toString());
@@ -20785,11 +24425,16 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 this.getLogger().warning("[ah] staff removal of listing " + listingId + " failed: " + ex.getMessage());
             }
             if (!removed) {
+                this.logTransactionAudit(admin.getUniqueId().toString(), admin.getName(), "AH_ADMIN_REMOVE_REJECTED",
+                    "LISTING", 0, 0.0, 0.0, "reason=not_active;listing=" + listingId + ";seller=" + target);
                 this.runOnPlayerThread(admin, () -> admin.sendActionBar(Component.text("§cThat listing is no longer active.")));
                 return;
             }
             ItemStack back = this.deserializeItem(blob);
             if (back != null) this.mailItem(target, back, "auction listing removed by staff");
+            this.logTransactionAudit(admin.getUniqueId().toString(), admin.getName(), "AH_ADMIN_REMOVE",
+                back == null ? "UNKNOWN" : back.getType().name(), back == null ? 0 : back.getAmount(),
+                0.0, 0.0, "listing=" + listingId + ";seller=" + target + ";item_returned=" + (back != null));
             this.getLogger().info("[ah] " + admin.getName() + " removed listing " + listingId + " of " + target + "; item returned to the seller");
             this.broadcastAhListingSold(listingId, admin.getUniqueId());
             String name = Bukkit.getOfflinePlayer(target).getName();
@@ -20820,6 +24465,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // item is in the player's inventory.
     private void deliverMailbox(Player player) {
         if (player == null || !player.isOnline()) return;
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            this.deliverMailboxJournaled(player, 36);
+            return;
+        }
         UUID uuid = player.getUniqueId();
         this.runAsyncTask(() -> {
             List<Long> ids = new java.util.ArrayList<>();
@@ -20861,8 +24510,91 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
+    private void deliverMailboxJournaled(Player player, int remainingAttempts) {
+        if (player == null || !player.isOnline() || remainingAttempts <= 0) return;
+        UUID owner = player.getUniqueId();
+        String playerName = player.getName();
+        InventoryCustody current = this.currentInventoryCustody();
+        if (!this.economyRuntimeReady || !this.dbHealthy || current == null || !current.qualified()) {
+            this.logTransactionAudit(owner.toString(), playerName, "MAILBOX_DELIVERY_DEFERRED", "MAILBOX", 0,
+                0.0, 0.0, "reason=custody_unqualified");
+            return;
+        }
+        this.runAsyncTask(() -> {
+            long mailboxId = 0L;
+            byte[] payload = null;
+            try (Connection connection = this.openSyncConnection(); PreparedStatement query = connection.prepareStatement(
+                    "SELECT id,item_blob FROM player_mailbox WHERE uuid=? AND lock_operation_id IS NULL ORDER BY id LIMIT 1")) {
+                query.setString(1, owner.toString());
+                try (ResultSet rows = query.executeQuery()) {
+                    if (rows.next()) { mailboxId = rows.getLong(1); payload = rows.getBytes(2); }
+                }
+            } catch (SQLException failure) {
+                this.logTransactionAudit(owner.toString(), playerName, "MAILBOX_CLAIM_REJECTED", "MAILBOX", 0,
+                    0.0, 0.0, "reason=database_error");
+                return;
+            }
+            if (mailboxId <= 0 || payload == null) return;
+            final long id = mailboxId;
+            final byte[] itemPayload = payload.clone();
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                if (!marketCursorEmpty(player)) {
+                    player.sendMessage("§7Returned items are waiting. Move the cursor item and rejoin.");
+                    return;
+                }
+                ItemStack item = this.deserializeItem(itemPayload);
+                String invalid = item == null ? "decode_failed"
+                    : this.vanillaItemSanitizer == null ? "sanitizer_unavailable" : this.vanillaItemSanitizer.violationReason(item);
+                if (invalid != null || item.getType().isAir()) {
+                    this.logTransactionAudit(owner.toString(), playerName, "MAILBOX_CLAIM_REJECTED", "MAILBOX", 0,
+                        0.0, 0.0, "reason=invalid_item;mailbox=" + id + ";rule=" + (invalid == null ? "air" : invalid));
+                    player.sendMessage("§cA returned item could not be loaded safely. Contact staff and keep this notice.");
+                    return;
+                }
+                UUID operationId = UUID.randomUUID();
+                MarketOperationJournal.Request request;
+                try {
+                    request = new MarketOperationJournal.Request(operationId, owner, playerName, "MAILBOX_CLAIM",
+                        "MAILBOX:" + id + ":" + item.getType().name(), item.getAmount(), java.math.BigDecimal.ZERO,
+                        this.detectServerName(), itemPayload);
+                } catch (IllegalArgumentException invalidRequest) {
+                    player.sendMessage("§cA returned item could not be prepared safely.");
+                    return;
+                }
+                List<ItemStack> offer = List.of(item.clone());
+                MarketOperationCoordinator.CustodyFlow flow = this.journaledCustodyFlow(player, current,
+                    (op, lease) -> onPlayerStage(player, () -> {
+                        if (!lease.playerId().equals(owner) || !marketCursorEmpty(player))
+                            return java.util.concurrent.CompletableFuture.completedFuture(
+                                new MarketOperationCoordinator.Mutation(false, false, "player_or_cursor_changed"));
+                        boolean added = SafeInventoryDelivery.addExactly(player.getInventory(), offer);
+                        return java.util.concurrent.CompletableFuture.completedFuture(added
+                            ? new MarketOperationCoordinator.Mutation(true, true, null)
+                            : new MarketOperationCoordinator.Mutation(false, false, "inventory_full"));
+                    }));
+                this.marketOperationCoordinator.executeItemOperation(request, flow).whenComplete((result, failure) ->
+                    this.runOnPlayerThread(player, () -> {
+                        if (!player.isOnline()) return;
+                        if (failure != null || result == null || result.outcome() == MarketOperationCoordinator.Outcome.PENDING_REVIEW) {
+                            player.sendMessage("§cReturned-item delivery is being reconciled; your inventory remains protected.");
+                        } else if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                            player.sendMessage("§7Received a returned item.");
+                            this.deliverMailboxJournaled(player, remainingAttempts - 1);
+                        } else {
+                            player.sendActionBar(Component.text("§7Returned items are waiting. Free inventory space and rejoin."));
+                        }
+                    }));
+            });
+        });
+    }
+
     // D15: claim EVERY pending delivery across all the player's orders in one action.
     private void claimAllOrderDeliveries(Player player) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            claimNextJournaledOrderDelivery(player, 0);
+            return;
+        }
         this.runAsyncTask(() -> {
             List<OrderDeliveryEntry> pending = this.queryPendingOrderDeliveries(player.getUniqueId());
             if (pending.isEmpty()) {
@@ -20893,7 +24625,36 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
+    private void claimNextJournaledOrderDelivery(Player player, int attempts) {
+        if (player == null || !player.isOnline()) return;
+        if (attempts >= 64) {
+            player.sendMessage("§7Claimed all deliveries that fit in this pass. Run Claim Everything again for the rest.");
+            this.openOrderDeliveriesMenu(player);
+            return;
+        }
+        UUID creator = player.getUniqueId();
+        this.runAsyncTask(() -> {
+            List<OrderDeliveryEntry> pending = this.queryPendingOrderDeliveries(creator);
+            if (pending.isEmpty()) {
+                this.runOnPlayerThread(player, () -> {
+                    player.sendMessage("§aClaimed all deliveries that fit in your inventory.");
+                    this.openOrderDeliveriesMenu(player);
+                });
+                return;
+            }
+            long deliveryId = pending.get(0).id();
+            this.runOnPlayerThread(player, () -> this.beginJournaledOrderDeliveryClaim(player, deliveryId, completed -> {
+                if (completed) this.claimNextJournaledOrderDelivery(player, attempts + 1);
+                else this.openOrderDeliveriesMenu(player);
+            }));
+        });
+    }
+
     private void claimOrderDelivery(Player player, long deliveryId) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            this.beginJournaledOrderDeliveryClaim(player, deliveryId);
+            return;
+        }
         this.runAsyncTask(() -> {
             OrdersViewState state = this.ordersViewState.computeIfAbsent(player.getUniqueId(), id -> new OrdersViewState());
             List<OrderDeliveryEntry> claimed = this.claimOrderDeliveries(player.getUniqueId(), state.selectedOrderId, List.of(deliveryId));
@@ -20916,6 +24677,148 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
+    private void beginJournaledOrderDeliveryClaim(Player player, long deliveryId) {
+        this.beginJournaledOrderDeliveryClaim(player, deliveryId, null);
+    }
+
+    private void beginJournaledOrderDeliveryClaim(Player player, long deliveryId,
+            java.util.function.Consumer<Boolean> completion) {
+        if (player == null || deliveryId <= 0 || !this.economyOrderRouteEnabled()) {
+            if (completion != null) completion.accept(false);
+            return;
+        }
+        UUID creator = player.getUniqueId();
+        String playerName = player.getName();
+        this.runAsyncTask(() -> {
+            byte[] itemPayload = null;
+            int amount = 0;
+            try (Connection connection = this.openSyncConnection(); PreparedStatement query = connection.prepareStatement(
+                    "SELECT d.item_blob,d.amount FROM order_deliveries d JOIN order_listings o ON o.id=d.order_id "
+                        + "WHERE d.id=? AND o.creator_uuid=? AND d.claimed=0 AND d.lock_operation_id IS NULL")) {
+                query.setLong(1, deliveryId); query.setString(2, creator.toString());
+                try (ResultSet rows = query.executeQuery()) {
+                    if (rows.next()) { itemPayload = rows.getBytes(1); amount = rows.getInt(2); }
+                }
+            } catch (SQLException failure) {
+                this.logTransactionAudit(creator.toString(), playerName, "ORDER_CLAIM_REJECTED", "DELIVERY", 0,
+                    0.0, 0.0, "reason=database_error;delivery=" + deliveryId);
+                this.runOnPlayerThread(player, () -> {
+                    player.sendMessage("§cCould not load that delivery.");
+                    if (completion != null) completion.accept(false);
+                });
+                return;
+            }
+            final byte[] payload = itemPayload == null ? null : itemPayload.clone();
+            final int pendingAmount = amount;
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) { if (completion != null) completion.accept(false); return; }
+                if (payload == null || pendingAmount <= 0 || !marketCursorEmpty(player)) {
+                    this.logTransactionAudit(creator.toString(), playerName, "ORDER_CLAIM_REJECTED", "DELIVERY",
+                        Math.max(0, pendingAmount), 0.0, 0.0, "reason=invalid_delivery_or_cursor;delivery=" + deliveryId);
+                    player.sendMessage("§cMove your cursor item away and refresh the delivery list.");
+                    if (completion != null) completion.accept(false);
+                    return;
+                }
+                ItemStack template = this.deserializeItem(payload);
+                if (template == null || template.getType().isAir() || this.vanillaItemSanitizer == null
+                        || this.vanillaItemSanitizer.violationReason(template) != null) {
+                    this.logTransactionAudit(creator.toString(), playerName, "ORDER_CLAIM_REJECTED", "DELIVERY",
+                        pendingAmount, 0.0, 0.0, "reason=invalid_stored_item;delivery=" + deliveryId);
+                    player.sendMessage("§cThat delivery cannot be safely loaded; staff have been notified.");
+                    if (completion != null) completion.accept(false);
+                    return;
+                }
+                int claimAmount = maximumAddableItemCount(player.getInventory(), template, pendingAmount);
+                if (claimAmount <= 0) {
+                    player.sendMessage("§cMake room in your inventory before claiming deliveries.");
+                    if (completion != null) completion.accept(false);
+                    return;
+                }
+                InventoryCustody custody = this.currentInventoryCustody();
+                if (custody == null || !custody.qualified()) {
+                    this.logTransactionAudit(creator.toString(), playerName, "ORDER_CLAIM_REJECTED", template.getType().name(),
+                        claimAmount, 0.0, 0.0, "reason=custody_unqualified;delivery=" + deliveryId);
+                    player.sendMessage("§cInventory protection is temporarily unavailable.");
+                    if (completion != null) completion.accept(false);
+                    return;
+                }
+                UUID operationId = UUID.randomUUID();
+                MarketOperationJournal.Request request;
+                try {
+                    request = new MarketOperationJournal.Request(operationId, creator, playerName, "ORDER_CLAIM",
+                        "ORDER_DELIVERY:" + deliveryId + ":" + template.getType().name(), claimAmount,
+                        java.math.BigDecimal.ZERO, this.detectServerName(), payload);
+                } catch (IllegalArgumentException invalidRequest) {
+                    player.sendMessage("§cThat delivery cannot be prepared safely.");
+                    if (completion != null) completion.accept(false);
+                    return;
+                }
+                List<ItemStack> offers = splitItemStack(template, claimAmount);
+                player.closeInventory();
+                MarketOperationCoordinator.CustodyFlow flow = this.journaledCustodyFlow(player, custody,
+                    (op, lease) -> onPlayerStage(player, () -> {
+                        if (!lease.playerId().equals(creator) || !marketCursorEmpty(player))
+                            return java.util.concurrent.CompletableFuture.completedFuture(
+                                new MarketOperationCoordinator.Mutation(false, false, "player_or_cursor_changed"));
+                        boolean added = SafeInventoryDelivery.addExactly(player.getInventory(), offers);
+                        return java.util.concurrent.CompletableFuture.completedFuture(added
+                            ? new MarketOperationCoordinator.Mutation(true, true, null)
+                            : new MarketOperationCoordinator.Mutation(false, false, "inventory_full_or_changed"));
+                    }));
+                this.marketOperationCoordinator.executeItemOperation(request, flow).whenComplete((result, failure) ->
+                    this.runOnPlayerThread(player, () -> {
+                        if (!player.isOnline()) return;
+                        if (failure != null || result == null || result.outcome() == MarketOperationCoordinator.Outcome.PENDING_REVIEW) {
+                            player.sendMessage("§cDelivery is being reconciled; your inventory remains protected.");
+                            if (completion != null) completion.accept(false);
+                        } else if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                            if (completion != null) completion.accept(true);
+                            else {
+                                player.sendMessage("§aClaimed " + claimAmount + "x " + this.humanName(template.getType()) + "."
+                                    + (claimAmount < pendingAmount ? " More remains in your deliveries." : ""));
+                                this.openOrderDeliveriesMenu(player);
+                            }
+                        } else {
+                            player.sendMessage("§cDelivery was not claimed; free space and try again.");
+                            if (completion != null) completion.accept(false);
+                            else this.openOrderDeliveriesMenu(player);
+                        }
+                    }));
+            });
+        });
+    }
+
+    private static int maximumAddableItemCount(Inventory inventory, ItemStack template, int requested) {
+        if (inventory == null || template == null || template.getType().isAir() || requested <= 0) return 0;
+        long capacity = 0;
+        int inventoryLimit = inventory.getMaxStackSize();
+        for (ItemStack current : inventory.getStorageContents()) {
+            if (current == null || current.getType().isAir()) {
+                capacity += Math.min(inventoryLimit, template.getMaxStackSize());
+            } else if (current.isSimilar(template)) {
+                int max = Math.min(inventoryLimit, current.getMaxStackSize());
+                capacity += Math.max(0, max - current.getAmount());
+            }
+            if (capacity >= requested) return requested;
+        }
+        return (int)Math.min(capacity, requested);
+    }
+
+    private static List<ItemStack> splitItemStack(ItemStack template, int amount) {
+        if (template == null || template.getType().isAir() || amount <= 0) return List.of();
+        ArrayList<ItemStack> items = new ArrayList<>();
+        int remaining = amount;
+        int max = Math.max(1, template.getMaxStackSize());
+        while (remaining > 0) {
+            ItemStack part = template.clone();
+            int count = Math.min(remaining, max);
+            part.setAmount(count);
+            items.add(part);
+            remaining -= count;
+        }
+        return List.copyOf(items);
+    }
+
     /*
      * Enabled aggressive exception aggregation
      */
@@ -20926,6 +24829,126 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         } catch (Exception ex) {
             return new byte[0];
         }
+    }
+
+    /** Returns an owned AH item under Canopy custody; SQL and inventory settle from one operation id. */
+    private void beginJournaledAuctionCancel(Player player, long listingId) {
+        if (player == null || listingId <= 0 || !this.economyAuctionCancelRouteEnabled()) return;
+        UUID playerId = player.getUniqueId();
+        String playerName = player.getName();
+        String backend = this.detectServerName();
+        this.runAsyncTask(() -> {
+            byte[] payload = null;
+            try (Connection connection = this.openSyncConnection(); PreparedStatement query = connection.prepareStatement(
+                    "SELECT item_blob FROM auction_listings WHERE id=? AND seller_uuid=? AND status='ACTIVE' "
+                        + "AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)")) {
+                query.setLong(1, listingId);
+                query.setString(2, playerId.toString());
+                try (ResultSet rows = query.executeQuery()) { if (rows.next()) payload = rows.getBytes(1); }
+            } catch (SQLException failure) {
+                this.logTransactionAudit(playerId.toString(), playerName, "AH_CANCEL_REJECTED", "LISTING", 0, 0.0, 0.0,
+                    "reason=database_error;listing=" + listingId);
+            }
+            byte[] itemPayload = payload == null ? null : payload.clone();
+            this.runOnPlayerThread(player, () -> {
+                if (!player.isOnline()) return;
+                ItemStack returnItem = itemPayload == null ? null : this.deserializeItem(itemPayload);
+                if (returnItem == null || returnItem.getType().isAir() || this.vanillaItemSanitizer == null
+                        || this.vanillaItemSanitizer.violationReason(returnItem) != null) {
+                    this.logTransactionAudit(playerId.toString(), playerName, "AH_CANCEL_REJECTED", "LISTING", 0, 0.0, 0.0,
+                        "reason=invalid_listing_item;listing=" + listingId);
+                    player.sendActionBar(Component.text("§cThis listing cannot be returned safely."));
+                    return;
+                }
+                InventoryCustody custody = this.currentInventoryCustody();
+                if (custody == null || !custody.qualified()) {
+                    this.logTransactionAudit(playerId.toString(), playerName, "AH_CANCEL_REJECTED", returnItem.getType().name(),
+                        returnItem.getAmount(), 0.0, 0.0, "reason=custody_unqualified;listing=" + listingId);
+                    player.sendActionBar(Component.text("§cAuction cancellations are temporarily unavailable."));
+                    return;
+                }
+                UUID operationId = UUID.randomUUID();
+                MarketOperationJournal.Request request;
+                try {
+                    request = new MarketOperationJournal.Request(operationId, playerId, playerName, "AUCTION_CANCEL",
+                        "AUCTION_LISTING:" + listingId + ":" + returnItem.getType().name(), returnItem.getAmount(),
+                        java.math.BigDecimal.ZERO.setScale(2), backend, itemPayload);
+                } catch (IllegalArgumentException invalidRequest) {
+                    player.sendActionBar(Component.text("§cThat listing cannot be cancelled safely."));
+                    return;
+                }
+                MarketOperationCoordinator.CustodyFlow flow = new MarketOperationCoordinator.CustodyFlow() {
+                    @Override public boolean qualified() { return custody.qualified(); }
+                    @Override public java.util.concurrent.CompletionStage<InventoryCustody.Lease> begin(MarketOperationJournal.Request operation) {
+                        return onPlayerStage(player, () -> custody.begin(player, operation.operationId()));
+                    }
+                    @Override public java.util.concurrent.CompletionStage<MarketOperationCoordinator.Mutation> applyItems(
+                            MarketOperationJournal.Request operation, InventoryCustody.Lease lease) {
+                        return onPlayerStage(player, () -> {
+                            if (!player.isOnline() || !lease.playerId().equals(playerId))
+                                return java.util.concurrent.CompletableFuture.completedFuture(
+                                    new MarketOperationCoordinator.Mutation(false, false, "player_changed"));
+                            if (!marketCursorEmpty(player))
+                                return java.util.concurrent.CompletableFuture.completedFuture(
+                                    new MarketOperationCoordinator.Mutation(false, false, "cursor_item_present"));
+                            if (!canFitItemExactly(player, returnItem))
+                                return java.util.concurrent.CompletableFuture.completedFuture(
+                                    new MarketOperationCoordinator.Mutation(false, false, "inventory_full"));
+                            if (!SafeInventoryDelivery.addExactly(player.getInventory(), List.of(returnItem)))
+                                return java.util.concurrent.CompletableFuture.completedFuture(
+                                    new MarketOperationCoordinator.Mutation(false, false, "inventory_changed"));
+                            return java.util.concurrent.CompletableFuture.completedFuture(
+                                new MarketOperationCoordinator.Mutation(true, true, null));
+                        });
+                    }
+                    @Override public java.util.concurrent.CompletionStage<InventoryCustody.CheckpointReceipt> checkpoint(InventoryCustody.Lease lease) {
+                        return onPlayerStage(player, () -> custody.checkpoint(player, lease));
+                    }
+                    @Override public java.util.concurrent.CompletionStage<Void> finish(InventoryCustody.Lease lease) {
+                        return onPlayerStage(player, () -> custody.finish(player, lease));
+                    }
+                    @Override public java.util.concurrent.CompletionStage<Void> abortUntouched(InventoryCustody.Lease lease) {
+                        return onPlayerStage(player, () -> custody.abortUntouched(player, lease));
+                    }
+                    @Override public java.util.concurrent.CompletionStage<Void> forgetTerminal(UUID id, boolean committed) {
+                        return onPlayerStage(player, () -> custody.forgetTerminal(player, id, committed));
+                    }
+                };
+                this.marketOperationCoordinator.purchaseShop(request, flow).whenComplete((result, failure) ->
+                    this.runOnPlayerThread(player, () -> {
+                        if (failure != null || result == null || result.outcome() == MarketOperationCoordinator.Outcome.PENDING_REVIEW) {
+                            player.closeInventory();
+                            player.sendMessage("§cCancellation is being reconciled; your listing item remains protected.");
+                        } else if (result.outcome() == MarketOperationCoordinator.Outcome.COMPLETED) {
+                            player.sendMessage("§aListing cancelled and item returned.");
+                            this.openAhMyItems(player);
+                            this.broadcastAhListingSold(listingId, playerId);
+                        } else {
+                            player.sendActionBar(Component.text("§cListing cancellation could not be completed."));
+                        }
+                    }));
+            });
+        });
+    }
+
+    private static boolean canFitItemExactly(Player player, ItemStack offered) {
+        if (player == null || offered == null || offered.getType().isAir()) return false;
+        int remaining = offered.getAmount();
+        for (ItemStack current : player.getInventory().getStorageContents()) {
+            if (current == null || current.getType().isAir()) {
+                remaining -= offered.getMaxStackSize();
+            } else if (current.isSimilar(offered)) {
+                remaining -= Math.max(0, current.getMaxStackSize() - current.getAmount());
+            }
+            if (remaining <= 0) return true;
+        }
+        return false;
+    }
+
+    private static boolean marketCursorEmpty(Player player) {
+        if (player == null) return false;
+        ItemStack cursor = player.getItemOnCursor();
+        return cursor == null || cursor.getType().isAir();
     }
 
     private ItemStack deserializeItem(byte[] data) {
@@ -21159,7 +25182,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (this.useDialogUi(viewer)) { this.openStatsDialog(viewer, targetName, liveStats, false); return; }
                 Inventory inv = MenuLock.create(36, TITLE_STATS + ": " + targetName);
                 inv.setItem(11, this.buildStatItem(Material.EMERALD,        "Money",         this.formatCompactNumber(liveStats.money),          "Current balance"));
-                inv.setItem(12, this.buildStatItem(Material.AMETHYST_SHARD, "Shards",        this.formatCompactNumber(liveStats.shards),          "Shard currency"));
+                if (this.shardsEnabled()) inv.setItem(12, this.buildStatItem(Material.AMETHYST_SHARD, "Shards", this.formatCompactNumber(liveStats.shards), "Shard currency"));
                 inv.setItem(13, this.buildStatItem(Material.NETHERITE_SWORD, "§cKills",       this.formatCompactNumber(liveStats.kills),           "Players defeated"));
                 inv.setItem(14, this.buildStatItem(Material.SKELETON_SKULL, "Deaths",        this.formatCompactNumber(liveStats.deaths),          "Total death count"));
                 inv.setItem(15, this.buildStatItem(Material.CLOCK,          "§ePlaytime",    this.formatPlaytime(liveStats.playtimeSeconds),      "Total time played"));
@@ -21168,7 +25191,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 inv.setItem(22, this.buildStatItem(Material.ZOMBIE_HEAD,    "Mobs Killed",   this.formatCompactNumber(liveStats.mobsKilled),      "Hostile mobs defeated"));
                 inv.setItem(23, this.buildStatItem(Material.GOLD_NUGGET,    "Shop Spent",    this.formatCompactNumber(liveStats.shopSpent),       "Money spent in shop"));
                 inv.setItem(24, this.buildStatItem(Material.IRON_NUGGET,    "Sell Earned",   this.formatCompactNumber(liveStats.sellEarned),      "Money earned from sell"));
-                viewer.openInventory(inv);
+                this.openMenu(viewer, inv);
             });
         });
     }
@@ -21189,7 +25212,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 // 9x4: row1 = 5 primary stats centered, row2 = 5 secondary stats centered
                 Inventory inv = MenuLock.create(36, TITLE_STATS);
                 inv.setItem(11, this.buildStatItem(Material.EMERALD,        "Money",         this.formatCompactNumber(liveStats.money),          "Current balance"));
-                inv.setItem(12, this.buildStatItem(Material.AMETHYST_SHARD, "Shards",        this.formatCompactNumber(liveStats.shards),          "Shard currency"));
+                if (this.shardsEnabled()) inv.setItem(12, this.buildStatItem(Material.AMETHYST_SHARD, "Shards", this.formatCompactNumber(liveStats.shards), "Shard currency"));
                 inv.setItem(13, this.buildStatItem(Material.NETHERITE_SWORD, "§cKills",       this.formatCompactNumber(liveStats.kills),           "Players defeated"));
                 inv.setItem(14, this.buildStatItem(Material.SKELETON_SKULL, "Deaths",        this.formatCompactNumber(liveStats.deaths),          "Total death count"));
                 inv.setItem(15, this.buildStatItem(Material.CLOCK,          "§ePlaytime",    this.formatPlaytime(liveStats.playtimeSeconds),      "Total time played"));
@@ -21198,7 +25221,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 inv.setItem(22, this.buildStatItem(Material.ZOMBIE_HEAD,    "Mobs Killed",   this.formatCompactNumber(liveStats.mobsKilled),      "Hostile mobs defeated"));
                 inv.setItem(23, this.buildStatItem(Material.GOLD_NUGGET,    "Shop Spent",    this.formatCompactNumber(liveStats.shopSpent),       "Money spent in shop"));
                 inv.setItem(24, this.buildStatItem(Material.IRON_NUGGET,    "Sell Earned",   this.formatCompactNumber(liveStats.sellEarned),      "Money earned from sell"));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -21207,7 +25230,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void openStatsDialog(Player viewer, String targetName, StatsSnapshot s, boolean full) {
         List<DialogBody> body = new ArrayList<>();
         body.add(DialogBody.plainMessage(Component.text("Money: ", NamedTextColor.GRAY).append(Component.text("$" + this.formatMillions(s.money), NamedTextColor.GREEN))));
-        body.add(DialogBody.plainMessage(Component.text("Shards: " + this.formatCompactNumber(s.shards), NamedTextColor.GRAY)));
+        if (this.shardsEnabled()) body.add(DialogBody.plainMessage(Component.text("Shards: " + this.formatCompactNumber(s.shards), NamedTextColor.GRAY)));
         body.add(DialogBody.plainMessage(Component.text("Kills: " + this.formatCompactNumber(s.kills), NamedTextColor.GRAY)));
         body.add(DialogBody.plainMessage(Component.text("Deaths: " + this.formatCompactNumber(s.deaths), NamedTextColor.GRAY)));
         body.add(DialogBody.plainMessage(Component.text("Playtime: " + this.formatPlaytimeDaysHours(s.playtimeSeconds), NamedTextColor.GRAY)));
@@ -21216,9 +25239,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         body.add(DialogBody.plainMessage(Component.text("Mob Kills: " + this.formatCompactNumber(s.mobsKilled), NamedTextColor.GRAY)));
         body.add(DialogBody.plainMessage(Component.text("Shop Spent: $" + this.formatMillions(s.shopSpent), NamedTextColor.GRAY)));
         body.add(DialogBody.plainMessage(Component.text("/Sell Earned: ", NamedTextColor.GRAY).append(Component.text("$" + this.formatMillions(s.sellEarned), NamedTextColor.GREEN))));
-        List<ActionButton> buttons = List.of(this.dialogButton(Component.text("Close", DIALOG_BRAND), null, 200, p -> DialogCloseCompat.close(p)));
         Dialog dialog = this.buildDialog(Component.text(targetName + "'s Stats", DIALOG_BRAND), body, List.of(),
-            DialogType.multiAction(buttons).columns(1).exitAction(this.dialogButton(Component.text("Close"), null, 200, null)).build());
+            DialogType.multiAction(List.of(this.dialogButton(Component.text("Close", DIALOG_BRAND), null, 200,
+                p -> DialogCloseCompat.close(p)))).columns(1).build());
         DialogCompat.show(viewer, dialog);
     }
 
@@ -21255,7 +25278,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         // empty catch block
                     }
                 }
-                StatsSnapshot statsSnapshot = new StatsSnapshot(money, rs.getLong(2), rs.getLong(3), rs.getLong(4), rs.getLong(5), rs.getLong(6), rs.getLong(7), rs.getLong(8), rs.getDouble(9), rs.getDouble(10));
+                long shards = this.shardsEnabled() ? rs.getLong(2) : 0L;
+                StatsSnapshot statsSnapshot = new StatsSnapshot(money, shards, rs.getLong(3), rs.getLong(4), rs.getLong(5), rs.getLong(6), rs.getLong(7), rs.getLong(8), rs.getDouble(9), rs.getDouble(10));
                 return statsSnapshot;
             }
         }
@@ -21499,6 +25523,33 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     }
                     return;
                 }
+                // 1.21.2+: the explosion packet also carries the player's knockback, so it is never dropped. Its
+                // effect center moves out of render and hearing range instead, and the kept effect is re-sent.
+                if (event.getPacketType() == PacketType.Play.Server.EXPLOSION && ExplosionPacketRewrite.supported()) {
+                    boolean suppressParticle = PizzaNetworkCore.this.shouldSuppressExplosionParticle(viewerId);
+                    boolean suppressSound = !PizzaNetworkCore.this.isSettingEnabledCached(viewerId, "explosion_sounds");
+                    if (!suppressParticle && !suppressSound) return;
+                    ExplosionPacketRewrite.Rewritten rewritten = ExplosionPacketRewrite.hideEffects(packet.getHandle());
+                    if (rewritten == null) return;
+                    event.setPacket(PacketContainer.fromPacket(rewritten.packet()));
+                    if (suppressParticle && suppressSound) return;
+                    final double fx = rewritten.x(), fy = rewritten.y(), fz = rewritten.z();
+                    final boolean keepParticle = !suppressParticle, large = rewritten.large();
+                    PlatformScheduler.entityNow(PizzaNetworkCore.this, viewer, () -> {
+                        if (!viewer.isOnline()) return;
+                        org.bukkit.Location loc = new org.bukkit.Location(viewer.getWorld(), fx, fy, fz);
+                        if (keepParticle) {
+                            viewer.spawnParticle(large ? org.bukkit.Particle.EXPLOSION_EMITTER : org.bukkit.Particle.EXPLOSION, loc, 1);
+                        } else {
+                            viewer.playSound(loc, Sound.ENTITY_GENERIC_EXPLODE, org.bukkit.SoundCategory.BLOCKS, 4.0f,
+                                (1.0f + (java.util.concurrent.ThreadLocalRandom.current().nextFloat()
+                                    - java.util.concurrent.ThreadLocalRandom.current().nextFloat()) * 0.2f) * 0.7f);
+                        }
+                    }, null);
+                    return;
+                }
+                if (event.getPacketType() == PacketType.Play.Server.EXPLOSION
+                        && PizzaNetworkCore.this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) return;
                 if (event.getPacketType() == PacketType.Play.Server.EXPLOSION) {
                     // The EXPLOSION packet bundles BOTH the explosion particle and its sound. To make the
                     // "Explosion Particles" and "Explosion Sounds" toggles independent, cancel the packet
@@ -21541,6 +25592,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         // Locator bar (1.21.6+): friends-only. The vanilla locator_bar gamerule is ON, so the server
         // sends a TRACKED_WAYPOINT per tracked player; we cancel it unless the receiver and the tracked
         // player are mutual follows (friends). Self + non-player waypoints (no UUID) always pass.
+        // The economy profile leaves the locator bar to the network plugin that owns friends.
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) return;
         ProtocolLibrary.getProtocolManager().addPacketListener((PacketListener)new PacketAdapter((Plugin)this, new PacketType[]{PacketType.Play.Server.TRACKED_WAYPOINT}){
 
             public void onPacketSending(PacketEvent event) {
@@ -21633,23 +25686,33 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
                 // worth_display setting, or always while the sell GUI is open (its worth
                 // display is packet-only: real items are never mutated)
-                if (!PizzaNetworkCore.this.isSettingEnabledCached(playerId, "worth_display")
-                        && !PizzaNetworkCore.this.sellGuiViewers.contains(playerId)) {
-                    return;
-                }
+                if (!PizzaNetworkCore.this.settings.getBoolean("worth-lore.enabled", true)) return;
+                boolean everywhere = "everywhere".equalsIgnoreCase(PizzaNetworkCore.this.settings.getString("worth-lore.mode", "sell-gui"))
+                    && PizzaNetworkCore.this.isSettingEnabledCached(playerId, "worth_display");
+                boolean sellGui = PizzaNetworkCore.this.sellGuiViewers.contains(playerId);
+                if (!everywhere && !sellGui) return;
+                // Sell GUI only: just the GUI's own slots, never the player's inventory below it.
+                int topSlots = everywhere ? Integer.MAX_VALUE : SELL_GUI_SLOTS;
                 PacketContainer packet = event.getPacket();
                 if (event.getPacketType() == PacketType.Play.Server.SET_SLOT) {
+                    Integer window = packet.getIntegers().readSafely(0);
+                    Integer slot = packet.getIntegers().readSafely(2);
+                    if (!everywhere && (window == null || window == 0 || slot == null || slot < 0 || slot >= topSlots)) return;
                     ItemStack item = (ItemStack)packet.getItemModifier().read(0);
                     if (item != null && item.getType() != Material.AIR) {
                         packet.getItemModifier().write(0, PizzaNetworkCore.this.withWorthLore(item));
                     }
                 } else {
+                    Integer window = packet.getIntegers().readSafely(0);
+                    if (!everywhere && (window == null || window == 0)) return;
                     List items = (List)packet.getItemListModifier().read(0);
                     if (items != null) {
                         ArrayList<ItemStack> patched = new ArrayList<ItemStack>(items.size());
+                        int index = 0;
                         for (Object item : items) {
                             ItemStack stack = (ItemStack)item;
-                            patched.add(stack != null && stack.getType() != Material.AIR ? PizzaNetworkCore.this.withWorthLore(stack) : stack);
+                            boolean inside = index++ < topSlots;
+                            patched.add(inside && stack != null && stack.getType() != Material.AIR ? PizzaNetworkCore.this.withWorthLore(stack) : stack);
                         }
                         packet.getItemListModifier().write(0, patched);
                     }
@@ -21717,9 +25780,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (isShulker) {
             lore.add("\u00a77Contents worth: \u00a7a$" + this.fmtMoney(total));
         } else if (amount > 1) {
-            lore.add("\u00a77Worth: \u00a7a$" + this.fmtMoney(total) + " \u00a77(\u00a7a$" + this.fmtMoney(unit) + " \u00a77each)");
+            lore.add("\u00a77Worth: \u00a7a$" + this.fmtMoney(unit) + " \u00a77each");
         } else {
-            lore.add("\u00a77Worth: \u00a7a$" + this.fmtMoney(total));
+            lore.add("\u00a77Worth: \u00a7a$" + this.fmtMoney(unit) + " \u00a77each");
         }
         meta.setLore(lore);
         clone.setItemMeta(meta);
@@ -21738,7 +25801,51 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private double computeBaseWorth(Material material) {
-        return this.sellUnitPrice(material);
+        double sell = this.sellUnitPrice(material);
+        Double order = this.orderAverageWorth.get(material);
+        return order != null && order > sell ? order : sell;
+    }
+
+    /** Online players' balances for money nametags: one query every 5 seconds, shared by every viewer. */
+    private volatile Map<UUID, Double> onlineBalanceCache = Map.of();
+
+    private void refreshNametagBalances() {
+        List<UUID> online = Bukkit.getOnlinePlayers().stream().map(Player::getUniqueId).toList();
+        if (online.isEmpty()) { this.onlineBalanceCache = Map.of(); return; }
+        String sql = "SELECT uuid, money FROM balances WHERE uuid IN ("
+            + String.join(",", java.util.Collections.nCopies(online.size(), "?")) + ")";
+        Map<UUID, Double> balances = new java.util.HashMap<>();
+        try (Connection conn = this.openSyncConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (int i = 0; i < online.size(); i++) ps.setString(i + 1, online.get(i).toString());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    try { balances.put(UUID.fromString(rs.getString(1)), rs.getDouble(2)); } catch (IllegalArgumentException ignored) { }
+                }
+            }
+            this.onlineBalanceCache = Map.copyOf(balances);
+        } catch (Exception ex) {
+            this.getLogger().fine("nametag balance refresh failed: " + ex.getMessage());
+        }
+    }
+
+    /** The best open order price per item (what /sell pays first); the worth lore shows it when above sell price. */
+    private volatile Map<Material, Double> orderAverageWorth = Map.of();
+
+    private void refreshOrderAverageWorth() {
+        String sql = "SELECT item_key, MAX(unit_price) FROM order_listings WHERE status='ACTIVE' "
+            + "AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) AND amount_total > amount_filled + amount_reserved "
+            + "GROUP BY item_key";
+        Map<Material, Double> averages = new java.util.EnumMap<>(Material.class);
+        try (Connection conn = this.openSyncConnection(); PreparedStatement ps = conn.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                Material m = Material.matchMaterial(rs.getString(1) == null ? "" : rs.getString(1));
+                double avg = rs.getDouble(2);
+                if (m != null && Double.isFinite(avg) && avg > 0.0) averages.put(m, avg);
+            }
+            this.orderAverageWorth = Map.copyOf(averages);
+        } catch (Exception ex) {
+            this.getLogger().fine("order average refresh failed: " + ex.getMessage());
+        }
     }
 
     private double computeEnchantBonus(ItemStack stack) {
@@ -21780,7 +25887,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     inv.setItem(i, head);
                 }
                 inv.setItem(49, this.namedWithLore(Material.BARRIER, "\u00a7fClose", "baltop_close", List.of()));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -21805,7 +25912,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(13, this.namedWithLore(Material.SKELETON_SKULL, "§fYou", "kill_item", List.of()));
         inv.setItem(11, this.namedWithLore(Material.RED_STAINED_GLASS_PANE, "§cCancel", "kill_cancel", List.of()));
         inv.setItem(15, this.namedWithLore(Material.LIME_STAINED_GLASS_PANE, "§aConfirm", "kill_confirm", List.of()));
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private List<BalanceLookupResult> queryTopBalances(int limit) {
@@ -21971,19 +26078,20 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     inv.setItem(i, head);
                 }
                 inv.setItem(49, this.namedWithLore(Material.BARRIER, "§fClose", "baltop_close", List.of()));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
 
     private void handleWorthCommand(Player player, String itemName) {
         Material mat = Material.matchMaterial(itemName);
-        if (mat == null || mat == Material.AIR) {
+        if (mat == null || mat == Material.AIR || !mat.isItem()) {
             player.sendMessage("§cUnknown item: " + itemName);
             return;
         }
         double worth = this.getItemWorth(mat);
-        player.sendActionBar((Component)Component.text((String)("1 " + mat.name() + " is worth §a$" + this.fmtMoney(worth))));
+        player.sendActionBar((Component)Component.text((String)("1 " + mat.name() + " is worth §a$" + this.fmtMoney(worth)
+            + (worth <= 0.0 ? " §7(not sellable)" : ""))));
     }
 
     private record TeamMemberEntry(String uuid, String name, String role) {}
@@ -22039,7 +26147,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     if (endIdx < members.size()) {
                         inv.setItem(53, this.namedWithLore(Material.ARROW, "§fNext >>", "teams_page:" + (page + 1), List.of()));
                     }
-                    player.openInventory(inv);
+                    this.openMenu(player, inv);
                 });
             } catch (Exception ex) {
                 this.getLogger().warning("Error opening teams GUI: " + ex.getMessage());
@@ -22087,8 +26195,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         java.util.List<java.util.Map.Entry<Material, Double>> items = new java.util.ArrayList<>();
         for (Material mat : Material.values()) {
             if (mat == Material.AIR || !mat.isItem()) continue;
-            double worth = this.sellUnitPrice(mat);
-            if (worth <= 0) continue;
+            double worth = ShopPricePolicy.effectiveWorth(this.sellUnitPrice(mat));
             items.add(new java.util.AbstractMap.SimpleEntry<>(mat, worth));
         }
         if ("price".equals(sortBy)) {
@@ -22106,7 +26213,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             ItemStack item = new ItemStack(entry.getKey());
             ItemMeta meta = item.getItemMeta();
             meta.setDisplayName(this.normalizeLegacyColors("&#00BFFF" + this.humanName(entry.getKey())).replace('&', '§'));
-            meta.setLore(List.of("§7Sell worth: §a$" + this.fmtMoney(entry.getValue())));
+            meta.setLore(entry.getValue() > 0.0
+                ? List.of("§7Sell worth: §a$" + this.fmtMoney(entry.getValue()))
+                : List.of("§7Sell worth: §f$0", "§8Not sellable"));
             item.setItemMeta(meta);
             inv.setItem(slot++, item);
         }
@@ -22118,19 +26227,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (endIdx < items.size()) {
             inv.setItem(50, this.namedWithLore(Material.ARROW, "§fNext »", "worth_page:" + (page + 1) + ":" + sortBy, List.of()));
         }
-        player.openInventory(inv);
+        this.openMenu(player, inv);
     }
 
     private double getItemWorth(Material mat) {
-        if (this.worthConfig != null) {
-            ConfigurationSection worth = this.worthConfig.getConfigurationSection("worth");
-            if (worth != null) {
-                String key = mat.name().toLowerCase();
-                double val = worth.getDouble(key, -1.0);
-                if (val > 0) return val;
-            }
-        }
-        return 0.0;
+        return mat == null || mat == Material.AIR || !mat.isItem()
+            ? 0.0 : ShopPricePolicy.effectiveWorth(this.sellUnitPrice(mat));
     }
 
     private void openSellMultiMainGui(Player player) {
@@ -22148,7 +26250,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 inv.setItem(15, this.createSellMultiCategoryItem("Enchanted Books", Material.ENCHANTED_BOOK, "books", progress.getOrDefault("books", 0)));
                 inv.setItem(16, this.createSellMultiCategoryItem("Potions", Material.BREWING_STAND, "potions", progress.getOrDefault("potions", 0)));
                 inv.setItem(17, this.createSellMultiCategoryItem("Blocks", Material.COPPER_BLOCK, "blocks", progress.getOrDefault("blocks", 0)));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -22209,7 +26311,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     inv.setItem(snakePath[i], this.createProgressionPane(i, level, earned));
                 }
                 inv.setItem(49, this.namedWithLore(Material.ARROW, "§fBack", "sellmulti_back", List.of()));
-                player.openInventory(inv);
+                this.openMenu(player, inv);
             });
         });
     }
@@ -22608,11 +26710,13 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         private String categoryKey;
         private String itemKey;
         private int quantity;
+        private UUID operationId;
 
         private ShopSelectionState(String categoryKey, String itemKey, int quantity) {
             this.categoryKey = categoryKey;
             this.itemKey = itemKey;
             this.quantity = quantity;
+            this.operationId = UUID.randomUUID();
         }
     }
 
@@ -22717,6 +26821,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         private final StatsSnapshot stats;
         private final String teamName;
         private final String serverName;
+        private Map<String, Double> nametagBalances = Map.of();
+        private boolean showSidebar = true;
 
         private HudSnapshot(StatsSnapshot stats, String teamName, String serverName) {
             this.stats = stats;
@@ -22849,9 +26955,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
     }
 
-    private record OrderEntry(long id, Material material, int amountTotal, int amountFilled, double unitPrice, String creatorUuid, String creatorName, long createdAtMs, long expiresAtMs) {
+    private record OrderEntry(long id, Material material, int amountTotal, int amountFilled, int amountReserved,
+                              double unitPrice, String creatorUuid, String creatorName, long createdAtMs, long expiresAtMs) {
         private int remainingAmount() {
-            return Math.max(0, this.amountTotal - this.amountFilled);
+            return Math.max(0, this.amountTotal - this.amountFilled - this.amountReserved);
         }
     }
 
@@ -22912,6 +27019,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private static final class AhSellState {
         private ItemStack item;
         private double price;
+        /** Economy listing of the held item (journaled from its hotbar slot), not an item placed in a menu. */
+        private boolean held;
 
         private AhSellState() {
         }
@@ -22959,7 +27068,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                             inv.setItem(15, this.namedWithLore(Material.ARROW, "§eDemote", "team_demote:" + targetUuidStr, List.of("§7→ Member")));
                         }
                     }
-                    viewer.openInventory(inv);
+                    this.openMenu(viewer, inv);
                 });
             } catch (Exception ex) { this.getLogger().warning("openTeamMemberManageGui failed: " + ex.getMessage()); }
         });
@@ -22977,14 +27086,29 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.getLogger().warning("[AutoEco] Failed to upsert Server player row: " + ex.getMessage());
         }
         // Auto-list: every 10 minutes (12000 ticks), initial delay 5 min
-        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused) this.runAutoListPass(); }, 6000L, 12000L));
+        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused && this.ecobotRouteOpen("list")) this.runAutoListPass(); }, 6000L, 12000L));
         // Auto-order: every 15 minutes (18000 ticks), initial delay 7 min
-        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused) this.runAutoOrderPass(); }, 8400L, 18000L));
+        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused && this.ecobotRouteOpen("order")) this.runAutoOrderPass(); }, 8400L, 18000L));
         // Auto-buy: every 10 minutes (12000 ticks), initial delay 3 min
-        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused) this.runAutoBuyPass(50); }, 3600L, 12000L));
+        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused && this.ecobotRouteOpen("buy")) this.runAutoBuyPass(50); }, 3600L, 12000L));
         // Auto-deliver: every 10 minutes (12000 ticks), initial delay 8 min (orders need 5 min age first)
-        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused) this.runAutoDeliverPass(100); }, 9600L, 12000L));
+        this.autoEcoTasks.add(this.runAsyncRepeatingTask(() -> { if (!this.autoEcoPaused && this.ecobotRouteOpen("deliver")) this.runAutoDeliverPass(100); }, 9600L, 12000L));
         this.getLogger().info("[AutoEco] Enabled. Server UUID=" + SERVER_UUID);
+    }
+
+    /**
+     * Economy profile: a pass runs only while players can reach the matching journaled route; the full profile
+     * keeps its previous behaviour.
+     */
+    private boolean ecobotRouteOpen(String pass) {
+        if (this.runtimeProfile != EconomyRuntimeProfile.ECONOMY) return true;
+        if (!this.economyRuntimeReady || !this.dbHealthy || this.shuttingDown) return false;
+        return switch (pass) {
+            case "list" -> this.economyAuctionBuyRouteEnabled();
+            case "buy" -> this.economyAuctionListRouteEnabled();
+            case "order", "deliver" -> this.economyOrderRouteEnabled();
+            default -> false;
+        };
     }
 
     private void runAutoListPass() {
@@ -23003,8 +27127,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             int posted = 0;
             java.util.List<String> keys = new java.util.ArrayList<>(prices.getKeys(false));
             java.util.Collections.shuffle(keys, this.ecoRandom);
-            int maxPerMaterial = 25;
-            int batchLimit = 300;
+            int maxPerMaterial = Math.max(1, this.settings.getInt("ecobot.listings-per-item", 25));
+            int batchLimit = Math.max(1, this.settings.getInt("ecobot.listings-per-pass", 300));
             // Build the candidate set: configured-price items PLUS curated extras (rares, new
             // items, potions, mob heads, smithing templates...) so coverage is broad.
             java.util.LinkedHashSet<Material> candidates = new java.util.LinkedHashSet<>();
@@ -23026,7 +27150,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (currentCount >= maxPerMaterial) continue;
                 double sellPrice = this.ecobotUnitPrice(mat);
                 if (sellPrice <= 0) continue;
-                double ahPrice = this.calcServerAhPrice(mat, sellPrice);
+                double ahPrice = Math.round(this.calcServerAhPrice(mat, sellPrice) * Math.max(0.1, this.settings.getDouble("ecobot.listing-markup", 1.0)));
                 // Rare singletons (heads, elytra, mace...) list one-at-a-time, not full stacks.
                 int listAmt = ECOBOT_RARE_PRICES.containsKey(mat.name()) ? 1 : mat.getMaxStackSize();
                 int perMatCap = ECOBOT_RARE_PRICES.containsKey(mat.name()) ? Math.min(3, maxPerMaterial) : maxPerMaterial;
@@ -23070,6 +27194,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             Material mat = e.getKey();
             int amt = e.getValue()[0];
             double listingPrice = e.getValue()[1]; // FIXED total price for the whole listing
+            if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+                double scaled = listingPrice * this.shopPriceMultiplier() * this.shopItemMultiplier(mat);
+                double floor = this.computeBaseWorth(mat) * amt * 1.25;
+                listingPrice = Math.round(Math.max(scaled, floor) * 100.0) / 100.0;
+            }
             int current = currentCounts.getOrDefault(mat.name(), 0);
             if (current >= target) continue;
             int toPost = Math.min(target - current, perPassCap);
@@ -23298,7 +27427,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (prices == null) return;
         try (Connection conn = this.openSyncConnection()) {
             java.util.Map<String, Integer> currentCounts = new java.util.HashMap<>();
-            try (PreparedStatement ps = conn.prepareStatement("SELECT item_key, COUNT(*) FROM order_listings WHERE creator_uuid=? AND status='ACTIVE' AND (expires_at IS NULL OR expires_at > NOW()) GROUP BY item_key")) {
+            int cooldownHours = this.runtimeProfile == EconomyRuntimeProfile.ECONOMY
+                ? Math.max(0, this.settings.getInt("ecobot.order-cooldown-hours", 24)) : 0;
+            try (PreparedStatement ps = conn.prepareStatement("SELECT item_key, COUNT(*) FROM order_listings WHERE creator_uuid=? AND "
+                    + "((status='ACTIVE' AND (expires_at IS NULL OR expires_at > NOW())) OR created_at > TIMESTAMPADD(HOUR, -" + cooldownHours + ", NOW())) GROUP BY item_key")) {
                 ps.setString(1, SERVER_UUID);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) currentCounts.put(rs.getString(1), rs.getInt(2));
@@ -23325,6 +27457,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 else if (sellPrice <= 5000) totalAmt = 25_000;
                 else if (sellPrice <= 50000) totalAmt = 5_000;
                 else                        totalAmt = 1_000;
+                // Economy profile: orders are bounded (ecobot.order-max-amount), so a farm cannot drain one forever.
+                if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY)
+                    totalAmt = Math.min(totalAmt, Math.max(1, this.settings.getInt("ecobot.order-max-amount", 1000)));
                 this.postServerOrder(conn, mat, totalAmt, unitPrice);
                 posted++;
             }
@@ -23337,7 +27472,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     private void runAutoBuyPass(int limit) {
         if (this.autoEcoPaused) return;
         try (Connection conn = this.openSyncConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT id, item_key, price FROM auction_listings WHERE seller_uuid != ? AND status='ACTIVE' ORDER BY created_at ASC LIMIT ?")) {
+             PreparedStatement ps = conn.prepareStatement("SELECT id, item_key, price, item_blob FROM auction_listings WHERE seller_uuid != ? AND status='ACTIVE' AND lock_operation_id IS NULL ORDER BY created_at ASC LIMIT ?")) {
             ps.setString(1, SERVER_UUID);
             ps.setInt(2, limit * 3);
             java.util.List<long[]> candidates = new java.util.ArrayList<>();
@@ -23353,8 +27488,20 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     // Always buy at or below actual sell worth. Also buy up to
                     // Server's own AH price (10-50× markup) so player listings
                     // at reasonable prices get scooped up.
+                    // Auction prices run above sell worth (rare or hard-to-find items); the Server pays up to its own
+                    // AH unit price for a listing. Illegal items are never bought.
+                    if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+                        ItemStack listed = this.deserializeItem(rs.getBytes(4));
+                        if (listed == null || listed.getType().isAir()
+                                || (this.vanillaItemSanitizer != null && this.vanillaItemSanitizer.violationReason(listed) != null)) continue;
+                    }
                     double maxBuy = this.calcServerAhPrice(mat, sellPrice);
-                    if (price > maxBuy) continue;
+                    if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+                        ItemStack listedItem = this.deserializeItem(rs.getBytes(4));
+                        int units = listedItem == null ? 1 : Math.max(1, listedItem.getAmount());
+                        double markup = Math.max(1.0, this.settings.getDouble("ecobot.buy-max-markup", 1.25));
+                        if (price / units > this.computeBaseWorth(mat) * markup) continue;
+                    } else if (price > maxBuy) continue;
                     candidates.add(new long[]{rs.getLong(1)});
                     candidatePrices.add(new double[]{price});
                     candidateMats.add(mat);
@@ -23425,7 +27572,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             conn.setAutoCommit(false);
             String sellerUuid;
             String itemKey;
-            try (PreparedStatement sel = conn.prepareStatement("SELECT seller_uuid,item_key FROM auction_listings WHERE id=? AND status='ACTIVE' FOR UPDATE")) {
+            try (PreparedStatement sel = conn.prepareStatement("SELECT seller_uuid,item_key FROM auction_listings WHERE id=? AND status='ACTIVE' AND lock_operation_id IS NULL FOR UPDATE")) {
                 sel.setLong(1, listingId);
                 try (ResultSet rs = sel.executeQuery()) {
                     if (!rs.next()) { conn.rollback(); return false; }
@@ -23434,7 +27581,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 }
             }
             if (SERVER_UUID.equals(sellerUuid)) { conn.rollback(); return false; }
-            try (PreparedStatement upd = conn.prepareStatement("UPDATE auction_listings SET status='SOLD', buyer_uuid=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='ACTIVE'")) {
+            try (PreparedStatement upd = conn.prepareStatement("UPDATE auction_listings SET status='SOLD', buyer_uuid=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='ACTIVE' AND lock_operation_id IS NULL")) {
                 upd.setString(1, SERVER_UUID);
                 upd.setLong(2, listingId);
                 if (upd.executeUpdate() <= 0) { conn.rollback(); return false; }
@@ -23485,6 +27632,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             ps.setString(3, mat.name());
             ps.setDouble(4, price);
             ps.executeUpdate();
+            this.logTransactionAudit(SERVER_UUID, "Server", "SERVER_AH_LIST", mat.name(), amount,
+                amount > 0 ? price / amount : 0.0, price, "source=AutoEco");
         } catch (Exception ex) {
             this.getLogger().warning("[AutoEco] Failed posting Server AH listing for " + mat + ": " + ex.getMessage());
         }
@@ -23501,6 +27650,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             ps.setInt(3, totalAmount);
             ps.setDouble(4, unitPrice);
             ps.executeUpdate();
+            this.logTransactionAudit(SERVER_UUID, "Server", "SERVER_ORDER_CREATE", mat.name(), totalAmount,
+                unitPrice, (double)totalAmount * unitPrice, "source=AutoEco");
         } catch (Exception ex) {
             this.getLogger().warning("[AutoEco] Failed posting Server order for " + mat + ": " + ex.getMessage());
         }
@@ -23510,6 +27661,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     // output is lucrative to fulfill. Cheap bulk items get a huge multiplier
     // (e.g. $6 oak log -> ~$360/log), tapering down for high-value items.
     private double calcServerOrderPrice(double sellPrice) {
+        if (this.runtimeProfile == EconomyRuntimeProfile.ECONOMY) {
+            // A small premium over /sell; the old 2-400x tiers made any farm a money printer.
+            double markup = Math.max(1.0, this.settings.getDouble("ecobot.order-markup", 1.1));
+            return Math.max(0.01, java.math.BigDecimal.valueOf(sellPrice * markup).setScale(2, java.math.RoundingMode.DOWN).doubleValue());
+        }
         // Player-favourable buy prices: cheap farm/natural mats pay BIG so players want to sell to Server.
         // Logs/dirt/etc sell at ~$1 → Server pays ~$400 each. Gear at $200 → ~$3,200 each. Diamonds 5x.
         double markup;
@@ -23687,6 +27843,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 int count = args.length >= 3 ? Math.max(1, Math.min(50, Integer.parseInt(args[2]))) : 1;
                 double sellPrice = this.sellUnitPrice(mat);
                 double price = (args.length >= 4) ? Double.parseDouble(args[3]) : (sellPrice > 0 ? this.calcServerAhPrice(mat, sellPrice) : 100.0);
+                if (!Double.isFinite(price) || price <= 0.0 || price > 1.0E9) { p.sendMessage("§cThe price must be above 0 and at most 1,000,000,000."); return; }
                 final Material fMat = mat; final int fCount = count; final double fPrice = price;
                 this.runAsyncTask(() -> {
                     try (Connection conn = this.openSyncConnection()) {
@@ -23699,8 +27856,9 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 if (args.length < 4) { p.sendActionBar(Component.text("§cUsage: /ecobot order <material> <totalAmount> <unitPrice>")); return; }
                 Material mat = Material.matchMaterial(args[1].toUpperCase(Locale.ROOT).replace("-", "_"));
                 if (mat == null || !mat.isItem()) { p.sendMessage("§cUnknown material: " + args[1]); return; }
-                int totalAmt = Math.max(1, Integer.parseInt(args[2]));
+                int totalAmt = Math.max(1, Math.min(100_000, Integer.parseInt(args[2])));
                 double unitPrice = Double.parseDouble(args[3]);
+                if (!Double.isFinite(unitPrice) || unitPrice <= 0.0 || unitPrice > 1.0E7) { p.sendMessage("§cThe unit price must be above 0 and at most 10,000,000."); return; }
                 final Material fMat = mat; final int fAmt = totalAmt; final double fUP = unitPrice;
                 this.runAsyncTask(() -> {
                     try (Connection conn = this.openSyncConnection()) {
@@ -24070,7 +28228,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(16, this.namedWithLore(Material.LIME_STAINED_GLASS_PANE, "§a§lAccept", "tpa_confirm_accept",
             List.of("§7Click to accept this request")));
 
-        recipient.openInventory(inv);
+        this.openMenu(recipient, inv);
         recipient.playSound(recipient.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0f, 2.0f);
     }
 
@@ -24256,7 +28414,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (entries.isEmpty()) {
             inv.setItem(22, this.namedWithLore(Material.GRAY_DYE, "§7No active bounties", "bounty_none", List.of("§7Use §f/bounty <player> <amount>")));
         }
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void handleBountyGuiClick(Player p, ItemStack item, ClickType click) {
@@ -24400,7 +28558,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 SuspiciousPlayersGuiState state = this.suspiciousPlayersGuiState.computeIfAbsent(viewer.getUniqueId(), k -> new SuspiciousPlayersGuiState());
                 state.page = finalPage;
 
-                viewer.openInventory(inv);
+                this.openMenu(viewer, inv);
             });
         });
     }
@@ -24487,7 +28645,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                         // Back button
                         inv.setItem(22, this.namedWithLore(Material.ARROW, "§7Back", "sus_detail_back", List.of()));
 
-                        viewer.openInventory(inv);
+                        this.openMenu(viewer, inv);
                     });
                 }
             } catch (Exception ex) {
@@ -24539,7 +28697,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 "sus_clear_yes:" + targetUuid, java.util.List.of("§7Dismiss all active flags for this player.")));
             inv.setItem(15, this.namedWithLore(Material.RED_WOOL, "§cCancel",
                 "sus_clear_no:" + targetUuid, java.util.List.of("§7Return to the detail view.")));
-            viewer.openInventory(inv);
+            this.openMenu(viewer, inv);
         });
     }
 
@@ -24982,7 +29140,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inventory.setItem(22, this.namedWithLore(Material.REDSTONE, "§fGameplay Tuning", "adm_tuning", List.of()));
         inventory.setItem(23, this.namedWithLore(Material.KNOWLEDGE_BOOK, "§fData & Logs", "adm_data", List.of()));
         inventory.setItem(49, this.namedWithLore(Material.BARRIER, "§7Close", "adm_close", List.of()));
-        p.openInventory(inventory);
+        this.openMenu(p, inventory);
     }
 
     // ===== Legacy (inventory) server console for Bedrock / pre-1.21.6 clients =====
@@ -25000,7 +29158,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(20, this.namedWithLore(Material.NAME_TAG, "§fWhitelist: " + (wl ? "§aON" : "§7OFF"), "adm_whitelist", List.of("§7Click to toggle")));
         inv.setItem(21, this.namedWithLore(Material.BOOK, "§fReload PNC Config", "adm_reload", List.of("§7Re-read config.yml")));
         inv.setItem(28, this.namedWithLore(Material.PAPER, "§fBroadcast", "adm_broadcast", List.of("§7Type a server announcement")));
-        inv.setItem(29, this.namedWithLore(Material.GOLD_INGOT, "§fEconomy & Ranks", "adm_economy", List.of("§7Money, shards, " + this.brandTierPlus + "/++")));
+        inv.setItem(29, this.namedWithLore(Material.GOLD_INGOT, "§fEconomy & Ranks", "adm_economy",
+            List.of("§7Money, " + (this.shardsEnabled() ? "shards, " : "") + this.brandTierPlus + "/++")));
         inv.setItem(30, this.namedWithLore(Material.PLAYER_HEAD, "§fPlayers", "adm_players", List.of("§7Online player actions")));
         inv.setItem(31, this.namedWithLore(Material.COMPARATOR, "§fDiagnostics", "adm_diag", List.of("§7Show server status in chat")));
         inv.setItem(23, this.namedWithLore(Material.WRITABLE_BOOK, "§fLock Message", "adm_lockmsg", List.of("§7Set the region-down message")));
@@ -25011,7 +29170,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(33, this.namedWithLore(Material.BARRIER, "§cRestart Server", "adm_restart", List.of("§7Click to confirm", "§7(auto-relaunches)")));
         inv.setItem(34, this.namedWithLore(Material.BARRIER, "§cStop Server", "adm_stop", List.of("§7Click to confirm", "§cNo auto-relaunch")));
         inv.setItem(49, this.namedWithLore(Material.ARROW, "§7Close", "adm_close", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openAdminLegacyConfirm(Player p, boolean restart) {
@@ -25023,7 +29182,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(11, this.namedWithLore(Material.LIME_WOOL, restart ? "§aConfirm Restart" : "§aConfirm Stop",
             restart ? "adm_do_restart" : "adm_do_stop", List.of()));
         inv.setItem(15, this.namedWithLore(Material.RED_WOOL, "§cCancel", "adm_back", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     // Capture the next chat line a legacy-admin player types (or "cancel") and run the action.
@@ -25042,12 +29201,12 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         for (int i = 0; i < 27; i++) inv.setItem(i, filler);
         inv.setItem(10, this.namedWithLore(Material.GOLD_INGOT, "§fGive Money", "adm_e_givemoney", List.of("§7Type: <player> <amount>")));
         inv.setItem(11, this.namedWithLore(Material.GOLD_BLOCK, "§fSet Money", "adm_e_setmoney", List.of("§7Type: <player> <amount>")));
-        inv.setItem(12, this.namedWithLore(Material.AMETHYST_SHARD, "§fGive Shards", "adm_e_giveshards", List.of("§7Type: <player> <amount>")));
+        if (this.shardsEnabled()) inv.setItem(12, this.namedWithLore(Material.AMETHYST_SHARD, "§fGive Shards", "adm_e_giveshards", List.of("§7Type: <player> <amount>")));
         inv.setItem(14, this.namedWithLore(Material.DIAMOND, "§fGive " + this.brandTierPlus + " (30d)", "adm_e_plusgive", List.of("§7Type: <player>")));
         inv.setItem(15, this.namedWithLore(Material.NETHERITE_INGOT, "§fGive " + this.brandTierPlusPlus + " (30d)", "adm_e_plusplusgive", List.of("§7Type: <player>")));
         inv.setItem(16, this.namedWithLore(Material.BARRIER, "§cRevoke " + this.brandTierPlus + "/++", "adm_e_revoke", List.of("§7Type: <player>")));
         inv.setItem(22, this.namedWithLore(Material.ARROW, "§7Back", "adm_back", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openAdminLegacyPlayers(Player p) {
@@ -25065,7 +29224,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             inv.setItem(slot++, head);
         }
         inv.setItem(49, this.namedWithLore(Material.ARROW, "§7Back", "adm_back", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openAdminLegacyPlayerActions(Player p, String uuid, String name) {
@@ -25083,7 +29242,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(20, this.namedWithLore(Material.IRON_DOOR, "§cKick", "adm_pa_kick:" + uuid, List.of()));
         inv.setItem(21, this.namedWithLore(Material.REDSTONE_BLOCK, "§cPunish", "adm_pa_punish:" + uuid, List.of()));
         inv.setItem(26, this.namedWithLore(Material.ARROW, "§7Back", "adm_players", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openAdminLegacyWorld(Player p, String wn) {
@@ -25108,7 +29267,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(21, this.namedWithLore(Material.BARRIER, "§fSet Border", "adm_w_border:" + wn, List.of("§7Type radius in chat")));
         inv.setItem(22, this.namedWithLore(Material.COMMAND_BLOCK, "§fGamerules", "adm_w_gamerules:" + wn, List.of("§7Toggle world gamerules")));
         inv.setItem(26, this.namedWithLore(Material.ARROW, "§7Back", "adm_worlds", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openAdminLegacyWorlds(Player p) {
@@ -25124,7 +29283,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 List.of("§7" + w.getPlayers().size() + " here", "§7Click to manage")));
         }
         inv.setItem(22, this.namedWithLore(Material.ARROW, "§7Back", "adm_back", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private static final String[][] ADMIN_TUNE_KEYS = {
@@ -25142,7 +29301,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             inv.setItem(slot++, this.namedWithLore(Material.COMPARATOR, "§f" + k[1] + ": §b" + cur, "adm_tune:" + k[0], List.of("§7Click to set")));
         }
         inv.setItem(22, this.namedWithLore(Material.ARROW, "§7Back", "adm_back", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openAdminLegacyData(Player p) {
@@ -25155,7 +29314,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         inv.setItem(13, this.namedWithLore(Material.IRON_BARS, "§fBan List", "adm_d_bans", List.of()));
         inv.setItem(14, this.namedWithLore(Material.SPYGLASS, "§fAnticheat Suspects", "adm_d_suspects", List.of()));
         inv.setItem(22, this.namedWithLore(Material.ARROW, "§7Back", "adm_back", List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     private void openAdminLegacyGamerules(Player p, String wn) {
@@ -25177,7 +29336,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 (val ? "§a" : "§7") + gr.getName() + ": " + (val ? "ON" : "OFF"), "adm_gr:" + gr.getName() + ":" + wn, List.of("§7Click to toggle")));
         }
         inv.setItem(49, this.namedWithLore(Material.ARROW, "§7Back", "adm_world:" + wn, List.of()));
-        p.openInventory(inv);
+        this.openMenu(p, inv);
     }
 
     @SuppressWarnings("unchecked")
@@ -25244,7 +29403,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             case "adm_diag" -> { p.closeInventory(); p.sendMessage("§7TPS §f" + String.format("%.1f", Math.min(20.0, Bukkit.getTPS()[0])) + " §7| Online §f" + Bukkit.getOnlinePlayers().size() + " §7| Plugins §f" + Bukkit.getPluginManager().getPlugins().length); }
             case "adm_e_givemoney" -> this.promptAdminInput(p, "Give money (type <player> <amount>)", t -> { this.runAdminEco(p, "eco give", t); });
             case "adm_e_setmoney" -> this.promptAdminInput(p, "Set money (type <player> <amount>)", t -> { this.runAdminEco(p, "eco set", t); });
-            case "adm_e_giveshards" -> this.promptAdminInput(p, "Give shards (type <player> <amount>)", t -> { this.runAdminEco(p, "shards give", t); });
+            case "adm_e_giveshards" -> {
+                if (this.requireShardsEnabled(p)) this.promptAdminInput(p, "Give shards (type <player> <amount>)", t -> { this.runAdminEco(p, "shards give", t); });
+                else this.openAdminLegacyEconomy(p);
+            }
             case "adm_e_plusgive" -> this.promptAdminInput(p, "Give " + this.brandTierPlus + " for 30 days (type <player>)", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus give " + t.split("\\s+")[0] + " plus 30"); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
             case "adm_e_plusplusgive" -> this.promptAdminInput(p, "Give " + this.brandTierPlusPlus + " for 30 days (type <player>)", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus give " + t.split("\\s+")[0] + " plusplus 30"); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
             case "adm_e_revoke" -> this.promptAdminInput(p, "Revoke " + this.brandTierPlus + "/++ (type <player>)", t -> { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "pizzaplus revoke " + t.split("\\s+")[0]); p.sendMessage("§7Done."); this.openAdminLegacyEconomy(p); });
@@ -25331,6 +29493,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void runAdminEco(Player p, String cmd, String input) {
+        if (cmd != null && cmd.toLowerCase(Locale.ROOT).startsWith("shards ") && !this.requireShardsEnabled(p)) {
+            this.openAdminLegacyEconomy(p);
+            return;
+        }
         String[] a = input.trim().split("\\s+");
         if (a.length < 2) { p.sendMessage("§cNeed: <player> <amount>"); this.openAdminLegacyEconomy(p); return; }
         Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd + " " + a[0] + " " + a[1]);
@@ -25560,17 +29726,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         java.util.List<DialogBody> body = List.of(
             this.kv("EcoBot auto-runs:", this.autoEcoPaused ? "Paused" : "Running",
                 this.autoEcoPaused ? NamedTextColor.RED : NamedTextColor.GREEN));
-        java.util.List<ActionButton> buttons = List.of(
-            this.dialogButton(Component.text(this.autoEcoPaused ? "Resume EcoBot" : "Pause EcoBot",
+        java.util.List<ActionButton> buttons = new java.util.ArrayList<>();
+        buttons.add(this.dialogButton(Component.text(this.autoEcoPaused ? "Resume EcoBot" : "Pause EcoBot",
                     this.autoEcoPaused ? NamedTextColor.GREEN : NamedTextColor.YELLOW), "Toggle EcoBot auto list/order/buy/deliver passes", 150, q -> {
                 this.autoEcoPaused = !this.autoEcoPaused;
                 this.openAdminEcoShop(q);
-            }),
-            this.dialogButton(Component.text("Reload Sell Config", DIALOG_BRAND), "Reload sell/worth pricing", 150, q -> {
+            }));
+        buttons.add(this.dialogButton(Component.text("Reload Sell Config", DIALOG_BRAND), "Reload sell/worth pricing", 150, q -> {
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "sell reload");
                 q.sendActionBar(Component.text("§7Reloaded sell config."));
-            }),
-            this.dialogButton(Component.text("Open Shard Shop", DIALOG_BRAND), null, 150, q -> {
+            }));
+        if (this.shardsEnabled()) buttons.add(this.dialogButton(Component.text("Open Shard Shop", DIALOG_BRAND), null, 150, q -> {
+                if (!this.requireShardsEnabled(q)) return;
                 DialogCloseCompat.close(q);
                 this.openShardShopMenu(q);
             }));
@@ -25626,14 +29793,15 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // ----- Economy & Ranks panel -----
     private void openAdminEconomy(Player p) {
-        java.util.List<DialogBody> body = List.of(DialogBody.plainMessage(Component.text("Money, shards, and rank management.", NamedTextColor.GRAY)));
-        java.util.List<ActionButton> buttons = List.of(
-            this.dialogButton(Component.text("Give Money", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "givemoney")),
-            this.dialogButton(Component.text("Set Money", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "setmoney")),
-            this.dialogButton(Component.text("Give Shards", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "giveshards")),
-            this.dialogButton(Component.text("Baltop", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("baltop"); }),
-            this.dialogButton(Component.text((this.brandTierPlus + "/++ Manage"), DIALOG_BRAND), null, 150, q -> this.openAdminRankInput(q)),
-            this.dialogButton(Component.text((this.brandTierPlus + " List"), DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("pizzaplus list"); }));
+        java.util.List<DialogBody> body = List.of(DialogBody.plainMessage(Component.text(
+            this.shardsEnabled() ? "Money, shards, and rank management." : "Money and rank management.", NamedTextColor.GRAY)));
+        java.util.List<ActionButton> buttons = new java.util.ArrayList<>();
+        buttons.add(this.dialogButton(Component.text("Give Money", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "givemoney")));
+        buttons.add(this.dialogButton(Component.text("Set Money", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "setmoney")));
+        if (this.shardsEnabled()) buttons.add(this.dialogButton(Component.text("Give Shards", DIALOG_BRAND), null, 150, q -> this.openAdminEcoInput(q, "giveshards")));
+        buttons.add(this.dialogButton(Component.text("Baltop", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("baltop"); }));
+        buttons.add(this.dialogButton(Component.text((this.brandTierPlus + "/++ Manage"), DIALOG_BRAND), null, 150, q -> this.openAdminRankInput(q)));
+        buttons.add(this.dialogButton(Component.text((this.brandTierPlus + " List"), DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("pizzaplus list"); }));
         Dialog dialog = this.buildDialog(Component.text("Economy & Ranks", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
@@ -25641,6 +29809,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void openAdminEcoInput(Player p, String mode) {
+        if ("giveshards".equals(mode) && !this.requireShardsEnabled(p)) return;
         String title = switch (mode) { case "givemoney" -> "Give Money"; case "setmoney" -> "Set Money"; default -> "Give Shards"; };
         java.util.List<DialogInput> inputs = List.of(
             DialogInput.text("player", Component.text("Player", NamedTextColor.GRAY)).width(160).maxLength(16).build(),
@@ -25651,6 +29820,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                     String who = view.getText("player");
                     String amt = view.getText("amount");
                     this.runOnPlayerThread(pl, () -> {
+                        if ("giveshards".equals(mode) && !this.requireShardsEnabled(pl)) {
+                            DialogCloseCompat.close(pl);
+                            return;
+                        }
                         if (who == null || who.isBlank() || amt == null || amt.isBlank()) { pl.sendActionBar(Component.text("§cEnter a player and amount.")); this.openAdminEconomy(pl); return; }
                         String cmd = switch (mode) {
                             case "givemoney" -> "eco give " + who.trim() + " " + amt.trim();
@@ -26308,7 +30481,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             this.dialogButton(Component.text("Transaction Log", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("txlog"); }),
             this.dialogButton(Component.text("Ban List", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); q.performCommand("listbans"); }),
             this.dialogButton(Component.text("Anticheat Suspects", DIALOG_BRAND), null, 150, q -> { DialogCloseCompat.close(q); this.openSuspiciousPlayersGui(q); }),
-            this.dialogButton(Component.text("Money / Shards", DIALOG_BRAND), "Adjust balances", 150, this::openAdminEconomy));
+            this.dialogButton(Component.text(this.shardsEnabled() ? "Money / Shards" : "Money", DIALOG_BRAND), "Adjust balances", 150, this::openAdminEconomy));
         Dialog dialog = this.buildDialog(Component.text("Data & Logs", DIALOG_BRAND), body, List.of(),
             DialogType.multiAction(buttons).columns(2)
                 .exitAction(this.dialogButton(Component.text("Back"), null, 150, this::openManageConsole)).build());
@@ -26389,6 +30562,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
 
     // Console variant of /shards give: no Player sender required (stipend grants from PizzaAdminTools).
     private void handleShardsGiveFromConsole(CommandSender sender, String targetName, String amountStr) {
+        if (!this.requireShardsEnabled(sender)) return;
         ParsedAmount parsed = this.parseCompactAmount(amountStr);
         if (parsed == null || parsed.value <= 0.0) {
             sender.sendMessage("Invalid amount: " + amountStr);
@@ -26400,6 +30574,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             return;
         }
         this.runAsyncTask(() -> {
+            if (!this.shardsEnabled()) {
+                sender.sendMessage("This feature is disabled.");
+                return;
+            }
             Player online = Bukkit.getPlayerExact(targetName);
             UUID tid = online != null ? online.getUniqueId() : this.lookupUuidByName(targetName);
             if (tid == null) {
@@ -26407,7 +30585,11 @@ org.bukkit.plugin.messaging.PluginMessageListener {
                 return;
             }
             try {
-                this.grantShards(tid, amount);
+                if (!this.grantShards(tid, amount)) {
+                    sender.sendMessage(this.shardsEnabled() ? "Could not grant shards." : "This feature is disabled.");
+                    return;
+                }
+                if (!this.shardsEnabled()) return;
                 this.getLogger().info("[shards] Console gave " + amount + " shards to " + targetName);
                 if (online != null) {
                     this.runOnPlayerThread(online, () -> online.sendMessage("§aYou received " + amount + " shards"));
@@ -26419,6 +30601,7 @@ org.bukkit.plugin.messaging.PluginMessageListener {
     }
 
     private void handleShardsGiveCommand(Player p, String targetName, String amountStr) {
+        if (!this.requireShardsEnabled(p)) return;
         // Supports k/m/b/t amounts and offline targets.
         ParsedAmount parsed = this.parseCompactAmount(amountStr);
         if (parsed == null || parsed.value <= 0.0) {
@@ -26432,7 +30615,21 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             UUID tid = online.getUniqueId();
             this.runAsyncTask(() -> {
                 try {
-                    this.grantShards(tid, amount);
+                    if (!this.shardsEnabled()) {
+                        this.runOnPlayerThread(p, () -> this.requireShardsEnabled(p));
+                        return;
+                    }
+                    if (!this.grantShards(tid, amount)) {
+                        this.runOnPlayerThread(p, () -> {
+                            if (!this.requireShardsEnabled(p)) return;
+                            p.sendMessage("§cCould not grant shards.");
+                        });
+                        return;
+                    }
+                    if (!this.shardsEnabled()) {
+                        this.runOnPlayerThread(p, () -> this.requireShardsEnabled(p));
+                        return;
+                    }
                     this.runOnPlayerThread(p, () -> p.sendMessage("§aGave " + amount + " shards to " + online.getName()));
                     this.runOnPlayerThread(online, () -> online.sendMessage("§aYou received " + amount + " shards"));
                 } catch (Exception ex) { this.getLogger().warning("Failed to grant shards: " + ex.getMessage()); }
@@ -26441,13 +30638,27 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         }
         // Offline target.
         this.runAsyncTask(() -> {
+            if (!this.shardsEnabled()) {
+                this.runOnPlayerThread(p, () -> this.requireShardsEnabled(p));
+                return;
+            }
             UUID tid = this.lookupUuidByName(targetName);
             if (tid == null) {
                 this.runOnPlayerThread(p, () -> p.sendMessage("§cPlayer not found: " + targetName));
                 return;
             }
             try {
-                this.grantShards(tid, amount);
+                if (!this.grantShards(tid, amount)) {
+                    this.runOnPlayerThread(p, () -> {
+                        if (!this.requireShardsEnabled(p)) return;
+                        p.sendMessage("§cCould not grant shards.");
+                    });
+                    return;
+                }
+                if (!this.shardsEnabled()) {
+                    this.runOnPlayerThread(p, () -> this.requireShardsEnabled(p));
+                    return;
+                }
                 this.runOnPlayerThread(p, () -> p.sendMessage("§aGave " + amount + " shards to " + targetName + " §7(offline)"));
             } catch (Exception ex) { this.getLogger().warning("Failed to grant shards: " + ex.getMessage()); }
         });
@@ -26491,7 +30702,8 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
-    private void grantShards(UUID uuid, long amount) {
+    private boolean grantShards(UUID uuid, long amount) {
+        if (!this.shardsEnabled()) return false;
         // Shards live in the `balances` table (not `players`). Upsert so it works for new rows too.
         String sql = "INSERT INTO balances (uuid, shards) VALUES (?, ?) ON DUPLICATE KEY UPDATE shards = shards + VALUES(shards)";
         try (Connection conn = this.openSyncConnection();
@@ -26499,8 +30711,10 @@ org.bukkit.plugin.messaging.PluginMessageListener {
             ps.setString(1, uuid.toString());
             ps.setLong(2, amount);
             ps.executeUpdate();
+            return true;
         } catch (Exception ex) {
             this.getLogger().warning("Failed to grant shards: " + ex.getMessage());
+            return false;
         }
     }
 
@@ -26602,16 +30816,32 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         });
     }
 
-    private void logCommandAudit(Player player, String command) {
+    private void auditDestroyedItem(VanillaItemSanitizer.Destruction item, Player player) {
+        String playerUuid = item.playerUuid();
+        String playerName = item.playerName();
+        String actor = playerUuid == null ? "WORLD" : playerName;
+        this.getLogger().warning("[item-sanitizer] destroyed player=" + actor + " item=" + item.material()
+            + " amount=" + item.amount() + " reason=" + item.reason() + " context=" + item.context());
+        if (playerUuid != null) {
+            this.logTransactionAudit(playerUuid, playerName, "ITEM_DESTROY", item.material(), item.amount(),
+                0.0, 0.0, "reason=" + item.reason() + ";context=" + item.context());
+        }
+    }
+
+    private void logCommandAudit(String playerUuid, String playerName, String command) {
+        String safeCommand = dev.pizzasmp.economy.EconomyCommandAudit.redact(command);
+        String serverName = this.detectServerName();
         this.runAsyncTask(() -> {
             try (Connection conn = this.openSyncConnection();
                  PreparedStatement ps = conn.prepareStatement("INSERT INTO command_log (player_uuid,player_name,command,server_name) VALUES (?,?,?,?)")) {
-                ps.setString(1, player.getUniqueId().toString());
-                ps.setString(2, player.getName());
-                ps.setString(3, command.length() > 500 ? command.substring(0, 500) : command);
-                ps.setString(4, this.detectServerName());
+                ps.setString(1, playerUuid);
+                ps.setString(2, playerName);
+                ps.setString(3, safeCommand);
+                ps.setString(4, serverName);
                 ps.executeUpdate();
-            } catch (Exception ignored) {}
+            } catch (Exception failure) {
+                this.getLogger().warning("[Audit] Command audit write failed (" + failure.getClass().getSimpleName() + ").");
+            }
         });
     }
 
@@ -26620,9 +30850,18 @@ org.bukkit.plugin.messaging.PluginMessageListener {
         if (e.isCancelled()) return;
         if (this.isCommandThrottled(e.getPlayer(), e.getMessage())) {
             e.setCancelled(true);
-            return;
         }
-        this.logCommandAudit(e.getPlayer(), e.getMessage());
+    }
+
+    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=false)
+    public void onCommandAudit(org.bukkit.event.player.PlayerCommandPreprocessEvent event) {
+        Player player = event.getPlayer();
+        this.logCommandAudit(player.getUniqueId().toString(), player.getName(), event.getMessage());
+    }
+
+    @EventHandler(priority=EventPriority.MONITOR, ignoreCancelled=false)
+    public void onConsoleCommandAudit(org.bukkit.event.server.ServerCommandEvent event) {
+        this.logCommandAudit("00000000-0000-0000-0000-000000000000", "CONSOLE", event.getCommand());
     }
 
     private void openPlayerHistoryGui(Player viewer, String targetName, int page) {
