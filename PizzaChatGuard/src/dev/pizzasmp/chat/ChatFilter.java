@@ -33,7 +33,11 @@ final class ChatFilter {
     private ChatFilter() { }
 
     /** Lowercase letters with lookalikes, leetspeak, accents and invisible characters folded; other characters as spaces. */
+    private static final java.util.regex.Pattern LEGACY_CODE = java.util.regex.Pattern.compile("(?i)[&\u00a7][0-9a-fk-or]");
+
     static String fold(String input) {
+        // Colour and format codes render as nothing, so they must not split a word ("f&cword").
+        input = LEGACY_CODE.matcher(input).replaceAll("");
         String decomposed = Normalizer.normalize(input, Normalizer.Form.NFKD);
         StringBuilder out = new StringBuilder(decomposed.length());
         decomposed.codePoints().forEach(cp -> {
@@ -84,6 +88,9 @@ final class ChatFilter {
                 if (w.isEmpty()) continue;
                 if (collapsed.equals(w)) return word;
                 if (w.length() >= substringMin && collapsed.contains(w)) return word;
+                // The spelled form too: collapsing can shorten a word below the minimum (doubled letters).
+                String spelled = fold(word).replace(" ", "");
+                if (spelled.length() >= substringMin && token.contains(spelled)) return word;
             }
         }
         return matchRun(run, words, substringMin);
@@ -96,6 +103,8 @@ final class ChatFilter {
             String w = normalizedWord(word);
             if (w.isEmpty()) continue;
             if (glued.equals(w) || (w.length() >= substringMin && glued.contains(w))) return word;
+            String spelled = fold(word).replace(" ", "");
+            if (spelled.length() >= substringMin && run.toString().contains(spelled)) return word;
         }
         return null;
     }

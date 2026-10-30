@@ -50,6 +50,11 @@ final class ChatLog {
         write("PM  ", name, id, command, blocked);
     }
 
+    /** Player-written text outside chat: item names, signs, books. {@code kind} is a four-letter tag. */
+    void text(String kind, String name, UUID id, String text, boolean blocked) {
+        write(kind, name, id, text.replace('\n', ' '), blocked);
+    }
+
     void close() {
         writer.shutdown();
         try {

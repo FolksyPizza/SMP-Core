@@ -520,6 +520,129 @@ public final class PizzaChatGuard extends JavaPlugin implements Listener {
         log.chat(e.getPlayer().getName(), e.getPlayer().getUniqueId(), PLAIN.serialize(e.message()), e.isCancelled());
     }
 
+    // Player-written text outside chat (item names, name tags, signs, books) is filtered for everyone, owners
+    // included, at the strongest level whatever the chat level, with words of four or more letters also matched
+    // inside longer words ("xXwordXx"). Only the link bypass applies. It is never strike-counted, and every checked
+    // text is logged.
+
+    private static final int TEXT_SUBSTRING_MIN = 4;
+    private static final net.kyori.adventure.text.Component CENSORED = net.kyori.adventure.text.Component.text("[Censored]");
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onAnvilName(org.bukkit.event.inventory.PrepareAnvilEvent e) {
+        if (e.getResult() == null || !(e.getView().getPlayer() instanceof Player p)) return;
+        String name = e.getView().getRenameText();
+        if (name == null || name.isBlank()) return;
+        if (refusedText(p, "NAME", name)) {
+            // The rest of the anvil work stands; the item keeps its default name.
+            e.setResult(withoutName(e.getResult()));
+            p.sendActionBar(net.kyori.adventure.text.Component.text("That item name isn't allowed.", net.kyori.adventure.text.format.NamedTextColor.GRAY));
+        }
+    }
+
+    /** Backstop for the anvil: whatever is taken from the result slot carries no refused name. */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onAnvilTake(org.bukkit.event.inventory.InventoryClickEvent e) {
+        if (!(e.getInventory() instanceof org.bukkit.inventory.AnvilInventory) || e.getRawSlot() != 2
+            || !(e.getWhoClicked() instanceof Player p)) return;
+        org.bukkit.inventory.ItemStack item = e.getCurrentItem();
+        String name = customName(item);
+        if (name != null && refusedText(p, "NAME", name)) e.setCurrentItem(withoutName(item));
+    }
+
+    /** Creative players can create named items directly. */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onCreativeItem(org.bukkit.event.inventory.InventoryCreativeEvent e) {
+        if (!(e.getWhoClicked() instanceof Player p)) return;
+        org.bukkit.inventory.ItemStack item = e.getCursor();
+        String name = customName(item);
+        if (name != null && refusedText(p, "NAME", name)) e.setCursor(withoutName(item));
+    }
+
+    /** A name tag carrying a refused name names nothing. */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onNameTag(org.bukkit.event.player.PlayerInteractEntityEvent e) {
+        org.bukkit.inventory.ItemStack item = e.getPlayer().getInventory().getItem(e.getHand());
+        if (item == null || item.getType() != org.bukkit.Material.NAME_TAG) return;
+        String name = customName(item);
+        if (name != null && refusedText(e.getPlayer(), "NAME", name)) {
+            e.setCancelled(true);
+            e.getPlayer().getInventory().setItem(e.getHand(), withoutName(item));
+            e.getPlayer().sendActionBar(net.kyori.adventure.text.Component.text("That name isn't allowed.", net.kyori.adventure.text.format.NamedTextColor.GRAY));
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onSign(org.bukkit.event.block.SignChangeEvent e) {
+        StringBuilder text = new StringBuilder();
+        for (net.kyori.adventure.text.Component line : e.lines()) text.append(line == null ? "" : PLAIN.serialize(line)).append(' ');
+        if (text.toString().isBlank()) return;
+        if (refusedText(e.getPlayer(), "SIGN", text.toString().trim())) {
+            // The whole side is replaced, so no fragment of the refused text survives.
+            e.line(0, CENSORED);
+            for (int i = 1; i < e.lines().size(); i++) e.line(i, net.kyori.adventure.text.Component.empty());
+            e.getPlayer().sendActionBar(net.kyori.adventure.text.Component.text("That sign text isn't allowed.", net.kyori.adventure.text.format.NamedTextColor.GRAY));
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onBook(org.bukkit.event.player.PlayerEditBookEvent e) {
+        var meta = e.getNewBookMeta();
+        StringBuilder text = new StringBuilder();
+        if (meta.title() != null) text.append(PLAIN.serialize(meta.title())).append('\n');
+        for (net.kyori.adventure.text.Component page : meta.pages()) text.append(PLAIN.serialize(page)).append('\n');
+        if (text.toString().isBlank()) return;
+        if (refusedText(e.getPlayer(), "BOOK", text.toString())) {
+            e.setCancelled(true);
+            e.getPlayer().sendActionBar(net.kyori.adventure.text.Component.text("That book text isn't allowed.", net.kyori.adventure.text.format.NamedTextColor.GRAY));
+        }
+    }
+
+    private static String customName(org.bukkit.inventory.ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return null;
+        var meta = item.getItemMeta();
+        if (!meta.hasDisplayName()) return null;
+        String name = PLAIN.serialize(meta.displayName());
+        return name.isBlank() ? null : name;
+    }
+
+    private static org.bukkit.inventory.ItemStack withoutName(org.bukkit.inventory.ItemStack item) {
+        org.bukkit.inventory.ItemStack copy = item.clone();
+        var meta = copy.getItemMeta();
+        if (meta != null) {
+            meta.displayName(null);
+            copy.setItemMeta(meta);
+        }
+        return copy;
+    }
+
+    /** True when this text is refused (see above); every checked text is logged with the decision. */
+    private boolean refusedText(Player p, String kind, String text) {
+        FilterPolicy policy = filterPolicy;
+        if (!policy.enabled()) return false;
+        UUID id = p.getUniqueId();
+        Violation v = inspectText(text, policy);
+        if (v == Violation.ADVERT && hasAsyncLinkBypass(id, currentPermissionSnapshot(id))) v = Violation.NONE;
+        ChatLog log = chatLog;
+        if (log != null) log.text(kind, p.getName(), id, text, v != Violation.NONE);
+        if (v != Violation.NONE) getLogger().info("Refused " + kind.toLowerCase(Locale.ROOT) + " text from " + p.getName() + ": " + text.replace('\n', ' '));
+        return v != Violation.NONE;
+    }
+
+    /** Every list at the strongest level; words of four or more letters also inside longer words. */
+    private Violation inspectText(String text, FilterPolicy policy) {
+        int slurMin = Math.min(TEXT_SUBSTRING_MIN, getConfig().getInt("slur-substring-min-length", 5));
+        if (ChatFilter.findWord(text, policy.slurWords(), policy.safeWords(), slurMin) != null) return Violation.SLUR;
+        if (ChatFilter.findWord(text, policy.lightWords(), policy.safeWords(), TEXT_SUBSTRING_MIN) != null
+            || ChatFilter.findWord(text, policy.blockedWords(), policy.safeWords(), TEXT_SUBSTRING_MIN) != null
+            || ChatFilter.findWord(text, policy.strongWords(), policy.safeWords(), TEXT_SUBSTRING_MIN) != null
+            || ChatFilter.findPhrase(text, policy.phrases()) != null) {
+            return Violation.BLOCKED;
+        }
+        for (Pattern pat : policy.advertPatterns()) if (pat.matcher(text).find()) return Violation.ADVERT;
+        return Violation.NONE;
+    }
+
     private static final java.util.Set<String> LOGGED_COMMANDS = java.util.Set.of(
         "msg", "tell", "w", "whisper", "dm", "pm", "r", "reply", "me", "teammsg", "tm", "say");
 
